@@ -3,39 +3,59 @@ name        = "qkc"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "Quantum Key Channel — per-link encrypted key transport for dkms_rust"
+description = "Quantum Key Channel — encrypted hop-to-hop relay with shared-quditto OTP"
+default-run = "qkc"
 
 [[bin]]
 name = "qkc"
 path = "src/main.rs"
 
+# Test client: simula un ORR (manda LOCAL_SEND, recibe LOCAL_DELIVER,
+# y mide throughput end-to-end). Útil mientras no exista el ORR real.
+[[bin]]
+name = "qkc-test-client"
+path = "src/bin/test_client.rs"
+
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-common = { workspace = true }
+# Modelos ETSI 014 (claves contra el quditto compartido del enlace).
+etsi = { path = "../etsi" }
+# Wire binario TCP compartido con ORR↔QKC.
+wire = { path = "../wire" }
 
-tokio              = { workspace = true }
-tokio-util         = { workspace = true }
-tokio-stream       = { workspace = true }
-futures            = { workspace = true }
-async-trait        = { workspace = true }
-bytes              = { workspace = true }
-tonic              = { workspace = true }
-prost              = { workspace = true }
+# Async runtime + HTTP admin server.
+tokio = { workspace = true }
+axum  = { workspace = true }
+tower = { workspace = true }
+hyper = { workspace = true }
+
+# Cliente HTTP al quditto (ETSI 014).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+
+# Wire helpers.
+bytes      = { workspace = true }
+rmp-serde  = { workspace = true }
+
+# Serialización / CLI / errores / logging.
 serde              = { workspace = true }
 serde_json         = { workspace = true }
-rmp-serde          = { workspace = true }
+toml               = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 tracing            = { workspace = true }
-prometheus         = { workspace = true }
-sha2               = { workspace = true }
-base64             = { workspace = true }
-rand               = { workspace = true }
-chrono             = { workspace = true }
-dashmap            = { workspace = true }
-parking_lot        = { workspace = true }
-arc-swap           = { workspace = true }
-uuid               = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Crypto + IDs.
+uuid   = { workspace = true }
+base64 = { workspace = true }
+
+# Concurrencia: ArcSwap para la forwarding table (lectura lock-free),
+# DashMap para tablas de conexiones y mapas por peer, crossbeam-queue
+# para colas lock-free de envío.
+arc-swap        = { workspace = true }
+dashmap         = { workspace = true }
+parking_lot     = { workspace = true }
+crossbeam-queue = { workspace = true }

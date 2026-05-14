@@ -1,0 +1,648 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["dkms", "loadtest"],
+  "templating": {
+    "list": [
+      {
+        "name": "test_id",
+        "label": "Test ID",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": {"query": "label_values(loadtest_info, test_id)", "refId": "TI"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {}
+      },
+      {
+        "name": "dkms_id",
+        "label": "DKMS",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": {"query": "label_values(dkms_http_requests_total, dkms_id)", "refId": "DI"},
+        "refresh": 2,
+        "sort": 3,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "sdn_route",
+        "label": "SDN route",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": {"query": "label_values(sdn_http_requests_total, route)", "refId": "SR"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "DKMS Load Test — $test_id",
+  "uid": "dkms-loadtest",
+  "version": 3,
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Resumen",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Fase",
+      "description": "Estado actual de la rampa.",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "loadtest_phase{test_id=\"$test_id\"}", "refId": "A"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {
+              "0": {"text": "idle"},
+              "1": {"text": "warmup"},
+              "2": {"text": "ramping"},
+              "3": {"text": "hold"},
+              "4": {"text": "drain"},
+              "5": {"text": "done"}
+            }}
+          ],
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "blue", "value": 0},
+            {"color": "orange", "value": 2},
+            {"color": "green", "value": 5}
+          ]}
+        }
+      },
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "value", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "SAEs activos",
+      "description": "SAEs sintéticos emitiendo tráfico ahora mismo.",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "loadtest_active_saes{test_id=\"$test_id\"}", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Target SAEs",
+      "description": "Objetivo actual de la rampa.",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "loadtest_target_saes{test_id=\"$test_id\"}", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "Cobertura del escalón",
+      "description": "active/target — valor < 1 indica SAEs sin provisionar en el escalón actual.",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "loadtest_active_saes{test_id=\"$test_id\"} / clamp_min(loadtest_target_saes{test_id=\"$test_id\"}, 1)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "red", "value": 0},
+        {"color": "orange", "value": 0.8},
+        {"color": "green", "value": 0.98}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Req/s total",
+      "description": "Rate de peticiones enc_keys enviadas por el runner en la última ventana.",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(rate(loadtest_requests_total{test_id=\"$test_id\"}[1m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Tasa de éxito",
+      "description": "Fracción de peticiones con status 200 en la última ventana.",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(loadtest_requests_total{test_id=\"$test_id\",result=\"ok\"}[1m])) / clamp_min(sum(rate(loadtest_requests_total{test_id=\"$test_id\"}[1m])), 1e-9)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "red", "value": 0},
+        {"color": "orange", "value": 0.8},
+        {"color": "green", "value": 0.95}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Provision fails",
+      "description": "SAEs cuyo alta mTLS/orchestator falló (acumulado).",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "loadtest_provision_failures_total{test_id=\"$test_id\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": 0},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Errores/s",
+      "description": "Rate de peticiones con cualquier reason distinto de ok.",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(rate(loadtest_errors_total{test_id=\"$test_id\"}[1m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": 0},
+        {"color": "orange", "value": 1},
+        {"color": "red", "value": 10}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Claves recibidas/pedidas",
+      "description": "Ratio de claves que efectivamente entregó el DKMS frente a las solicitadas.",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "rate(loadtest_keys_received_total{test_id=\"$test_id\"}[1m]) / clamp_min(rate(loadtest_keys_requested_total{test_id=\"$test_id\"}[1m]), 1e-9)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "red", "value": 0},
+        {"color": "orange", "value": 0.8},
+        {"color": "green", "value": 0.98}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "SDN p95 latencia",
+      "description": "Percentil 95 de tiempo de respuesta del SDN en todas sus rutas (ventana 1 min).",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(sdn_http_request_duration_seconds_bucket[1m])) by (le))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": 0},
+        {"color": "orange", "value": 0.5},
+        {"color": "red", "value": 2}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "DKMS drops/s (buffer lleno)",
+      "description": "Pérdida de material QKD por buffer saturado (tasa).",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(rate(dkms_buffer_dropped_full_total[1m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": 0},
+        {"color": "orange", "value": 0.1},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "SDN 5xx/s",
+      "description": "Tasa de respuestas 5xx del SDN — si está por encima de 0 el orquestador va a cascada.",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(rate(sdn_http_requests_total{status=~\"5..\"}[1m]))", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": 0},
+        {"color": "orange", "value": 0.1},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Rampa y tráfico del cliente",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Rampa: activos vs target",
+      "description": "Diferencia entre SAEs provisionados (active) y el objetivo del escalón (target). Un gap sostenido indica fallos de provisión.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "loadtest_active_saes{test_id=\"$test_id\"}", "legendFormat": "active", "refId": "A"},
+        {"expr": "loadtest_target_saes{test_id=\"$test_id\"}", "legendFormat": "target", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "stepAfter", "lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "active"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "target"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]}
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Throughput por HTTP status",
+      "description": "Desglose de peticiones enc_keys por código HTTP concreto (200, 429, 503, 504, 0=client error).",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (status_code) (rate(loadtest_requests_total{test_id=\"$test_id\"}[30s]))", "legendFormat": "{{status_code}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "fillOpacity": 20, "stacking": {"mode": "normal"}, "lineWidth": 1}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "200"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "0"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-red"}}]},
+          {"matcher": {"id": "byName", "options": "429"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+          {"matcher": {"id": "byName", "options": "503"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "504"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Errores por motivo (req/s, apilado)",
+      "description": "Clasificación semántica del error: token bucket, SAE no accesible, transport failed, client error, etc.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (reason) (rate(loadtest_errors_total{test_id=\"$test_id\"}[30s]))", "legendFormat": "{{reason}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 30, "stacking": {"mode": "normal"}, "lineWidth": 1}}}
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Provisionamiento (éxitos y fallos acumulados)",
+      "description": "Fallos de alta SAE acumulados vs SAEs activos. La curva roja creciente marca cuellos en el orquestador.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "loadtest_provision_failures_total{test_id=\"$test_id\"}", "legendFormat": "provision_failures", "refId": "A"},
+        {"expr": "loadtest_active_saes{test_id=\"$test_id\"}", "legendFormat": "active_saes", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "provision_failures"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+          {"matcher": {"id": "byName", "options": "active_saes"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]}
+        ]
+      }
+    },
+
+    {
+      "id": 102,
+      "type": "row",
+      "title": "Latencia",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 26},
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "heatmap",
+      "title": "Distribución de latencia (heatmap)",
+      "description": "Histograma temporal del tiempo de respuesta. Un ensanchamiento vertical marca cola larga (colas o saturación).",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (le) (increase(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\"}[30s]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "color": {"mode": "scheme", "scheme": "Turbo", "exponent": 0.5, "steps": 64},
+        "yAxis": {"unit": "s", "decimals": 2},
+        "legend": {"show": true},
+        "tooltip": {"show": true, "yHistogram": true},
+        "cellGap": 1
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Latencia p50 / p95 / p99 (éxitos)",
+      "description": "Percentiles calculados solo sobre respuestas 200. Saltos correlacionados con escalones revelan degradación por carga.",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[1m])) by (le))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[1m])) by (le))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[1m])) by (le))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8, "lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "p50"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "p95"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "p99"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Latencia éxito vs fallo (p50/p95 + media)",
+      "description": "Compara la distribución de latencias aceptadas y las que terminaron en error. Las líneas discontinuas son medias.",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[30s])) by (le))", "legendFormat": "p50 éxito", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[30s])) by (le))", "legendFormat": "p95 éxito", "refId": "B"},
+        {"expr": "histogram_quantile(0.50, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"error\"}[30s])) by (le))", "legendFormat": "p50 fallo", "refId": "C"},
+        {"expr": "histogram_quantile(0.95, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"error\"}[30s])) by (le))", "legendFormat": "p95 fallo", "refId": "D"},
+        {"expr": "sum(rate(loadtest_request_duration_seconds_sum{test_id=\"$test_id\",result=\"ok\"}[30s])) / clamp_min(sum(rate(loadtest_request_duration_seconds_count{test_id=\"$test_id\",result=\"ok\"}[30s])), 1e-9)", "legendFormat": "media éxito", "refId": "E"},
+        {"expr": "sum(rate(loadtest_request_duration_seconds_sum{test_id=\"$test_id\",result=\"error\"}[30s])) / clamp_min(sum(rate(loadtest_request_duration_seconds_count{test_id=\"$test_id\",result=\"error\"}[30s])), 1e-9)", "legendFormat": "media fallo", "refId": "F"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*éxito.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*fallo.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+          {"matcher": {"id": "byRegexp", "options": "media .*"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [8, 4]}}]}
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Latencia + rampa SAEs (correlación)",
+      "description": "Percentiles de latencia con el número de SAEs activos superpuesto (eje derecho) — ayuda a ver el punto en el que la rampa empieza a doler.",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[30s])) by (le))", "legendFormat": "p50 latencia", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[30s])) by (le))", "legendFormat": "p95 latencia", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(loadtest_request_duration_seconds_bucket{test_id=\"$test_id\",result=\"ok\"}[30s])) by (le))", "legendFormat": "p99 latencia", "refId": "C"},
+        {"expr": "loadtest_active_saes{test_id=\"$test_id\"}", "legendFormat": "SAEs activos", "refId": "D"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8, "lineWidth": 2}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "SAEs activos"},
+            "properties": [
+              {"id": "unit", "value": "short"},
+              {"id": "custom.axisPlacement", "value": "right"},
+              {"id": "custom.axisLabel", "value": "SAEs activos"},
+              {"id": "custom.drawStyle", "value": "line"},
+              {"id": "custom.lineInterpolation", "value": "stepAfter"},
+              {"id": "custom.lineWidth", "value": 2},
+              {"id": "custom.fillOpacity", "value": 10},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}
+            ]
+          },
+          {"matcher": {"id": "byName", "options": "p50 latencia"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "p95 latencia"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "p99 latencia"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+        ]
+      }
+    },
+
+    {
+      "id": 103,
+      "type": "row",
+      "title": "Backend DKMS (por pod)",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 45},
+      "panels": []
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "DKMS — req/s por status (todos los pods)",
+      "description": "Rate de peticiones HTTP servidas por los DKMS, desglosado por status. Permite ver en qué proporción sirven 200/429/503.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 46},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (status) (rate(dkms_http_requests_total{dkms_id=~\"$dkms_id\"}[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 20, "stacking": {"mode": "normal"}, "lineWidth": 1}}}
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "DKMS — req/s por pod (distribución)",
+      "description": "Muestra si la carga se reparte entre los DKMS o se concentra en pocos — señal típica de hashing sub-óptimo en el runner.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (dkms_id) (rate(dkms_http_requests_total{dkms_id=~\"$dkms_id\"}[1m]))", "legendFormat": "dkms {{dkms_id}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 1}}}
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "DKMS — enc_keys success rate por pod",
+      "description": "Fracción de enc_keys con result=ok por pod. Si un pod cae bajo 0.9 mientras el resto van bien, es un outlier.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 54},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (dkms_id) (rate(dkms_sae_enc_requests_total{dkms_id=~\"$dkms_id\",result=\"ok\"}[1m])) / clamp_min(sum by (dkms_id) (rate(dkms_sae_enc_requests_total{dkms_id=~\"$dkms_id\"}[1m])), 1e-9)", "legendFormat": "dkms {{dkms_id}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"drawStyle": "line", "fillOpacity": 3, "lineWidth": 1}}}
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "DKMS — p95 latencia enc_keys por pod",
+      "description": "p95 del tiempo de respuesta HTTP de cada DKMS. Revela pods lentos.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 54},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (dkms_id, le) (rate(dkms_http_request_duration_seconds_bucket{dkms_id=~\"$dkms_id\",route=~\".*enc_keys.*\"}[1m])))", "legendFormat": "dkms {{dkms_id}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 3, "lineWidth": 1}}}
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "DKMS — claves en buffer",
+      "description": "Nivel de cada buffer KME→peer. Un buffer tocando fondo de forma recurrente explica 429/503 por falta de material.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 62},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "dkms_buffer_keys{dkms_id=~\"$dkms_id\"}", "legendFormat": "{{dkms_id}}→{{peer_dkms_id}} {{buffer_role}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "DKMS — drops por buffer lleno (tasa)",
+      "description": "Pérdida de material QKD porque el buffer lógico se llenó y empuja en FIFO. Cualquier valor > 0 es pérdida.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 62},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (dkms_id, peer_dkms_id) (rate(dkms_buffer_dropped_full_total{dkms_id=~\"$dkms_id\"}[1m]))", "legendFormat": "{{dkms_id}}→{{peer_dkms_id}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 1}}}
+    },
+
+    {
+      "id": 104,
+      "type": "row",
+      "title": "SDN — topología y ruteo",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 70},
+      "panels": []
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "SDN — req/s por route",
+      "description": "Desglose del tráfico al SDN por ruta matcheada. /paths/QKC dominante = tormenta de búsquedas de ruta.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 71},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (route) (rate(sdn_http_requests_total{route=~\"$sdn_route\"}[1m]))", "legendFormat": "{{route}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 15, "stacking": {"mode": "normal"}, "lineWidth": 1}}}
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "SDN — p50/p95 latencia por route",
+      "description": "Percentiles de latencia por ruta. Si el SDN se atasca, este panel lo delata antes que ningún otro.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 71},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (route, le) (rate(sdn_http_request_duration_seconds_bucket{route=~\"$sdn_route\"}[1m])))", "legendFormat": "p50 {{route}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (route, le) (rate(sdn_http_request_duration_seconds_bucket{route=~\"$sdn_route\"}[1m])))", "legendFormat": "p95 {{route}}", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 3, "lineWidth": 1}}}
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "SDN — status codes (req/s)",
+      "description": "Qué código HTTP devuelve el SDN. 5xx aquí suele preceder al 503 del orquestador.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 79},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (status) (rate(sdn_http_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 20, "stacking": {"mode": "normal"}, "lineWidth": 1}}}
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "SDN — topología (DKMS / SAE / reservas)",
+      "description": "Totales en memoria: DKMS registrados, SAEs atados y reservas de flujo activas.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 79},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sdn_topology_dkms_total", "legendFormat": "dkms", "refId": "A"},
+        {"expr": "sdn_topology_sae_total", "legendFormat": "sae", "refId": "B"},
+        {"expr": "sdn_link_flow_reservations_total", "legendFormat": "reservas flujo", "refId": "C"},
+        {"expr": "sdn_link_state_entries_total", "legendFormat": "link states", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}}}
+    },
+
+    {
+      "id": 105,
+      "type": "row",
+      "title": "Diagnóstico (logs)",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 87},
+      "panels": []
+    },
+    {
+      "id": 60,
+      "type": "logs",
+      "title": "SDN — errores y trazas",
+      "description": "Stream de Loki filtrado por componente sdn y términos ERROR/Traceback/5xx.",
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 88},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [
+        {"expr": "{component=\"sdn\"} |~ `(ERROR|Traceback|HTTP/1\\.[01]\" 5[0-9]{2}|TimeoutError)`", "refId": "A"}
+      ],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"}
+    },
+    {
+      "id": 61,
+      "type": "logs",
+      "title": "DKMS — errores y trazas",
+      "description": "Stream de Loki filtrado por componente dkms y términos ERROR/Traceback/5xx. Útil para ver qué pod falla.",
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 88},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [
+        {"expr": "{component=\"dkms\"} |~ `(ERROR|Traceback|HTTP/1\\.[01]\" 5[0-9]{2}|token bucket|not accessible|round-robin)`", "refId": "A"}
+      ],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"}
+    },
+
+    {
+      "id": 106,
+      "type": "row",
+      "title": "Logs del runner",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 98},
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "logs",
+      "title": "Runner — todos los mensajes del test_id",
+      "description": "Stream de Loki filtrado por el test_id seleccionado.",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 99},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [
+        {"expr": "{namespace=~\".+\"} |= \"$test_id\"", "refId": "A"}
+      ],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"}
+    }
+  ]
+}

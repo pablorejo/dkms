@@ -14,13 +14,13 @@ service DkmsControl {
   rpc RegisterSae    (RegisterSaeRequest)   returns (RegisterSaeResponse);
 
   // Deregister a SAE.
-  rpc DeregisterSae  (DeregisterSaeRequest) returns (dkms.common.v1.Status);
+  rpc DeregisterSae  (DeregisterSaeRequest) returns (.dkms.common.v1.Status);
 
   // List SAEs known to this DKMS instance.
   rpc ListSaes       (ListSaesRequest)      returns (stream SaeInfo);
 
   // Force-drain in-flight requests (for graceful shutdown).
-  rpc Drain          (DrainRequest)         returns (dkms.common.v1.Status);
+  rpc Drain          (DrainRequest)         returns (.dkms.common.v1.Status);
 
   // Liveness/readiness for orchestrator (also exposed via /healthz HTTP).
   rpc Health         (HealthRequest)        returns (HealthResponse);
@@ -30,7 +30,7 @@ service DkmsControl {
 }
 
 message RegisterSaeRequest {
-  dkms.common.v1.SaeId sae_id     = 1;
+  .dkms.common.v1.SaeId sae_id     = 1;
   bytes   client_cert_der         = 2;   // optional: pin a client cert
   uint64  rate_keys_per_sec       = 3;
   uint64  burst_keys              = 4;
@@ -42,12 +42,12 @@ message RegisterSaeResponse {
   int64  expires_at_unix_ms = 2;
 }
 
-message DeregisterSaeRequest { dkms.common.v1.SaeId sae_id = 1; }
+message DeregisterSaeRequest { .dkms.common.v1.SaeId sae_id = 1; }
 
 message ListSaesRequest      { uint32 page_size = 1; }
 
 message SaeInfo {
-  dkms.common.v1.SaeId sae_id        = 1;
+  .dkms.common.v1.SaeId sae_id        = 1;
   uint64 keys_delivered              = 2;
   uint64 keys_buffered               = 3;
   uint64 rate_keys_per_sec           = 4;
@@ -68,8 +68,8 @@ message HealthResponse {
 }
 
 message BufferStateRequest {
-  dkms.common.v1.SaeId local_sae  = 1;
-  dkms.common.v1.SaeId remote_sae = 2;
+  .dkms.common.v1.SaeId local_sae  = 1;
+  .dkms.common.v1.SaeId remote_sae = 2;
 }
 
 message BufferState {

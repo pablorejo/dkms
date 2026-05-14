@@ -1,0 +1,11 @@
+qkc_id       = 1
+peer_listen  = "127.0.0.1:7001"
+local_listen = "127.0.0.1:7101"
+admin_http   = "127.0.0.1:7201"
+
+# Enlace 1↔2: quditto-A en :8081.
+[[links]]
+neighbor_id        = 2
+neighbor_peer_addr = "127.0.0.1:7002"
+quditto_url        = "http://127.0.0.1:8081"
+key_size_bits      = 1024

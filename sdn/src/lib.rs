@@ -12,6 +12,7 @@ pub mod grpc_server;
 pub mod http_api;
 pub mod link_admission;
 pub mod mcf;
+pub mod priority;
 pub mod push;
 pub mod routing;
 pub mod service;

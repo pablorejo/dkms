@@ -1,0 +1,11 @@
+# HOJA rama 1. Único vecino: INT-1.
+qkc_id       = 11
+peer_listen  = "127.0.0.1:7011"
+local_listen = "127.0.0.1:7111"
+admin_http   = "127.0.0.1:7211"
+
+[[links]]
+neighbor_id        = 1
+neighbor_peer_addr = "127.0.0.1:7001"
+quditto_url        = "http://127.0.0.1:8012"   # qd-1b
+key_size_bits      = 1024

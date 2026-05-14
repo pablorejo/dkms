@@ -1,29 +1,33 @@
-//! DKMS = Distributed Key Management Service.
-//!
-//! The customer-facing module: speaks ETSI QKD 014 / 020 to SAEs over
-//! HTTP(S) and orchestrates calls to ORR (path setup), QKC (key
-//! reservations) and SDN (path computation) on the back-end.
-//!
-//! Modules:
-//! - [`http_server`]      — axum HTTP server for SAEs (ETSI 014 / 020
-//!   handlers will plug in from the `etsi` crate when DKMS is rewritten).
-//! - [`buffer`]           — buffered key store per (sae_local, sae_remote).
-//! - [`scheduler`]        — round-robin draining of remote deliveries.
-//! - [`token_bucket`]     — per-SAE rate limit.
-//! - [`orr_client`], [`sdn_client`], [`qkc_client`] — typed gRPC clients.
-//! - [`qrng_adapter`]     — pull randomness from a local QRNG/quditto.
-//! - [`agent_controller`] — orchestrator-facing gRPC.
+// El error principal (`DkmsError`) lleva variantes que envuelven errores
+// gordos de `common`/`tonic` (`Transport`, `Status`...). Cambiar a
+// `Box<inner>` rompería la ergonomía de `?` con `#[from]`; en este crate
+// preferimos pagar 176 B en el stack del `Result` que añadir indirección
+// en toda la API.
+#![allow(clippy::result_large_err)]
 
-pub mod agent_controller;
-pub mod buffer;
+//! DKMS — Distributed Key Management Service.
+//!
+//! Sirve ETSI GS QKD 014 al sur (SAEs vía mTLS, [`etsi_http::v014`]) y
+//! ETSI GS QKD 020 entre DKMSs vecinos (HTTP/2 + mTLS,
+//! [`etsi_http::v020`]) para distribuir multicast de claves de sesión.
+//! Habla gRPC con SDN y QKC ([`southbound`]).
+//!
+//! Decisiones de diseño respecto al DKMS Python original:
+//!
+//! * Sin ORR en el plano DKMS. ORR queda para QKC.
+//! * Buffers de claves de transporte sólo en memoria, zeroizados al
+//!   liberar.  No hay persistencia; al reiniciar se regeneran desde QKC.
+//! * Política de fallo "todo-o-nada" en el `enc_keys` multicast: si un
+//!   destino falla, se reembolsan los tokens del SAE master.
+
+pub mod admission;
 pub mod config;
 pub mod error;
+pub mod etsi_http;
 pub mod grpc_server;
-pub mod http_server;
-pub mod orr_client;
-pub mod qkc_client;
-pub mod qrng_adapter;
-pub mod scheduler;
-pub mod sdn_client;
+pub mod peer_client;
+pub mod sae_binding;
 pub mod service;
+pub mod southbound;
+pub mod state;
 pub mod token_bucket;

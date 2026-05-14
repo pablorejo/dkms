@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dkms-web-ingress
+  namespace: __WEB_NAMESPACE__
+spec:
+  ingressClassName: __WEB_INGRESS_CLASS__
+  rules:
+  - host: __WEB_INGRESS_HOST__
+    http:
+      paths:
+      - path: __WEB_INGRESS_PATH__
+        pathType: Prefix
+        backend:
+          service:
+            name: dkms-web
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dkms-web-root-assets-ingress
+  namespace: __WEB_NAMESPACE__
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /web/$1
+spec:
+  ingressClassName: __WEB_INGRESS_CLASS__
+  rules:
+  - host: __WEB_INGRESS_HOST__
+    http:
+      paths:
+      - path: '/(favicon\.ico|icon\.ico|icon\.png)'
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: dkms-web
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dkms-web-root-redirect-ingress
+  namespace: __WEB_NAMESPACE__
+  annotations:
+    nginx.ingress.kubernetes.io/permanent-redirect: https://__WEB_INGRESS_HOST__/web/login
+spec:
+  ingressClassName: __WEB_INGRESS_CLASS__
+  rules:
+  - host: __WEB_INGRESS_HOST__
+    http:
+      paths:
+      - path: /
+        pathType: Exact
+        backend:
+          service:
+            name: dkms-web
+            port:
+              number: 80

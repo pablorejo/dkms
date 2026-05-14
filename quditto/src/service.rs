@@ -67,6 +67,7 @@ impl QudittoService {
 
         // RNG userspace inicializado una vez. No syscalls en el hot path.
         let mut rng = build_rng();
+        let n_bytes = (self.cfg().key_size_bits / 8) as usize;
 
         let mut ticker = tokio::time::interval(tick_dur);
         // Skip el primer tick instantáneo de `interval` para no minar
@@ -76,7 +77,7 @@ impl QudittoService {
         loop {
             ticker.tick().await;
             for _ in 0..per_tick {
-                let pushed = self.link.push(Key::mint(&mut rng));
+                let pushed = self.link.push(Key::mint(&mut rng, n_bytes));
                 if !pushed {
                     // Buffer lleno — el resto del tick va a drop también.
                     break;

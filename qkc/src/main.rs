@@ -1,65 +1,70 @@
 //! QKC binary entry point.
 //!
-//! Loads config, sets up tracing + metrics, and spawns:
-//!   1. The gRPC control-plane server (`qkc::grpc_server`).
-//!   2. The binary-TCP hot-path server (`qkc::socket_server`).
-//!   3. The KME background tasks (key replenishment, token bucket refill).
+//! Tres listeners + el `PeerOut` (pool de envío TCP).
 //!
-//! Each task runs to the first error or shutdown signal.
+//! ```bash
+//!   qkc --config qkc.toml
+//! ```
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use common::{logging, metrics::Metrics};
-use qkc::{config::QkcConfig, service::QkcService};
+use qkc::{
+    config::QkcConfig,
+    http_admin, service::QkcService,
+    transport::{local, peer_server},
+};
 use tokio::signal;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "qkc", version, about = "Quantum Key Channel module")]
+#[command(name = "qkc", version, about = "Quantum Key Channel — hop-by-hop OTP relay")]
 struct Cli {
-    /// Override the config directory (otherwise reads `CONFIG_DIR` env, then `./config`).
-    #[arg(long, env = "CONFIG_DIR")]
-    config_dir: Option<String>,
+    /// Ruta al fichero TOML de configuración.
+    #[arg(long)]
+    config: PathBuf,
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
-    logging::init("qkc");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
-    let _cli = Cli::parse();
-    let cfg: QkcConfig = common::config::load_config("qkc")?;
+    let cli = Cli::parse();
+    let cfg = QkcConfig::load(&cli.config)?;
     info!(?cfg, "qkc starting");
 
-    let metrics = Metrics::new("qkc");
-    metrics.serve(cfg.metrics_addr.clone()).await?;
+    let svc = QkcService::new(cfg.clone())?;
+    // Workers de cada KeyStore (refill ENC en background, dispatcher
+    // DEC al recibir FRAME_KEY_IDS_NOTIFY) + logger periódico.
+    svc.bootstrap_keystores();
 
-    let service = QkcService::new(cfg.clone(), metrics.clone()).await?;
-
-    let grpc = tokio::spawn({
-        let svc = service.clone();
-        async move { qkc::grpc_server::serve(svc, &cfg.grpc_addr).await }
+    let peer = tokio::spawn({
+        let svc = svc.clone();
+        let addr = cfg.peer_listen.clone();
+        async move { peer_server::serve(svc, &addr).await }
     });
-
-    let tcp = tokio::spawn({
-        let svc = service.clone();
-        let bind = cfg.tcp_bind.clone();
-        async move { qkc::socket_server::serve(svc, bind).await }
+    let local_t = tokio::spawn({
+        let svc = svc.clone();
+        let addr = cfg.local_listen.clone();
+        async move { local::serve(svc, &addr).await }
     });
-
-    let bg = tokio::spawn({
-        let svc = service.clone();
-        async move { svc.run_background_tasks().await }
+    let admin = tokio::spawn({
+        let svc = svc.clone();
+        let addr = cfg.admin_http.clone();
+        async move { http_admin::serve(svc, &addr).await }
     });
 
     tokio::select! {
-        r = grpc => { r??; }
-        r = tcp  => { r??; }
-        r = bg   => { r??; }
-        _ = signal::ctrl_c() => {
-            info!("ctrl-c received, shutting down");
-        }
+        r = peer    => r??,
+        r = local_t => r??,
+        r = admin   => r??,
+        _ = signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }
-
     Ok(())
 }

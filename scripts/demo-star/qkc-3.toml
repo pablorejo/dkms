@@ -1,0 +1,17 @@
+# Intermedio rama 3. Vecinos: HUB (0) y HOJA-33.
+qkc_id       = 3
+peer_listen  = "127.0.0.1:7003"
+local_listen = "127.0.0.1:7103"
+admin_http   = "127.0.0.1:7203"
+
+[[links]]
+neighbor_id        = 0
+neighbor_peer_addr = "127.0.0.1:7000"
+quditto_url        = "http://127.0.0.1:8031"   # qd-3a
+key_size_bits      = 1024
+
+[[links]]
+neighbor_id        = 33
+neighbor_peer_addr = "127.0.0.1:7033"
+quditto_url        = "http://127.0.0.1:8032"   # qd-3b
+key_size_bits      = 1024

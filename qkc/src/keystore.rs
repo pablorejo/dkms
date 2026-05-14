@@ -1,0 +1,541 @@
+//! Buffers de claves por enlace.
+//!
+//! Cada enlace QKC↔QKC tiene un `KeyStore` con:
+//!
+//! * **Buffer ENC** — claves recién pedidas vía `enc_keys` al quditto
+//!   compartido. Listo para cifrar mensajes salientes. Cola lock-free.
+//! * **Buffer DEC** — claves esperadas que el peer va a usar para
+//!   mandarnos cosas. El peer nos avisó con `FRAME_KEY_IDS_NOTIFY` y
+//!   nosotros las pedimos al quditto vía `dec_keys`. Map `id → material`.
+//! * **Worker ENC** — background task que rellena el ENC cuando baja
+//!   de `REFILL_THRESHOLD`. Tras meter las claves en el buffer manda
+//!   un `FRAME_KEY_IDS_NOTIFY` al peer.
+//! * **Worker DEC** — background task que reacciona a `notify_remote_enc`,
+//!   pide a `dec_keys` y rellena el DEC.
+//!
+//! El hot path del relay/encrypt **nunca** hace HTTP: solo `take_enc()`
+//! y `lookup_dec()` (memoria). Si por race del warm-up no encuentra una
+//! clave en DEC, el caller puede caer a un fallback HTTP on-demand.
+
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+
+use crossbeam_queue::ArrayQueue;
+use dashmap::DashMap;
+use parking_lot::Mutex;
+use tokio::sync::Notify;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+use wire::{encode_notify_payload, Frame, FRAME_KEY_IDS_NOTIFY};
+
+use crate::{
+    kme::{KmeClient, OtpKey},
+    transport::peer_client::PeerOut,
+};
+
+/// Cantidad objetivo de claves en el buffer ENC.
+pub const BUFFER_TARGET: usize = 2048;
+/// Umbral bajo el cual el worker dispara un refill.
+pub const REFILL_THRESHOLD: usize = 1024;
+/// Lote por refill cuando el buffer baja del threshold.
+pub const REFILL_BATCH: u32 = 1024;
+
+/// Tope de IDs pendientes de `dec_keys` antes de aplastar. Si el peer
+/// notifica más rápido de lo que podemos absorber, el remanente queda
+/// en la cola interna.
+const DEC_BATCH_MAX: usize = 4096;
+
+pub struct KeyStore {
+    /// Buffer FIFO de claves listas para cifrar (mías a cuenta del peer).
+    enc: ArrayQueue<OtpKey>,
+    /// Mapa de claves esperadas para descifrar (las del peer hacia mí).
+    dec: DashMap<Uuid, Vec<u8>>,
+
+    /// Cliente HTTP al quditto compartido.
+    kme: Arc<KmeClient>,
+
+    /// Para mandar `FRAME_KEY_IDS_NOTIFY` al peer cuando rellenamos
+    /// nuestro buffer ENC.
+    peer_out: Arc<PeerOut>,
+    /// ID del peer (sender_id de nuestros frames hacia él) y dir TCP.
+    peer_id: u32,
+    peer_addr: String,
+    /// Nuestro propio ID (sender_id del NOTIFY).
+    my_id: u32,
+    /// `key_size_bits` que vamos a anunciar en el frame de NOTIFY (no
+    /// es funcional para el procesado del peer, pero lo dejamos
+    /// coherente con el resto del wire).
+    key_size_bits: u16,
+
+    /// Signal: "buffer ENC bajo, hay que refill".
+    enc_low: Arc<Notify>,
+    /// Cola de IDs pendientes de pedir al quditto vía `dec_keys`.
+    dec_pending: Mutex<Vec<Uuid>>,
+    /// Signal: "hay IDs pendientes en `dec_pending`".
+    dec_request: Arc<Notify>,
+
+    /// Signal: "el worker DEC acaba de insertar claves" — `notify_waiters`
+    /// despierta a TODOS los frames que estén esperando una clave que
+    /// todavía no llegó al `DashMap`. Sustituye al antiguo fallback HTTP,
+    /// que era inviable porque el quditto ya entregó la clave al worker
+    /// y un `dec_keys` posterior devuelve 404.
+    dec_inserted: Arc<Notify>,
+    /// Contador monotónico de inserts DEC. El relay lo lee antes de
+    /// crear el `Notified` future para detectar un insert que ocurriese
+    /// entre la `lookup_dec` que falló y la inscripción como waiter.
+    dec_inserted_seq: AtomicU64,
+
+    /// Análogo a `dec_inserted` pero para ENC. Permite que el hot path
+    /// se backpressuree contra el worker en vez de spawnear miles de
+    /// `enc_keys` HTTP paralelos cuando el buffer se vacía.
+    enc_inserted: Arc<Notify>,
+    enc_inserted_seq: AtomicU64,
+
+    // Stats (lecturas en hot path, escrituras desde workers).
+    n_enc_taken: AtomicU64,
+    n_dec_lookups: AtomicU64,
+    n_dec_misses: AtomicU64,
+    n_refills_enc: AtomicU64,
+    n_refills_dec: AtomicU64,
+    n_wait_enc_called: AtomicU64,
+    n_wait_enc_succeeded: AtomicU64,
+    n_wait_enc_timeouts: AtomicU64,
+    n_wait_dec_called: AtomicU64,
+    n_wait_dec_succeeded: AtomicU64,
+    n_wait_dec_timeouts: AtomicU64,
+}
+
+impl KeyStore {
+    pub fn new(
+        kme: Arc<KmeClient>,
+        peer_out: Arc<PeerOut>,
+        peer_id: u32,
+        peer_addr: String,
+        my_id: u32,
+        key_size_bits: u32,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            enc: ArrayQueue::new(BUFFER_TARGET * 2),
+            dec: DashMap::with_capacity(BUFFER_TARGET * 2),
+            kme,
+            peer_out,
+            peer_id,
+            peer_addr,
+            my_id,
+            key_size_bits: key_size_bits as u16,
+            enc_low: Arc::new(Notify::new()),
+            dec_pending: Mutex::new(Vec::with_capacity(DEC_BATCH_MAX)),
+            dec_request: Arc::new(Notify::new()),
+            dec_inserted: Arc::new(Notify::new()),
+            dec_inserted_seq: AtomicU64::new(0),
+            enc_inserted: Arc::new(Notify::new()),
+            enc_inserted_seq: AtomicU64::new(0),
+            n_enc_taken: AtomicU64::new(0),
+            n_dec_lookups: AtomicU64::new(0),
+            n_dec_misses: AtomicU64::new(0),
+            n_refills_enc: AtomicU64::new(0),
+            n_refills_dec: AtomicU64::new(0),
+            n_wait_enc_called: AtomicU64::new(0),
+            n_wait_enc_succeeded: AtomicU64::new(0),
+            n_wait_enc_timeouts: AtomicU64::new(0),
+            n_wait_dec_called: AtomicU64::new(0),
+            n_wait_dec_succeeded: AtomicU64::new(0),
+            n_wait_dec_timeouts: AtomicU64::new(0),
+        })
+    }
+
+    /// Lanza los workers de background. Llamar UNA vez por keystore al
+    /// boot. Dispara también un prefetch inicial.
+    pub fn spawn_workers(self: &Arc<Self>) {
+        // ENC worker.
+        let s = self.clone();
+        tokio::spawn(async move { s.enc_refill_loop().await });
+        // DEC worker.
+        let s = self.clone();
+        tokio::spawn(async move { s.dec_refill_loop().await });
+        // Prefetch inicial.
+        self.enc_low.notify_one();
+    }
+
+    // ─── Hot path: lo llaman los handlers de frames ────────────────
+
+    /// Saca UNA clave del buffer ENC. `None` si está vacío
+    /// (caller decide: esperar, fallback HTTP, o error).
+    #[inline]
+    pub fn take_enc(&self) -> Option<OtpKey> {
+        let k = self.enc.pop();
+        if k.is_some() {
+            self.n_enc_taken.fetch_add(1, Ordering::Relaxed);
+            // Si bajamos del threshold, signal al worker.
+            if self.enc.len() < REFILL_THRESHOLD {
+                self.enc_low.notify_one();
+            }
+        }
+        k
+    }
+
+    /// Saca N claves del buffer ENC. Si no hay suficientes, devuelve
+    /// las que pueda (el caller llama después a [`wait_enc_batch`] para
+    /// esperar al worker).
+    pub fn take_enc_batch(&self, n: usize) -> Vec<OtpKey> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.enc.pop() {
+                Some(k) => out.push(k),
+                None => break,
+            }
+        }
+        if !out.is_empty() {
+            self.n_enc_taken.fetch_add(out.len() as u64, Ordering::Relaxed);
+        }
+        // Avisa al worker SIEMPRE que el buffer esté bajo, incluso si
+        // no logramos sacar nada (caller con buffer vacío).
+        if self.enc.len() < REFILL_THRESHOLD {
+            self.enc_low.notify_one();
+        }
+        out
+    }
+
+    /// Como `take_enc_batch` pero **espera** al worker si el buffer no
+    /// puede servir todas las claves. Devuelve `Ok` con exactamente `n`
+    /// claves o un `KeyWaitTimeout` si el deadline expira primero.
+    ///
+    /// Sustituye al antiguo fallback HTTP `enc_keys`, que duplicaba
+    /// peticiones a quditto bajo carga.
+    pub async fn wait_enc_batch(
+        &self,
+        n: usize,
+        timeout: Duration,
+    ) -> Result<Vec<OtpKey>, KeyWaitTimeout> {
+        self.n_wait_enc_called.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + timeout;
+        let mut out = self.take_enc_batch(n);
+        while out.len() < n {
+            let need = n - out.len();
+            let seq_before = self.enc_inserted_seq.load(Ordering::SeqCst);
+
+            // Re-try la cola por si entró algo entre el último pop y aquí.
+            let extra = self.take_enc_batch(need);
+            if !extra.is_empty() {
+                out.extend(extra);
+                if out.len() == n {
+                    break;
+                }
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                self.n_wait_enc_timeouts.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    peer = self.peer_id,
+                    missing = n - out.len(),
+                    timeout_ms = timeout.as_millis() as u64,
+                    enc_len = self.enc.len(),
+                    "keystore.wait_enc_batch.timeout"
+                );
+                return Err(KeyWaitTimeout {
+                    missing: n - out.len(),
+                });
+            }
+            let remaining = deadline - now;
+
+            let notified = self.enc_inserted.notified();
+            tokio::pin!(notified);
+            // `enable` inscribe el future en la lista de waiters ANTES
+            // de la siguiente carga del seq → así no se nos escapa un
+            // `notify_waiters` ocurrido justo en este instante.
+            notified.as_mut().enable();
+
+            // Si entre el `seq_before` y el `enable` hubo un insert, ya
+            // no necesitamos esperar — re-loop a probar la cola.
+            if self.enc_inserted_seq.load(Ordering::SeqCst) != seq_before {
+                continue;
+            }
+
+            // Asegúrate de que el worker esté despierto: si nadie le
+            // ha hecho `notify_one` y el buffer está bajo, despiértalo.
+            self.enc_low.notify_one();
+
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(remaining) => {
+                    self.n_wait_enc_timeouts.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        peer = self.peer_id,
+                        missing = n - out.len(),
+                        timeout_ms = timeout.as_millis() as u64,
+                        enc_len = self.enc.len(),
+                        "keystore.wait_enc_batch.timeout"
+                    );
+                    return Err(KeyWaitTimeout {
+                        missing: n - out.len(),
+                    });
+                }
+            }
+        }
+        self.n_wait_enc_succeeded.fetch_add(1, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// Busca y CONSUME la clave por `key_id` en el buffer DEC.
+    /// `None` si no la tiene → caller llama a [`wait_dec`] para esperar
+    /// al worker.
+    #[inline]
+    pub fn lookup_dec(&self, id: &Uuid) -> Option<Vec<u8>> {
+        self.n_dec_lookups.fetch_add(1, Ordering::Relaxed);
+        match self.dec.remove(id) {
+            Some((_, v)) => Some(v),
+            None => {
+                self.n_dec_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Como `lookup_dec` pero **espera** al `dec_refill_loop` si la
+    /// clave todavía no está en el `DashMap`. El antiguo fallback HTTP
+    /// `dec_keys` era inviable porque el quditto ya entregó la clave
+    /// al worker (responde 404). Devolvemos `Err` si el deadline expira.
+    pub async fn wait_dec(
+        &self,
+        id: &Uuid,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, KeyWaitTimeout> {
+        self.n_wait_dec_called.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let seq_before = self.dec_inserted_seq.load(Ordering::SeqCst);
+            if let Some(v) = self.lookup_dec(id) {
+                self.n_wait_dec_succeeded.fetch_add(1, Ordering::Relaxed);
+                return Ok(v);
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                self.n_wait_dec_timeouts.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    peer = self.peer_id,
+                    id = %id,
+                    timeout_ms = timeout.as_millis() as u64,
+                    dec_len = self.dec.len(),
+                    "keystore.wait_dec.timeout"
+                );
+                return Err(KeyWaitTimeout { missing: 1 });
+            }
+            let remaining = deadline - now;
+
+            let notified = self.dec_inserted.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if self.dec_inserted_seq.load(Ordering::SeqCst) != seq_before {
+                continue;
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(remaining) => {
+                    self.n_wait_dec_timeouts.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        peer = self.peer_id,
+                        id = %id,
+                        timeout_ms = timeout.as_millis() as u64,
+                        dec_len = self.dec.len(),
+                        "keystore.wait_dec.timeout"
+                    );
+                    return Err(KeyWaitTimeout { missing: 1 });
+                }
+            }
+        }
+    }
+
+    // ─── Llamado por peer_server al recibir FRAME_KEY_IDS_NOTIFY ──
+
+    /// El peer acaba de pedir estos IDs a su buffer enc. Nosotros los
+    /// añadimos a la cola de `dec_pending` y notificamos al worker
+    /// para que haga el `dec_keys` al quditto.
+    pub fn notify_remote_enc(&self, ids: Vec<Uuid>) {
+        let mut g = self.dec_pending.lock();
+        g.extend(ids);
+        drop(g);
+        self.dec_request.notify_one();
+    }
+
+    // ─── Workers de background ─────────────────────────────────────
+
+    async fn enc_refill_loop(self: Arc<Self>) {
+        loop {
+            self.enc_low.notified().await;
+            // Refill mientras el buffer esté bajo. Una vez arriba,
+            // volvemos a esperar el siguiente notify.
+            while self.enc.len() < REFILL_THRESHOLD {
+                let space = self.enc.capacity() - self.enc.len();
+                let batch = (space as u32).min(REFILL_BATCH).max(1);
+                match self.kme.enc_keys(batch).await {
+                    Ok(keys) => {
+                        self.n_refills_enc.fetch_add(1, Ordering::Relaxed);
+                        let mut ids_raw = Vec::with_capacity(keys.len());
+                        for k in keys {
+                            ids_raw.push(*k.key_id.as_bytes());
+                            // Si la cola está llena (no debería),
+                            // dropeamos en silencio — caso raro.
+                            let _ = self.enc.push(k);
+                        }
+                        // Despierta a los frames que estaban en
+                        // `wait_enc_batch` esperando este refill.
+                        self.enc_inserted_seq.fetch_add(1, Ordering::SeqCst);
+                        self.enc_inserted.notify_waiters();
+                        // NOTIFY al peer.
+                        self.send_notify(&ids_raw);
+                        debug!(
+                            peer = self.peer_id,
+                            batch = batch,
+                            enc_len = self.enc.len(),
+                            "keystore.enc_refill"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(peer = self.peer_id, error = %e, "keystore.enc_refill failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn dec_refill_loop(self: Arc<Self>) {
+        loop {
+            self.dec_request.notified().await;
+            loop {
+                let ids = {
+                    let mut g = self.dec_pending.lock();
+                    if g.is_empty() {
+                        break;
+                    }
+                    // Tope por batch para no enviar HTTPs gigantes.
+                    let take = g.len().min(DEC_BATCH_MAX);
+                    g.drain(..take).collect::<Vec<_>>()
+                };
+                match self.kme.dec_keys(&ids).await {
+                    Ok(keys) => {
+                        self.n_refills_dec.fetch_add(1, Ordering::Relaxed);
+                        let n = keys.len();
+                        for k in keys {
+                            self.dec.insert(k.key_id, k.material);
+                        }
+                        // Despierta a `wait_dec` para todos los frames
+                        // que estuviesen esperando estas claves.
+                        self.dec_inserted_seq.fetch_add(1, Ordering::SeqCst);
+                        self.dec_inserted.notify_waiters();
+                        debug!(
+                            peer = self.peer_id,
+                            received = n,
+                            dec_len = self.dec.len(),
+                            "keystore.dec_refill"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            peer = self.peer_id,
+                            ids = ids.len(),
+                            error = %e,
+                            "keystore.dec_refill failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn send_notify(&self, ids_raw: &[[u8; 16]]) {
+        let payload = encode_notify_payload(ids_raw);
+        let mut frame = Frame::empty(FRAME_KEY_IDS_NOTIFY);
+        frame.sender_id = self.my_id;
+        frame.receiver_id = self.peer_id;
+        frame.dest_final = self.peer_id;
+        frame.key_size_bits = self.key_size_bits;
+        frame.payload = payload;
+        let ok = self.peer_out.send(self.peer_id, &self.peer_addr, frame);
+        if !ok {
+            warn!(peer = self.peer_id, "keystore.send_notify queue full");
+        }
+    }
+
+    /// Diagnóstico — snapshot de niveles.
+    pub fn levels(&self) -> KeyStoreLevels {
+        KeyStoreLevels {
+            enc_buffered: self.enc.len(),
+            dec_buffered: self.dec.len(),
+            enc_taken: self.n_enc_taken.load(Ordering::Relaxed),
+            dec_lookups: self.n_dec_lookups.load(Ordering::Relaxed),
+            dec_misses: self.n_dec_misses.load(Ordering::Relaxed),
+            refills_enc: self.n_refills_enc.load(Ordering::Relaxed),
+            refills_dec: self.n_refills_dec.load(Ordering::Relaxed),
+            wait_enc_called: self.n_wait_enc_called.load(Ordering::Relaxed),
+            wait_enc_succeeded: self.n_wait_enc_succeeded.load(Ordering::Relaxed),
+            wait_enc_timeouts: self.n_wait_enc_timeouts.load(Ordering::Relaxed),
+            wait_dec_called: self.n_wait_dec_called.load(Ordering::Relaxed),
+            wait_dec_succeeded: self.n_wait_dec_succeeded.load(Ordering::Relaxed),
+            wait_dec_timeouts: self.n_wait_dec_timeouts.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Devuelto por `wait_dec` / `wait_enc_batch` cuando el deadline
+/// expira antes de que el worker termine de servir las claves.
+/// El relay lo convierte en `QkcError::KeyWaitTimeout`.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyWaitTimeout {
+    pub missing: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyStoreLevels {
+    pub enc_buffered: usize,
+    pub dec_buffered: usize,
+    pub enc_taken: u64,
+    pub dec_lookups: u64,
+    pub dec_misses: u64,
+    pub refills_enc: u64,
+    pub refills_dec: u64,
+    pub wait_enc_called: u64,
+    pub wait_enc_succeeded: u64,
+    pub wait_enc_timeouts: u64,
+    pub wait_dec_called: u64,
+    pub wait_dec_succeeded: u64,
+    pub wait_dec_timeouts: u64,
+}
+
+/// Logger periódico de niveles (útil para diagnóstico durante stress).
+pub fn spawn_level_logger(stores: Vec<(u32, Arc<KeyStore>)>, every: Duration) {
+    if stores.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(every);
+        ticker.tick().await; // skip inicial
+        loop {
+            ticker.tick().await;
+            for (peer, ks) in &stores {
+                let l = ks.levels();
+                info!(
+                    peer,
+                    enc = l.enc_buffered,
+                    dec = l.dec_buffered,
+                    taken = l.enc_taken,
+                    misses = l.dec_misses,
+                    wenc = l.wait_enc_called,
+                    wenc_to = l.wait_enc_timeouts,
+                    wdec = l.wait_dec_called,
+                    wdec_to = l.wait_dec_timeouts,
+                    "keystore.levels"
+                );
+            }
+        }
+    });
+}

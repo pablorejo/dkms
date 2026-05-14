@@ -1,0 +1,29 @@
+# HUB central. Cuatro vecinos directos: los 4 intermedios.
+qkc_id       = 0
+peer_listen  = "127.0.0.1:7000"
+local_listen = "127.0.0.1:7100"
+admin_http   = "127.0.0.1:7200"
+
+[[links]]
+neighbor_id        = 1
+neighbor_peer_addr = "127.0.0.1:7001"
+quditto_url        = "http://127.0.0.1:8011"   # qd-1a (HUB ↔ INT-1)
+key_size_bits      = 1024
+
+[[links]]
+neighbor_id        = 2
+neighbor_peer_addr = "127.0.0.1:7002"
+quditto_url        = "http://127.0.0.1:8021"   # qd-2a
+key_size_bits      = 1024
+
+[[links]]
+neighbor_id        = 3
+neighbor_peer_addr = "127.0.0.1:7003"
+quditto_url        = "http://127.0.0.1:8031"   # qd-3a
+key_size_bits      = 1024
+
+[[links]]
+neighbor_id        = 4
+neighbor_peer_addr = "127.0.0.1:7004"
+quditto_url        = "http://127.0.0.1:8041"   # qd-4a
+key_size_bits      = 1024

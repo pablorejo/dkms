@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "common",
     "etsi",
+    "wire",
     "qkc",
     "orr",
     "sdn",
@@ -81,11 +82,15 @@ webpki-roots = "0.26"
 sha2   = "0.10"
 hkdf   = "0.12"
 chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
 ring   = "0.17"
 base64 = "0.22"
 hex    = "0.4"
 rand   = { version = "0.8", features = ["small_rng"] }
 rand_chacha = "0.3"
+
+# Post-quantum (NIST FIPS 203 — pure Rust, no liboqs)
+ml-kem = "0.2"
 
 # Lock-free queues
 crossbeam-queue = "0.3"

@@ -1,0 +1,11 @@
+# HOJA rama 4. Único vecino: INT-4.
+qkc_id       = 44
+peer_listen  = "127.0.0.1:7044"
+local_listen = "127.0.0.1:7144"
+admin_http   = "127.0.0.1:7244"
+
+[[links]]
+neighbor_id        = 4
+neighbor_peer_addr = "127.0.0.1:7004"
+quditto_url        = "http://127.0.0.1:8042"   # qd-4b
+key_size_bits      = 1024

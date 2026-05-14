@@ -11,6 +11,21 @@ pub enum OrrError {
     #[error("relay failed: {0}")]
     Relay(String),
 
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
+
+    #[error("wire: {0}")]
+    Wire(#[from] wire::WireError),
+
+    #[error("aead: {0}")]
+    Aead(#[from] common::crypto::aead::AeadError),
+
+    #[error("base64 decode: {0}")]
+    Base64(#[from] base64::DecodeError),
+
     #[error(transparent)]
     Common(#[from] common::error::CommonError),
 

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orchestator-ingress
+  namespace: dkms-main-ns
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: "http://authz.dkms-main-ns.svc.cluster.local:8081/authorize"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-User-Id,X-Simulation-Id"
+    nginx.ingress.kubernetes.io/auth-snippet: "proxy_set_header Authorization $http_authorization; proxy_set_header X-Simulation-Id $http_x_simulation_id;"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: dkms.uvigo.com
+    http:
+      paths:
+      - path: /orch(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: orchestator
+            port:
+              number: 8080

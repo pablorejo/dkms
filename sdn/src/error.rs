@@ -11,6 +11,21 @@ pub enum SdnError {
     #[error("unknown link: {0}")]
     UnknownLink(String),
 
+    #[error("unknown dkms: {0}")]
+    UnknownDkms(String),
+
+    #[error("unknown sae: {0}")]
+    UnknownSae(String),
+
+    #[error("sae already registered: {0}")]
+    SaeAlreadyRegistered(String),
+
+    #[error("entity already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
     #[error("admission denied: {0}")]
     AdmissionDenied(String),
 

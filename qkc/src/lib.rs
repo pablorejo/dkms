@@ -1,28 +1,38 @@
-//! QKC = Quantum Key Channel.
+//! QKC — Quantum Key Channel.
 //!
-//! Per-link key transport between adjacent nodes. The control plane is
-//! exposed over gRPC (`grpc_server`) — used by SDN and DKMS — while the
-//! actual key-bearing frames travel over a custom binary TCP wire
-//! (`socket_server` + `socket_client`) for latency reasons.
+//! Hace de **enrutador hop-by-hop** entre nodos QKC. Cifra el payload
+//! con claves OTP de 256 bits obtenidas del **quditto compartido** de
+//! cada enlace (un quditto distinto por enlace QKC↔QKC) y deja la
+//! cabecera en claro.
 //!
-//! Key concepts:
-//! - [`kme::Kme`] — Key Management Entity. Owns a local key buffer per peer.
-//! - [`crypto_engine::CryptoEngine`] — wraps/unwraps payloads using OTP from
-//!   the local KME.
-//! - [`routing::RoutingResolver`] — given a (src, dst, sae) tuple, decide
-//!   which peer to forward to next.
-//! - [`token_bucket::TokenBucket`] — per-link admission control.
-//! - [`service::QkcService`] — holds the above and is shared with both the
-//!   gRPC server and the TCP server.
+//! Tres listeners:
+//!
+//! * **TCP peer** — frames `FRAME_RECV` / `FRAME_RELAY` desde / hacia
+//!   otros QKCs. Es el hot path.
+//! * **TCP local** — frames `FRAME_LOCAL_SEND` / `FRAME_LOCAL_DELIVER`
+//!   entre este QKC y el ORR co-localizado. Mismo wire binario, sin
+//!   cifrado (el plaintext se entrega al ORR tal cual y el ORR le da
+//!   los plaintext al QKC para que él los cifre).
+//! * **HTTP admin** — `POST /forwarding-table` (SDN o pruebas) y
+//!   `GET /healthz`.
+//!
+//! Diferencias con el QKC Python (todas en favor de velocidad):
+//!
+//! * Sin GIL: cifrado XOR puro inline, sin process pool ni bridge
+//!   sync/async.
+//! * Forwarding table en `ArcSwap` — lecturas lock-free.
+//! * `dec_keys` siempre en **batch** (un POST por mensaje, no uno por
+//!   chunk).
+//! * Cliente HTTP a quditto con keep-alive y `reqwest::Client` único.
+//! * Cola de envío por peer con `crossbeam::ArrayQueue` lock-free.
 
 pub mod config;
-pub mod crypto_engine;
+pub mod crypto;
 pub mod error;
-pub mod grpc_server;
+pub mod http_admin;
+pub mod keystore;
 pub mod kme;
-pub mod message_models;
+pub mod relay;
 pub mod routing;
 pub mod service;
-pub mod socket_client;
-pub mod socket_server;
-pub mod token_bucket;
+pub mod transport;

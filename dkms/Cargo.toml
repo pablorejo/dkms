@@ -3,7 +3,7 @@ name        = "dkms"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "DKMS — ETSI 014/020 key delivery, buffered scheduling, per-SAE rate limiting"
+description = "DKMS — ETSI 014/020 key delivery, multicast distribution to peer DKMSs over HTTP/2 mTLS, secure in-memory key buffers"
 
 [[bin]]
 name = "dkms"
@@ -14,33 +14,74 @@ path = "src/lib.rs"
 
 [dependencies]
 common             = { workspace = true }
+etsi               = { path = "../etsi" }
+
 tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
 async-trait        = { workspace = true }
 bytes              = { workspace = true }
+
+# gRPC sur (SDN, QKC)
 tonic              = { workspace = true }
 prost              = { workspace = true }
+
+# Serde / encoding
 serde              = { workspace = true }
 serde_json         = { workspace = true }
+base64             = { workspace = true }
+hex                = { workspace = true }
+toml               = { workspace = true }
+
+# Norte ETSI + canal DKMS↔DKMS
 axum               = { workspace = true }
 hyper              = { workspace = true }
 hyper-util         = { workspace = true }
+http-body-util     = "0.1"
 tower              = { workspace = true }
 tower-http         = { workspace = true }
+reqwest            = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots",
+    "http2",
+    "json",
+    "gzip",
+    "stream",
+] }
+
+# CLI / config
 clap               = { workspace = true }
+dotenvy            = { workspace = true }
+
+# Errors / logs / métricas
 anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 tracing            = { workspace = true }
 prometheus         = { workspace = true }
+
+# TLS / mTLS
 rustls             = { workspace = true }
 tokio-rustls       = { workspace = true }
 rustls-pemfile     = { workspace = true }
-sha2               = { workspace = true }
-base64             = { workspace = true }
-hex                = { workspace = true }
+x509-parser        = "0.16"
+
+# Crypto (RNG seguro y AEAD para wrap de la K)
 rand               = { workspace = true }
+chacha20poly1305   = { workspace = true }
+sha2               = { workspace = true }
+zeroize            = { version = "1.8", features = ["zeroize_derive"] }
+subtle             = "2.6"
+
+# Tiempo / IDs
 chrono             = { workspace = true }
+humantime          = { workspace = true }
+uuid               = { workspace = true }
+
+# Estructuras / concurrencia
 dashmap            = { workspace = true }
 parking_lot        = { workspace = true }
 arc-swap           = { workspace = true }
-uuid               = { workspace = true }
+moka               = { version = "0.12", features = ["future"] }
+
+[dev-dependencies]
+tempfile           = "3.10"

@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dkms-web
+  namespace: __WEB_NAMESPACE__
+spec:
+  replicas: __WEB_REPLICAS__
+  selector:
+    matchLabels:
+      app: dkms-web
+  template:
+    metadata:
+      labels:
+        app: dkms-web
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      imagePullSecrets:
+      - name: __WEB_PULL_SECRET__
+      containers:
+      - name: dkms-web
+        image: __WEB_IMAGE__
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: ORCH_BASE_URL
+          value: "http://orchestator.dkms-main-ns.svc.cluster.local:8080"
+        - name: AUTHZ_BASE_URL
+          value: "http://authz.dkms-main-ns.svc.cluster.local:8081"
+        - name: ORCH_TOKEN_COOKIE_NAME
+          value: "dkms_orch_token"
+        - name: ORCH_REQUEST_TIMEOUT_MS
+          value: "__WEB_ORCH_REQUEST_TIMEOUT_MS__"
+        - name: ORCH_COOKIE_SECURE
+          value: "__WEB_ORCH_COOKIE_SECURE__"
+        - name: WEB_RUNTIME_BASE_URL
+          value: "__WEB_RUNTIME_BASE_URL__"
+        readinessProbe:
+          httpGet:
+            path: /web/login
+            port: 3000
+          initialDelaySeconds: 8
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /web/login
+            port: 3000
+          initialDelaySeconds: 20
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"

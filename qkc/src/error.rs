@@ -2,26 +2,39 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum QkcError {
-    #[error("kme: no keys available for peer {0}")]
-    NoKeys(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 
-    #[error("kme: reservation {0} not found")]
-    ReservationNotFound(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
 
-    #[error("token bucket: link {0} rate-limited")]
-    RateLimited(String),
+    #[error("no route to dest {0}")]
+    NoRoute(u32),
 
-    #[error("routing: no next hop for dest {0}")]
-    NoRoute(String),
+    #[error("no link/quditto for neighbor {0}")]
+    UnknownNeighbor(u32),
 
-    #[error("transport: {0}")]
-    Transport(String),
+    #[error("quditto returned not-enough-keys: requested {requested}, got {received}")]
+    NotEnoughKeys { requested: u32, received: u32 },
+
+    #[error("timeout waiting {what} ({missing} missing after {ms} ms)")]
+    KeyWaitTimeout {
+        what: &'static str,
+        missing: usize,
+        ms: u64,
+    },
+
+    #[error("quditto: {0}")]
+    Quditto(String),
+
+    #[error("http: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("wire: {0}")]
+    Wire(#[from] wire::WireError),
 
     #[error(transparent)]
-    Wire(#[from] common::ipc::binary_tcp::WireError),
-
-    #[error(transparent)]
-    Common(#[from] common::error::CommonError),
+    Etsi(#[from] etsi::EtsiError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),

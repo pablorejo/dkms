@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestator
+  namespace: dkms-main-ns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orchestator-manager
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orchestator-manager
+subjects:
+  - kind: ServiceAccount
+    name: orchestator
+    namespace: dkms-main-ns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orchestator-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestator
+  namespace: dkms-main-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestator
+  template:
+    metadata:
+      labels:
+        app: orchestator
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: orchestator
+      containers:
+        - name: orchestator
+          image: docker.io/pablopio/orchestator:v1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PERSISTENCE_BACKEND
+              value: "sqlalchemy"
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: authz-secrets
+                  key: DB_URL
+            - name: DOCKER_HUB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: authz-secrets
+                  key: DOCKER_HUB_USERNAME
+                  optional: true
+            - name: DOCKER_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authz-secrets
+                  key: DOCKER_HUB_TOKEN
+                  optional: true
+            - name: DOCKER_HUB_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: authz-secrets
+                  key: DOCKER_HUB_EMAIL
+                  optional: true
+            - name: DOCKER_HUB_SERVER
+              valueFrom:
+                secretKeyRef:
+                  name: authz-secrets
+                  key: DOCKER_HUB_SERVER
+                  optional: true
+            - name: ORCHESTATOR_HOST
+              value: "0.0.0.0"
+            - name: ORCHESTATOR_PORT
+              value: "8080"
+            - name: SDN_IMAGE
+              value: "pablopio/sdn:v1"
+            - name: DKMS_IMAGE
+              value: "pablopio/dkms:v1"
+            - name: QUDITTO_IMAGE
+              value: "docker.io/pablopio/simple-quditto:v1"
+            - name: K8S_IMAGE_PULL_SECRET
+              value: "dockerhub-pull"
+            - name: K8S_IMAGE_PULL_POLICY
+              value: "Always"
+            - name: K8S_INGRESS_ENABLED
+              value: "true"
+            - name: K8S_INGRESS_HOST
+              value: "dkms.uvigo.com"
+            - name: K8S_INGRESS_CLASS
+              value: "nginx"
+            - name: K8S_INGRESS_AUTH_URL
+              value: "http://authz.dkms-main-ns.svc.cluster.local:8081/authorize"
+            - name: K8S_INGRESS_AUTH_HEADERS
+              value: "X-User-Id,X-Simulation-Id"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestator
+  namespace: dkms-main-ns
+spec:
+  selector:
+    app: orchestator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

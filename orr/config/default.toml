@@ -1,13 +1,33 @@
-node_id   = "node-1"
-grpc_addr = "0.0.0.0:50052"
+# Configuración por defecto del ORR.
+#
+# Overrides en orden:
+#   1. config/default.toml  (este fichero)
+#   2. config/local.toml    (gitignored, dev only)
+#   3. variables de entorno con prefijo `ORR_`, separador `__`
+#      (ej. `ORR_QKC_LOCAL_ADDR=127.0.0.1:7100`).
 
-sdn_url = "http://127.0.0.1:50053"
+orr_id          = "ORR_1"
+qkc_id          = 1
+qkc_local_addr  = "127.0.0.1:7100"
+grpc_addr       = "0.0.0.0:50052"
+sdn_url         = "http://127.0.0.1:50053"
+metrics_addr    = "0.0.0.0:9101"
 
-default_pqc_suite  = "kyber1024+dilithium5"
-circuit_idle_ttl_s = 300
-metrics_addr       = "0.0.0.0:9101"
+# 0 = passthrough (sin cebolla). 1 = PQC E2E. -1 = onion full. >=2 = onion truncada.
+default_max_hops = 0
 
-# Peer ORR endpoints (NodeId -> gRPC URL). Pushed dynamically by SDN.
+default_pqc_suite       = "kyber1024+dilithium5"
+deliver_queue_capacity  = 4096
+
+# Mapa lógico orr_id -> qkc_id. La SDN puede refrescarlo en runtime.
 [peers]
-# node-2 = "http://10.0.0.2:50052"
-# node-3 = "http://10.0.0.3:50052"
+# ORR_2 = 2
+# ORR_3 = 3
+
+# Claves públicas ML-KEM de los peers (base64). Necesarias para los
+# modos onion (max_hops != 0). Cada ORR las genera al boot y debe
+# distribuirlas por SDN o config. Mientras la SDN no esté lista,
+# colocarlas a mano aquí.
+[peer_pubkeys]
+# ORR_2 = "AAA...base64..."
+# ORR_3 = "BBB...base64..."

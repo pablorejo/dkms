@@ -28,10 +28,7 @@ use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use uuid::Uuid;
 
-use crate::{
-    config::QudittoConfig,
-    crypto::{Key, KEY_SIZE_BYTES},
-};
+use crate::{config::QudittoConfig, crypto::Key};
 
 /// `R(d) = r0 · 10^(-α·d/10)` en keys/s.
 #[inline]
@@ -55,7 +52,7 @@ pub struct LinkBuffer {
     pub rate_kps: f64,
 
     fresh: ArrayQueue<Key>,
-    delivered: DashMap<Uuid, [u8; KEY_SIZE_BYTES]>,
+    delivered: DashMap<Uuid, Vec<u8>>,
 
     // Stats: lock-free counters. Lectura coherente entre sí no
     // garantizada — solo aproximaciones para `/status`.
@@ -112,7 +109,7 @@ impl LinkBuffer {
         for _ in 0..count {
             match self.fresh.pop() {
                 Some(k) => {
-                    self.delivered.insert(k.key_id, k.material);
+                    self.delivered.insert(k.key_id, k.material.clone());
                     out.push(k);
                 }
                 None => break,
@@ -125,7 +122,7 @@ impl LinkBuffer {
     /// Recupera una clave previamente entregada por su `key_id`.
     /// La elimina del mapa para que un mismo `key_id` no se pueda
     /// usar dos veces (semántica OTP).
-    pub fn take_for_dec(&self, key_id: &Uuid) -> Option<[u8; KEY_SIZE_BYTES]> {
+    pub fn take_for_dec(&self, key_id: &Uuid) -> Option<Vec<u8>> {
         let result = self.delivered.remove(key_id).map(|(_, v)| v);
         if result.is_some() {
             self.n_delivered_dec.fetch_add(1, Ordering::Relaxed);
@@ -184,10 +181,10 @@ mod tests {
         let lb = LinkBuffer::new(cfg());
         let mut r = build_rng();
         for _ in 0..4 {
-            assert!(lb.push(Key::mint(&mut r)));
+            assert!(lb.push(Key::mint(&mut r, 32)));
         }
         // 5ª se descarta.
-        assert!(!lb.push(Key::mint(&mut r)));
+        assert!(!lb.push(Key::mint(&mut r, 32)));
         let s = lb.stats_snapshot();
         assert_eq!(s.generated, 4);
         assert_eq!(s.dropped, 1);
@@ -197,7 +194,7 @@ mod tests {
     fn enc_moves_to_delivered_dec_consumes_it() {
         let lb = LinkBuffer::new(cfg());
         let mut r = build_rng();
-        let k = Key::mint(&mut r);
+        let k = Key::mint(&mut r, 32);
         let id = k.key_id;
         let mat = k.material;
         lb.push(k);

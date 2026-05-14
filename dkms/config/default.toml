@@ -1,17 +1,47 @@
-node_id    = "dkms-1"
-http_addr  = "0.0.0.0:8080"
-grpc_addr  = "0.0.0.0:50054"
+node_id = "dkms-a"
+
+[listen]
+sae_addr     = "0.0.0.0:8443"
+peer_addr    = "0.0.0.0:8444"
+grpc_addr    = "0.0.0.0:50054"
 metrics_addr = "0.0.0.0:9103"
 
-sdn_url = "http://127.0.0.1:50053"
-orr_url = "http://127.0.0.1:50052"
-qkc_url = "http://127.0.0.1:50051"
-# qrng_url = "http://127.0.0.1:50055"
+[tls]
+cert_path        = "/etc/dkms/tls/dkms.crt"
+key_path         = "/etc/dkms/tls/dkms.key"
+sae_client_ca    = "/etc/dkms/tls/sae-ca.crt"
+peer_dkms_ca     = "/etc/dkms/tls/dkms-ca.crt"
+# control_plane_ca = "/etc/dkms/tls/control-plane-ca.crt"
 
-default_sae_rate_keys_per_sec = 100
-scheduler_period_ms = 50
+[southbound]
+sdn_endpoint        = "https://sdn:50053"
+qkc_endpoint        = "https://qkc:50051"
+connect_timeout_ms  = 1500
+rpc_timeout_ms      = 3000
 
-# [tls]
-# cert_path = "/etc/dkms/tls/dkms.crt"
-# key_path  = "/etc/dkms/tls/dkms.key"
-# client_ca = "/etc/dkms/tls/ca.crt"
+# [peers.dkms-b]
+# endpoint = "https://dkms-b.internal:8444"
+# sni      = "dkms-b.internal"
+
+[buffer]
+capacity_per_peer    = 4096
+refill_low_watermark = 1024
+refill_batch         = 256
+
+[pending]
+default_ttl_secs    = 86400
+sweep_interval_secs = 30
+
+[sae]
+default_rate_keys_per_sec = 100
+default_burst_keys        = 400
+token_unit_bytes          = 32
+
+[sae_binding]
+ttl_secs    = 60
+max_entries = 16384
+
+[request]
+peer_send_timeout_ms  = 1500
+ack_wait_timeout_ms   = 2500
+max_concurrent_peers  = 32

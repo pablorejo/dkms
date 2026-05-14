@@ -34,14 +34,14 @@ fn main() {
     let mut rng = build_rng();
 
     if args.sample {
-        let k = Key::mint(&mut rng);
+        let k = Key::mint(&mut rng, 32);
         println!("sample key_id = {}", k.key_id);
         println!("sample material[..8] = {:02x?}", &k.material[..8]);
     }
 
     // Warmup — saca el primer batch del coste de cold cache.
     for _ in 0..10_000 {
-        let _ = Key::mint(&mut rng);
+        let _ = Key::mint(&mut rng, 32);
     }
 
     let target = Duration::from_secs_f64(args.seconds);
@@ -54,7 +54,7 @@ fn main() {
     while start.elapsed() < target {
         // Lotes de 8192 para amortizar el coste del check de tiempo.
         for _ in 0..8192 {
-            let k = Key::mint(&mut rng);
+            let k = Key::mint(&mut rng, 32);
             id_xor ^= k.key_id.as_u128();
             byte_xor ^= k.material[0];
         }

@@ -1,0 +1,17 @@
+# Intermedio rama 4. Vecinos: HUB (0) y HOJA-44.
+qkc_id       = 4
+peer_listen  = "127.0.0.1:7004"
+local_listen = "127.0.0.1:7104"
+admin_http   = "127.0.0.1:7204"
+
+[[links]]
+neighbor_id        = 0
+neighbor_peer_addr = "127.0.0.1:7000"
+quditto_url        = "http://127.0.0.1:8041"   # qd-4a
+key_size_bits      = 1024
+
+[[links]]
+neighbor_id        = 44
+neighbor_peer_addr = "127.0.0.1:7044"
+quditto_url        = "http://127.0.0.1:8042"   # qd-4b
+key_size_bits      = 1024

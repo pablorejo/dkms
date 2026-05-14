@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  username     String       @unique
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  sessions     Session[]
+  simulations  Simulation[]
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Simulation {
+  id          Int              @id @default(autoincrement())
+  ownerId     String
+  name        String
+  description String?
+  sdnIp       String           @default("172.30.0.2")
+  sdnPort     Int              @default(3000)
+  sdnTypeHttp String           @default("http")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  owner       User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  nodes       SimulationNode[]
+  links       SimulationLink[]
+  runs        SimulationRun[]
+
+  @@index([ownerId])
+  @@index([updatedAt])
+}
+
+model SimulationNode {
+  id                Int         @id @default(autoincrement())
+  simulationId      Int
+  uid               String
+  type              String
+  nodeId            Int?
+  label             String
+  x                 Float
+  y                 Float
+  roleHint          String?
+  keyGenerationRate Float?
+  simulation        Simulation  @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+
+  @@unique([simulationId, uid])
+  @@unique([simulationId, nodeId])
+  @@index([simulationId])
+}
+
+model SimulationLink {
+  id           Int         @id @default(autoincrement())
+  simulationId Int
+  uid          String
+  sourceUid    String
+  targetUid    String
+  linkType     String
+  rIj          Float?
+  latencyMs    Int?
+  simulation   Simulation  @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+
+  @@unique([simulationId, uid])
+  @@index([simulationId])
+  @@index([sourceUid])
+  @@index([targetUid])
+}
+
+model SimulationRun {
+  id           Int        @id @default(autoincrement())
+  simulationId Int
+  status       String
+  message      String?
+  queuedAt     DateTime?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime   @default(now())
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+
+  @@index([simulationId])
+  @@index([status])
+  @@index([createdAt])
+}

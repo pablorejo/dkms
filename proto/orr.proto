@@ -5,14 +5,35 @@ package dkms.orr.v1;
 import "common.proto";
 
 // ORR = Onion Routing Router.
-// Per-hop PQC handshakes + relay forwarding for the multi-hop key path.
+//
+// Sits between DKMS (upper layer) and QKC (lower transport). Two surfaces:
+//
+//   * Higher-layer plumbing (SendMessage / StreamDeliveries) — what the DKMS
+//     or any other client uses to push payloads through the QKD substrate
+//     and receive messages that arrive for this node.
+//
+//   * Onion circuit lifecycle (OpenCircuit / CloseCircuit / Relay …) — the
+//     per-hop PQC handshakes and onion peeling used when `max_hops != 0`.
+//     With `max_hops == 0` the ORR is a thin pass-through to QKC and these
+//     circuit RPCs are unused.
 service OrrControl {
+  // ── higher-layer surface ────────────────────────────────────────────
+  // High-level send: DKMS (or any client) asks this ORR to relay
+  // `payload` to the destination ORR. `max_hops` controls the routing
+  // mode (0 = QKC passthrough, 1 = PQC E2E, -1 / >=2 = onion).
+  rpc SendMessage      (SendMessageRequest)      returns (SendMessageResponse);
+
+  // Subscribe to messages delivered locally to this ORR. Each message
+  // is what arrived from the QKC plus the ORR-level header.
+  rpc StreamDeliveries (StreamDeliveriesRequest) returns (stream DeliveredMessage);
+
+  // ── onion-circuit surface (max_hops != 0) ───────────────────────────
   // Open a new onion circuit toward a destination. SDN computes the path,
   // DKMS calls this to bring the circuit up.
   rpc OpenCircuit  (OpenCircuitRequest)  returns (OpenCircuitResponse);
 
   // Tear down a circuit.
-  rpc CloseCircuit (CloseCircuitRequest) returns (dkms.common.v1.Status);
+  rpc CloseCircuit (CloseCircuitRequest) returns (.dkms.common.v1.Status);
 
   // Health/status of a circuit.
   rpc GetCircuit   (GetCircuitRequest)   returns (Circuit);
@@ -22,12 +43,54 @@ service OrrControl {
 
   // Forward an onion-wrapped frame one hop further (called by the previous
   // hop). The terminal hop hands off to the local QKC/DKMS.
-  rpc Relay        (RelayFrame)          returns (dkms.common.v1.Status);
+  rpc Relay        (RelayFrame)          returns (.dkms.common.v1.Status);
+}
+
+// ── higher-layer messages ─────────────────────────────────────────────
+
+message SendMessageRequest {
+  // Destination ORR id (logical, opaque string).
+  .dkms.common.v1.NodeId destination = 1;
+  // Application payload — opaque bytes for the ORR.
+  bytes payload                     = 2;
+  // Routing mode (see ORR docstring). Defaults to 0 (passthrough) when
+  // `has_max_hops` is false.
+  int32 max_hops                    = 3;
+  bool  has_max_hops                = 4;
+  // Application-level header attached to the message (passed back to the
+  // delivery subscriber on arrival).
+  map<string, string> app_header    = 5;
+  // Fire-and-forget: don't wait for the QKC ACK before returning.
+  bool fire_and_forget              = 6;
+}
+
+message SendMessageResponse {
+  string status                       = 1;   // "sent" | "delivered_local"
+  .dkms.common.v1.NodeId final_destination = 2;
+  uint32 next_hop_qkc                 = 3;
+  int32  remaining_hops               = 4;
+  bool   pqc_layer                    = 5;
+}
+
+message StreamDeliveriesRequest {
+  // Free-form subscriber identifier (logged for debugging — multiple
+  // subscribers are allowed and each gets its own copy of every
+  // delivery).
+  string subscriber_id = 1;
+}
+
+message DeliveredMessage {
+  .dkms.common.v1.NodeId origin    = 1;   // previous-hop ORR id (best-effort)
+  .dkms.common.v1.NodeId destination = 2; // final destination = this ORR id
+  bytes  payload                  = 3;
+  map<string, string> app_header  = 4;
+  int64  received_at_unix_ms      = 5;
+  bool   pqc_decapsulated         = 6;
 }
 
 message OpenCircuitRequest {
   string circuit_id                       = 1;
-  repeated dkms.common.v1.NodeId path     = 2;  // ordered, includes self
+  repeated .dkms.common.v1.NodeId path     = 2;  // ordered, includes self
   string pqc_suite                        = 3;  // e.g. "kyber1024+dilithium5"
   uint32 ttl_seconds                      = 4;
 }
@@ -45,7 +108,7 @@ message ListCircuitsRequest { uint32 page_size = 1; }
 
 message Circuit {
   string circuit_id                   = 1;
-  repeated dkms.common.v1.NodeId path = 2;
+  repeated .dkms.common.v1.NodeId path = 2;
   CircuitState state                  = 3;
   int64  opened_at_unix_ms            = 4;
   int64  last_used_unix_ms            = 5;

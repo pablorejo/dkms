@@ -24,6 +24,7 @@
 //!   resuelve por herencia. Equivalente semánticamente.
 
 pub mod base64bytes;
+pub mod binary;
 pub mod error;
 pub mod message;
 

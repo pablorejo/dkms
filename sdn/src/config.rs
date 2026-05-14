@@ -13,10 +13,10 @@ pub struct SdnConfig {
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 
-    /// Initial topology JSON. If set, loaded at boot. Same format as the
-    /// Python project's `config/topology.json`.
+    /// Folder containing per-entity JSON files (QKC/, ORR/, DKMS/, SAE/), as
+    /// produced by the Python SDN. Loaded at boot when set.
     #[serde(default)]
-    pub topology_file: Option<String>,
+    pub topology_dir: Option<String>,
 
     /// Default path policy if none is specified.
     #[serde(default = "default_policy")]
@@ -29,9 +29,14 @@ pub struct SdnConfig {
     /// Debounce window for topology push events (ms).
     #[serde(default = "default_debounce")]
     pub push_debounce_ms: u64,
+
+    /// K used by the K-shortest-paths pre-computation in the MCF solver.
+    #[serde(default = "default_k_paths")]
+    pub mcf_k_paths: usize,
 }
 
 fn default_metrics() -> String { "0.0.0.0:9102".into() }
 fn default_policy() -> String { "min_cost_flow".into() }
 fn default_mcf_period() -> u64 { 1000 }
 fn default_debounce() -> u64 { 100 }
+fn default_k_paths() -> usize { 3 }

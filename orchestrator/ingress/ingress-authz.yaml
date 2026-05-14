@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: authz-ingress
+  namespace: dkms-main-ns
+  annotations:
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location = / {
+        return 302 /web/login;
+      }
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: dkms.uvigo.com
+    http:
+      paths:
+      - path: /login
+        pathType: Prefix
+        backend:
+          service:
+            name: authz
+            port:
+              number: 8081
+      - path: /register
+        pathType: Prefix
+        backend:
+          service:
+            name: authz
+            port:
+              number: 8081
+      - path: /authorize
+        pathType: Prefix
+        backend:
+          service:
+            name: authz
+            port:
+              number: 8081
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: authz
+            port:
+              number: 8081
