@@ -1,0 +1,13 @@
+node_id   = "node-1"
+grpc_addr = "0.0.0.0:50052"
+
+sdn_url = "http://127.0.0.1:50053"
+
+default_pqc_suite  = "kyber1024+dilithium5"
+circuit_idle_ttl_s = 300
+metrics_addr       = "0.0.0.0:9101"
+
+# Peer ORR endpoints (NodeId -> gRPC URL). Pushed dynamically by SDN.
+[peers]
+# node-2 = "http://10.0.0.2:50052"
+# node-3 = "http://10.0.0.3:50052"

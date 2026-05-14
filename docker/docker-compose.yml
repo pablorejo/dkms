@@ -1,0 +1,70 @@
+# Bring up the whole runtime locally:
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Individual modules can also be started:
+#   docker compose -f docker/docker-compose.yml up qkc
+#
+# Each service has its own image so you can deploy any subset independently.
+
+services:
+  quditto:
+    build:
+      context: ..
+      dockerfile: quditto/Dockerfile
+    ports:
+      - "50055:50055"
+      - "9104:9104"
+    environment:
+      RUST_LOG: "info,tonic=warn,h2=warn"
+
+  qkc:
+    build:
+      context: ..
+      dockerfile: qkc/Dockerfile
+    ports:
+      - "50051:50051"
+      - "7001:7001"
+      - "9100:9100"
+    environment:
+      RUST_LOG: "info,tonic=warn,h2=warn"
+      QKC_QUDITTO_URL: "http://quditto:50055"
+      QKC_SDN_URL: "http://sdn:50053"
+    depends_on: [quditto]
+
+  orr:
+    build:
+      context: ..
+      dockerfile: orr/Dockerfile
+    ports:
+      - "50052:50052"
+      - "9101:9101"
+    environment:
+      RUST_LOG: "info,tonic=warn,h2=warn"
+      ORR_SDN_URL: "http://sdn:50053"
+    depends_on: [sdn]
+
+  sdn:
+    build:
+      context: ..
+      dockerfile: sdn/Dockerfile
+    ports:
+      - "50053:50053"
+      - "8081:8081"
+      - "9102:9102"
+    environment:
+      RUST_LOG: "info,tonic=warn,h2=warn"
+
+  dkms:
+    build:
+      context: ..
+      dockerfile: dkms/Dockerfile
+    ports:
+      - "8080:8080"
+      - "50054:50054"
+      - "9103:9103"
+    environment:
+      RUST_LOG: "info,tonic=warn,h2=warn"
+      DKMS_SDN_URL: "http://sdn:50053"
+      DKMS_ORR_URL: "http://orr:50052"
+      DKMS_QKC_URL: "http://qkc:50051"
+    depends_on: [sdn, orr, qkc]

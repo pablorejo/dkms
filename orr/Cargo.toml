@@ -1,0 +1,34 @@
+[package]
+name        = "orr"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+description = "Onion Routing Router — per-hop PQC handshakes and relay forwarding"
+
+[[bin]]
+name = "orr"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+common             = { workspace = true }
+tokio              = { workspace = true }
+tokio-stream       = { workspace = true }
+async-trait        = { workspace = true }
+bytes              = { workspace = true }
+tonic              = { workspace = true }
+prost              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+prometheus         = { workspace = true }
+dashmap            = { workspace = true }
+parking_lot        = { workspace = true }
+uuid               = { workspace = true }
+chrono             = { workspace = true }
+rand               = { workspace = true }

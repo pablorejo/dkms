@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package dkms.orr.v1;
+
+import "common.proto";
+
+// ORR = Onion Routing Router.
+// Per-hop PQC handshakes + relay forwarding for the multi-hop key path.
+service OrrControl {
+  // Open a new onion circuit toward a destination. SDN computes the path,
+  // DKMS calls this to bring the circuit up.
+  rpc OpenCircuit  (OpenCircuitRequest)  returns (OpenCircuitResponse);
+
+  // Tear down a circuit.
+  rpc CloseCircuit (CloseCircuitRequest) returns (dkms.common.v1.Status);
+
+  // Health/status of a circuit.
+  rpc GetCircuit   (GetCircuitRequest)   returns (Circuit);
+
+  // List active circuits.
+  rpc ListCircuits (ListCircuitsRequest) returns (stream Circuit);
+
+  // Forward an onion-wrapped frame one hop further (called by the previous
+  // hop). The terminal hop hands off to the local QKC/DKMS.
+  rpc Relay        (RelayFrame)          returns (dkms.common.v1.Status);
+}
+
+message OpenCircuitRequest {
+  string circuit_id                       = 1;
+  repeated dkms.common.v1.NodeId path     = 2;  // ordered, includes self
+  string pqc_suite                        = 3;  // e.g. "kyber1024+dilithium5"
+  uint32 ttl_seconds                      = 4;
+}
+
+message OpenCircuitResponse {
+  string circuit_id = 1;
+  bytes  session_id = 2;
+}
+
+message CloseCircuitRequest { string circuit_id = 1; }
+
+message GetCircuitRequest   { string circuit_id = 1; }
+
+message ListCircuitsRequest { uint32 page_size = 1; }
+
+message Circuit {
+  string circuit_id                   = 1;
+  repeated dkms.common.v1.NodeId path = 2;
+  CircuitState state                  = 3;
+  int64  opened_at_unix_ms            = 4;
+  int64  last_used_unix_ms            = 5;
+  uint64 frames_relayed               = 6;
+}
+
+enum CircuitState {
+  CIRCUIT_UNSPECIFIED = 0;
+  OPENING             = 1;
+  OPEN                = 2;
+  CLOSING             = 3;
+  CLOSED              = 4;
+  FAILED              = 5;
+}
+
+message RelayFrame {
+  string circuit_id = 1;
+  uint32 hop_index  = 2;
+  bytes  payload    = 3;   // already-encrypted onion layer
+}

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qkc
+  labels:
+    app.kubernetes.io/name: qkc
+    app.kubernetes.io/part-of: dkms-rust
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qkc
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: hot
+      port: 7001
+      targetPort: hot
+    - name: metrics
+      port: 9100
+      targetPort: metrics

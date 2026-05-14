@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package dkms.quditto.v1;
+
+import "common.proto";
+
+// quditto = simulated QKD link endpoint. Pretends to be a physical QKD
+// device pumping fresh key material into a local buffer at a configurable
+// rate. The QKC module pulls from quditto.
+service QudittoControl {
+  // Read N freshly minted keys (consumes them from the local buffer).
+  rpc ReadKeys     (ReadKeysRequest)     returns (ReadKeysResponse);
+
+  // Peek the current buffer state without consuming.
+  rpc GetBuffer    (GetBufferRequest)    returns (BufferStatus);
+
+  // Server-stream key material as it becomes available.
+  rpc StreamKeys   (StreamKeysRequest)   returns (stream dkms.common.v1.Key);
+
+  // Dynamically update the simulated rate parameters (r0, alpha, max buffer).
+  rpc UpdateRate   (RateParams)          returns (dkms.common.v1.Status);
+}
+
+message ReadKeysRequest {
+  uint32 count     = 1;
+  uint32 size_bits = 2;
+}
+
+message ReadKeysResponse {
+  repeated dkms.common.v1.Key keys = 1;
+}
+
+message GetBufferRequest {}
+
+message BufferStatus {
+  uint64 keys_available     = 1;
+  uint64 keys_generated_total = 2;
+  uint64 max_buffer_bytes   = 3;
+  double current_rate_keys_per_sec = 4;
+}
+
+message StreamKeysRequest {
+  uint32 size_bits   = 1;
+  uint32 max_per_sec = 2;
+}
+
+message RateParams {
+  double r0            = 1;
+  double alpha         = 2;
+  uint64 max_buffer    = 3;
+}

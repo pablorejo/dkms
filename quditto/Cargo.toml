@@ -1,0 +1,50 @@
+[package]
+name        = "quditto"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+description = "Simulated QKD link endpoint — random 256-bit key buffer served over ETSI 014 HTTP"
+default-run = "quditto"
+
+[[bin]]
+name = "quditto"
+path = "src/main.rs"
+
+# Benchmark binary aparte: mide cuántas claves/s puede mintar el
+# generador local sin pasar por el FIFO ni HTTP.
+[[bin]]
+name = "quditto-bench"
+path = "src/bin/bench_mint.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Modelos ETSI 014 / 020 — port 1:1 del Python `ETSIQKD/`.
+etsi = { path = "../etsi" }
+
+# Async runtime + HTTP server.
+tokio = { workspace = true }
+axum  = { workspace = true }
+tower = { workspace = true }
+hyper = { workspace = true }
+
+# Serialización / CLI / errores / logging.
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Crypto + IDs.
+rand        = { workspace = true }
+rand_chacha = { workspace = true }
+uuid        = { workspace = true }
+base64      = { workspace = true }
+
+# Concurrencia: ArrayQueue lock-free para el FIFO, DashMap para el map dec.
+crossbeam-queue = { workspace = true }
+parking_lot     = { workspace = true }
+dashmap         = { workspace = true }

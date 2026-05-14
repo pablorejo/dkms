@@ -1,0 +1,17 @@
+node_id    = "dkms-1"
+http_addr  = "0.0.0.0:8080"
+grpc_addr  = "0.0.0.0:50054"
+metrics_addr = "0.0.0.0:9103"
+
+sdn_url = "http://127.0.0.1:50053"
+orr_url = "http://127.0.0.1:50052"
+qkc_url = "http://127.0.0.1:50051"
+# qrng_url = "http://127.0.0.1:50055"
+
+default_sae_rate_keys_per_sec = 100
+scheduler_period_ms = 50
+
+# [tls]
+# cert_path = "/etc/dkms/tls/dkms.crt"
+# key_path  = "/etc/dkms/tls/dkms.key"
+# client_ca = "/etc/dkms/tls/ca.crt"

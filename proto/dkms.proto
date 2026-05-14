@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package dkms.dkms.v1;
+
+import "common.proto";
+
+// DKMS = Distributed Key Management Service.
+// The customer-facing ETSI 014/020 surface for SAEs lives on HTTP (handled
+// by axum in `dkms::http_server`). This gRPC surface is for the
+// orchestrator / management plane: provisioning, controlled draining,
+// runtime introspection.
+service DkmsControl {
+  // Register a SAE (or refresh its credentials).
+  rpc RegisterSae    (RegisterSaeRequest)   returns (RegisterSaeResponse);
+
+  // Deregister a SAE.
+  rpc DeregisterSae  (DeregisterSaeRequest) returns (dkms.common.v1.Status);
+
+  // List SAEs known to this DKMS instance.
+  rpc ListSaes       (ListSaesRequest)      returns (stream SaeInfo);
+
+  // Force-drain in-flight requests (for graceful shutdown).
+  rpc Drain          (DrainRequest)         returns (dkms.common.v1.Status);
+
+  // Liveness/readiness for orchestrator (also exposed via /healthz HTTP).
+  rpc Health         (HealthRequest)        returns (HealthResponse);
+
+  // Inspect buffer state for a (sae, peer-sae) pair.
+  rpc GetBufferState (BufferStateRequest)   returns (BufferState);
+}
+
+message RegisterSaeRequest {
+  dkms.common.v1.SaeId sae_id     = 1;
+  bytes   client_cert_der         = 2;   // optional: pin a client cert
+  uint64  rate_keys_per_sec       = 3;
+  uint64  burst_keys              = 4;
+  map<string, string> attributes  = 5;
+}
+
+message RegisterSaeResponse {
+  string registration_id = 1;
+  int64  expires_at_unix_ms = 2;
+}
+
+message DeregisterSaeRequest { dkms.common.v1.SaeId sae_id = 1; }
+
+message ListSaesRequest      { uint32 page_size = 1; }
+
+message SaeInfo {
+  dkms.common.v1.SaeId sae_id        = 1;
+  uint64 keys_delivered              = 2;
+  uint64 keys_buffered               = 3;
+  uint64 rate_keys_per_sec           = 4;
+  int64  registered_at_unix_ms       = 5;
+}
+
+message DrainRequest { uint32 grace_seconds = 1; }
+
+message HealthRequest  {}
+message HealthResponse {
+  Status status = 1;
+  enum Status {
+    UNKNOWN      = 0;
+    HEALTHY      = 1;
+    DEGRADED     = 2;
+    UNHEALTHY    = 3;
+  }
+}
+
+message BufferStateRequest {
+  dkms.common.v1.SaeId local_sae  = 1;
+  dkms.common.v1.SaeId remote_sae = 2;
+}
+
+message BufferState {
+  uint64 keys_available       = 1;
+  uint64 keys_reserved        = 2;
+  uint64 bytes_buffered       = 3;
+  int64  last_replenished_unix_ms = 4;
+}

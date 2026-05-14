@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package dkms.qkc.v1;
+
+import "common.proto";
+
+// QKC = Quantum Key Channel.
+// Per-link encrypted key transport between adjacent nodes. Control plane
+// here is gRPC; the actual key-bearing frames travel over a binary TCP
+// protocol (see docs/ipc.md and common::ipc::binary_tcp).
+service QkcControl {
+  // Advertise/announce capacity changes upstream (consumed by SDN).
+  rpc PushCapacity      (CapacityReport)         returns (dkms.common.v1.Status);
+
+  // Sync token-bucket parameters from SDN.
+  rpc UpdateBucket      (BucketUpdate)           returns (dkms.common.v1.Status);
+
+  // Allow SDN/DKMS to query KME state.
+  rpc GetKmeState       (KmeStateRequest)        returns (KmeState);
+
+  // Reserve keys for a peer (called by DKMS before the hot path opens).
+  rpc Reserve           (ReserveRequest)         returns (ReserveResponse);
+
+  // Release reserved keys (called by DKMS on failure or timeout).
+  rpc Release           (ReleaseRequest)         returns (dkms.common.v1.Status);
+
+  // Subscribe to KME state changes (server-streaming).
+  rpc StreamKmeState    (KmeStateRequest)        returns (stream KmeState);
+}
+
+message CapacityReport {
+  dkms.common.v1.NodeId src = 1;
+  dkms.common.v1.NodeId dst = 2;
+  uint64 keys_available     = 3;
+  uint64 keys_consumed_rate = 4;   // keys/s exp-smoothed
+  uint64 buffer_bytes       = 5;
+  int64  reported_at_unix_ms = 6;
+}
+
+message BucketUpdate {
+  dkms.common.v1.LinkId link        = 1;
+  uint64 capacity_keys              = 2;
+  uint64 refill_rate_keys_per_sec   = 3;
+}
+
+message KmeStateRequest { dkms.common.v1.NodeId peer = 1; }
+
+message KmeState {
+  dkms.common.v1.NodeId peer       = 1;
+  uint64 keys_available            = 2;
+  uint64 keys_reserved             = 3;
+  uint64 last_replenished_unix_ms  = 4;
+}
+
+message ReserveRequest {
+  dkms.common.v1.NodeId src   = 1;
+  dkms.common.v1.NodeId dst   = 2;
+  uint32 count                = 3;
+  uint32 size_bits            = 4;
+  string reservation_id       = 5;
+  uint32 ttl_ms               = 6;
+}
+
+message ReserveResponse {
+  repeated dkms.common.v1.KeyId key_ids = 1;
+  string reservation_id                  = 2;
+  int64  expires_at_unix_ms              = 3;
+}
+
+message ReleaseRequest {
+  string reservation_id = 1;
+}

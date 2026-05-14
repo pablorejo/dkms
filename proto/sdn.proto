@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package dkms.sdn.v1;
+
+import "common.proto";
+
+// SDN = Software Defined Network.
+// Owns the in-memory topology graph, computes routes, runs link admission
+// control, and propagates topology/capacity changes to interested parties
+// (DKMS, ORR).
+service SdnControl {
+  // Push the entire topology (used at boot, or after large changes).
+  rpc PutTopology        (Topology)              returns (dkms.common.v1.Status);
+
+  // Patch a single link (capacity change, up/down, etc.).
+  rpc UpdateLink         (LinkUpdate)            returns (dkms.common.v1.Status);
+
+  // Compute a path between two nodes (used by DKMS pre-flight).
+  rpc ComputePath        (ComputePathRequest)    returns (ComputePathResponse);
+
+  // Admission check before allocating capacity on a link.
+  rpc CheckAdmission     (AdmissionRequest)      returns (AdmissionResponse);
+
+  // Subscribe to topology change events.
+  rpc StreamTopology     (StreamTopologyRequest) returns (stream TopologyEvent);
+
+  // QKC capacity reports stream into SDN to keep its view fresh.
+  rpc ReportCapacity     (stream CapacityReport) returns (dkms.common.v1.Status);
+
+  // DKMS metrics push (consumed bytes, latency etc.) — informs MCF weights.
+  rpc ReportDkmsMetrics  (stream DkmsMetric)     returns (dkms.common.v1.Status);
+}
+
+message Topology {
+  repeated Node nodes = 1;
+  repeated Link links = 2;
+  int64 version       = 3;
+}
+
+message Node {
+  dkms.common.v1.NodeId id  = 1;
+  string                hostname = 2;
+  map<string, string>   labels   = 3;
+}
+
+message Link {
+  dkms.common.v1.LinkId id        = 1;
+  dkms.common.v1.NodeId src       = 2;
+  dkms.common.v1.NodeId dst       = 3;
+  uint64 capacity_bps             = 4;
+  uint64 keys_per_sec             = 5;   // QKD rate
+  uint64 latency_us               = 6;
+  bool   up                       = 7;
+  map<string, string> attributes  = 8;
+}
+
+message LinkUpdate {
+  dkms.common.v1.LinkId id  = 1;
+  optional uint64 capacity_bps = 2;
+  optional uint64 keys_per_sec = 3;
+  optional uint64 latency_us   = 4;
+  optional bool   up           = 5;
+}
+
+message ComputePathRequest {
+  dkms.common.v1.NodeId src  = 1;
+  dkms.common.v1.NodeId dst  = 2;
+  uint64 required_bps        = 3;
+  PathPolicy policy          = 4;
+}
+
+enum PathPolicy {
+  POLICY_UNSPECIFIED       = 0;
+  SHORTEST_HOPS            = 1;
+  MIN_LATENCY              = 2;
+  MAX_AVAILABLE_CAPACITY   = 3;
+  MIN_COST_FLOW            = 4;
+}
+
+message ComputePathResponse {
+  repeated dkms.common.v1.NodeId path = 1;
+  uint64 estimated_latency_us         = 2;
+  uint64 bottleneck_capacity_bps      = 3;
+}
+
+message AdmissionRequest {
+  dkms.common.v1.LinkId link  = 1;
+  uint64 requested_bps        = 2;
+}
+
+message AdmissionResponse {
+  bool   allowed              = 1;
+  uint64 granted_bps          = 2;
+  string reason               = 3;
+}
+
+message StreamTopologyRequest { int64 since_version = 1; }
+
+message TopologyEvent {
+  oneof event {
+    Node       node_added   = 1;
+    Node       node_removed = 2;
+    Link       link_added   = 3;
+    LinkUpdate link_updated = 4;
+    Link       link_removed = 5;
+    Topology   snapshot     = 6;   // full resync
+  }
+  int64 version = 100;
+}
+
+message CapacityReport {
+  dkms.common.v1.LinkId link  = 1;
+  uint64 available_bps        = 2;
+  uint64 used_bps             = 3;
+  int64  reported_at_unix_ms  = 4;
+}
+
+message DkmsMetric {
+  dkms.common.v1.NodeId node  = 1;
+  string sae_id               = 2;
+  uint64 keys_delivered       = 3;
+  uint64 keys_buffered        = 4;
+  uint64 round_robin_position = 5;
+  int64  reported_at_unix_ms  = 6;
+}

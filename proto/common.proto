@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package dkms.common.v1;
+
+// Common ID types — keep as strings so callers can be opaque about their
+// internal representation. Validation happens at the service boundary.
+message NodeId   { string value = 1; }
+message SaeId    { string value = 1; }
+message KeyId    { string value = 1; }
+message LinkId   { string value = 1; }
+
+// A single QKD key blob (raw bytes — base64 stays out of the wire).
+message Key {
+  KeyId  key_id    = 1;
+  bytes  material  = 2;   // raw key bytes
+  uint32 size_bits = 3;
+}
+
+// Standard error envelope returned by every service when responses don't have
+// per-RPC failure semantics already.
+message Status {
+  Code   code    = 1;
+  string message = 2;
+  map<string, string> details = 3;
+
+  enum Code {
+    OK              = 0;
+    INVALID_ARG     = 1;
+    NOT_FOUND       = 2;
+    UNAVAILABLE     = 3;
+    DEADLINE        = 4;
+    PERMISSION      = 5;
+    INTERNAL        = 6;
+    RATE_LIMITED    = 7;
+  }
+}
+
+// Used in pagination of list endpoints.
+message PageRequest  { uint32 page_size = 1; string page_token = 2; }
+message PageResponse { string next_page_token = 1; }

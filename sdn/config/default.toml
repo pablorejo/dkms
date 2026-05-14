@@ -1,0 +1,9 @@
+node_id     = "sdn-1"
+grpc_addr   = "0.0.0.0:50053"
+http_addr   = "0.0.0.0:8081"
+metrics_addr = "0.0.0.0:9102"
+
+# topology_file = "/etc/sdn/config/topology.json"
+default_policy   = "min_cost_flow"
+mcf_period_ms    = 1000
+push_debounce_ms = 100
