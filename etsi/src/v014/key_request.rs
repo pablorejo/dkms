@@ -178,7 +178,7 @@ impl Etsi014KeyRequest {
 }
 
 fn split_csv_like(s: &str) -> Vec<Value> {
-    s.split(|c: char| matches!(c, ',' | ';' | ' ' | '\t' | '\n' | '\r'))
+    s.split([',', ';', ' ', '\t', '\n', '\r'])
         .filter(|p| !p.is_empty())
         .map(|p| Value::String(p.to_string()))
         .collect()

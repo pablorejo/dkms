@@ -41,6 +41,12 @@ enum Cmd {
         dest: u32,
         #[arg(long, default_value = "hello")]
         message: String,
+        /// header_orr_mp en hex (sin "0x"). Vacío = sin header.
+        #[arg(long, default_value = "")]
+        hdr_orr_hex: String,
+        /// header_dkms_mp en hex (sin "0x"). Vacío = sin header.
+        #[arg(long, default_value = "")]
+        hdr_dkms_hex: String,
     },
     /// Mantiene conexión abierta al local_listen y cuenta deliveries.
     Listen {
@@ -52,6 +58,10 @@ enum Cmd {
         /// Verbose: imprime cada frame que llega.
         #[arg(long, default_value_t = false)]
         verbose: bool,
+        /// Imprime también los headers (hex) — útil para verificar
+        /// propagación QKC.
+        #[arg(long, default_value_t = false)]
+        print_headers: bool,
     },
     /// Manda N frames lo más rápido posible y reporta throughput.
     Stress {
@@ -75,24 +85,56 @@ enum Cmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { addr, dest, message } => do_send(&addr, dest, message.into_bytes()).await,
-        Cmd::Listen { addr, count, verbose } => do_listen(&addr, count, verbose).await,
+        Cmd::Send { addr, dest, message, hdr_orr_hex, hdr_dkms_hex } => {
+            let hdr_orr = decode_hex(&hdr_orr_hex)?;
+            let hdr_dkms = decode_hex(&hdr_dkms_hex)?;
+            do_send(&addr, dest, message.into_bytes(), hdr_orr, hdr_dkms).await
+        }
+        Cmd::Listen { addr, count, verbose, print_headers } => {
+            do_listen(&addr, count, verbose, print_headers).await
+        }
         Cmd::Stress { addr, dest, count, bytes, wait_deliver_on } => {
             do_stress(&addr, dest, count, bytes, wait_deliver_on).await
         }
     }
 }
 
-async fn do_send(addr: &str, dest: u32, payload: Vec<u8>) -> Result<()> {
+fn decode_hex(s: &str) -> Result<Vec<u8>> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !s.len().is_multiple_of(2) {
+        anyhow::bail!("hex string must have even length");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(Into::into))
+        .collect()
+}
+
+async fn do_send(
+    addr: &str,
+    dest: u32,
+    payload: Vec<u8>,
+    hdr_orr: Vec<u8>,
+    hdr_dkms: Vec<u8>,
+) -> Result<()> {
     let mut s = TcpStream::connect(addr).await?;
     s.set_nodelay(true)?;
-    let frame = build_local_send(dest, payload);
+    let mut frame = build_local_send(dest, payload);
+    frame.header_orr_mp = hdr_orr;
+    frame.header_dkms_mp = hdr_dkms;
     write_frame(&mut s, &frame).await?;
     println!("sent OK to {addr}");
     Ok(())
 }
 
-async fn do_listen(addr: &str, count: Option<u64>, verbose: bool) -> Result<()> {
+async fn do_listen(
+    addr: &str,
+    count: Option<u64>,
+    verbose: bool,
+    print_headers: bool,
+) -> Result<()> {
     let mut s = TcpStream::connect(addr).await?;
     s.set_nodelay(true)?;
     println!("listening on {addr}");
@@ -120,6 +162,14 @@ async fn do_listen(addr: &str, count: Option<u64>, verbose: bool) -> Result<()> 
                 f.dest_final,
                 f.payload.len(),
                 &f.payload[..f.payload.len().min(16)],
+            );
+        }
+        if print_headers {
+            println!(
+                "[{n}] hdr_qkc={} hdr_orr={} hdr_dkms={}",
+                hex(&f.header_qkc_mp),
+                hex(&f.header_orr_mp),
+                hex(&f.header_dkms_mp),
             );
         }
         if let Some(c) = count {
@@ -238,9 +288,19 @@ fn build_local_send(dest: u32, payload: Vec<u8>) -> Frame {
     f.receiver_id = 0;
     f.dest_final = dest;
     f.key_size_bits = 0; // sin cifrar
-    f.header_mp = vec![0x80]; // msgpack: mapa vacío
+    // Headers vacíos: el test client simula un ORR que no añade
+    // metadatos de capa propios. El QKC los propaga byte-a-byte.
     f.payload = payload;
     f
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
 }
 
 fn build_local_send_with_seq(dest: u32, mut payload: Vec<u8>, seq: u64) -> Frame {

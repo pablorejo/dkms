@@ -42,6 +42,12 @@ pub enum DkmsError {
     #[error("peer dkms {peer} did not ack within timeout")]
     PeerAckTimeout { peer: String },
 
+    #[error("peer dkms {peer}: orr transport configured but {missing}")]
+    PeerOrrMisconfig { peer: String, missing: &'static str },
+
+    #[error("peer dkms {peer}: orr send_message failed: {source}")]
+    OrrSendFailed { peer: String, source: anyhow::Error },
+
     #[error("transport buffer empty for peer {peer}")]
     TransportBufferEmpty { peer: String },
 

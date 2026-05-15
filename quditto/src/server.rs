@@ -151,19 +151,30 @@ async fn get_enc_keys(
     }
 
     let taken = svc.link.take_for_enc(q.number as usize);
-    if taken.len() < q.number as usize {
-        warn!(
-            requested = q.number,
-            obtained = taken.len(),
-            "quditto: enc_keys not enough fresh keys"
-        );
+    if taken.is_empty() {
+        // Sin claves frescas en absoluto → 503 (el cliente reintentará).
+        // No hay claves zombis porque `take_for_enc` no movió nada.
         return etsi_error(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "not enough fresh keys: requested {}, available {}",
+                "not enough fresh keys: requested {}, available 0",
                 q.number,
-                taken.len()
             ),
+        );
+    }
+    if taken.len() < q.number as usize {
+        // Best-effort: devolvemos lo que tengamos. ETSI 014 estricto
+        // exige `number` exacto, pero respondiendo aquí con un error
+        // 503 las claves ya fueron movidas a `delivered` (con uuids)
+        // y quedarían zombis sin nadie que las pida por dec_keys —
+        // bug observable cuando R0 es bajo y batches grandes (QKC
+        // pide REFILL_BATCH=1024 y a R0=2000 solo se acumulan 200 por
+        // tick de 100 ms). Devolver el subset evita perder claves.
+        // El caller (QKC) acepta cualquier cantidad ≤ requested.
+        warn!(
+            requested = q.number,
+            obtained  = taken.len(),
+            "quditto: enc_keys returning partial batch (best-effort)"
         );
     }
 
@@ -255,12 +266,23 @@ async fn post_dec_keys(
         }
     }
 
-    if !missing.is_empty() {
-        // ETSI 014 §6.2: si alguno falta, todo el batch falla.
+    // Si TODAS faltan, 404. Si solo algunas faltan, mismo problema que
+    // teníamos con enc_keys: las que sí están YA SE MOVIERON FUERA del
+    // `delivered` map por `take_for_dec` y se perderían como zombis si
+    // devolvemos error. Devolvemos el subset (best-effort); el caller
+    // (QKC dec_refill_loop) acepta menos de lo pedido.
+    if materials.is_empty() {
         return etsi_error_with_details(
             StatusCode::NOT_FOUND,
-            "one or more key_IDs not found".into(),
+            "no requested key_IDs found".into(),
             missing,
+        );
+    }
+    if !missing.is_empty() {
+        warn!(
+            requested = ids.len(),
+            obtained = materials.len(),
+            "quditto: dec_keys returning partial batch (best-effort)"
         );
     }
 

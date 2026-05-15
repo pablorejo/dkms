@@ -24,9 +24,11 @@ use common::proto::{
     common::v1::NodeId as ProtoNodeId,
     sdn::v1::{
         sdn_control_client::SdnControlClient, ComputePathRequest, ComputePathResponse, DkmsMetric,
-        PathPolicy,
+        GetSaeBindingRequest, GetSaeBindingResponse, PathPolicy, StreamTopologyRequest,
+        TopologyEvent,
     },
 };
+use tonic::Streaming;
 
 use crate::{
     config::SouthboundCfg,
@@ -86,6 +88,34 @@ impl SdnClient {
             .map_err(|_| DkmsError::SdnUnreachable(anyhow!("compute_path timeout")))?
             .map_err(|s| DkmsError::SdnUnreachable(anyhow!(s)))?;
         Ok(resp.into_inner())
+    }
+
+    /// Resuelve `sae_id → dkms_id` consultando la SDN. El caller debe
+    /// envolverlo en `SaeBindingCache` para no preguntar en cada
+    /// request — la cache TTL absorbe las hits repetidas.
+    pub async fn get_sae_binding(&self, sae_id: &str) -> Result<GetSaeBindingResponse> {
+        let mut c = self.client();
+        let req = tonic::Request::new(GetSaeBindingRequest {
+            sae_id: sae_id.to_string(),
+        });
+        let resp = tokio::time::timeout(self.rpc_timeout, c.get_sae_binding(req))
+            .await
+            .map_err(|_| DkmsError::SdnUnreachable(anyhow!("get_sae_binding timeout")))?
+            .map_err(|s| DkmsError::SdnUnreachable(anyhow!(s)))?;
+        Ok(resp.into_inner())
+    }
+
+    /// Abre el stream `StreamTopology`. El caller drena los eventos
+    /// para invalidar cachés locales (SAE bindings, etc.).
+    pub async fn stream_topology(&self) -> Result<Streaming<TopologyEvent>> {
+        let mut c = self.client();
+        let req = tonic::Request::new(StreamTopologyRequest { since_version: 0 });
+        let stream = c
+            .stream_topology(req)
+            .await
+            .map_err(|s| DkmsError::SdnUnreachable(anyhow!(s)))?
+            .into_inner();
+        Ok(stream)
     }
 
     /// Push de una métrica de delivery al SDN (informativo, fire-and-forget).

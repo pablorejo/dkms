@@ -83,22 +83,38 @@ SEND_DONE=$(date +%s.%N)
 SEND_ELAPSED=$(awk "BEGIN{printf \"%.3f\",$SEND_DONE-$WALL_START}")
 echo "── senders terminados en ${SEND_ELAPSED}s"
 
-# ─── 4. Esperar a listeners ──────────────────────────────────────────
+# ─── 4. Esperar a listeners (timeout suave: 30s tras senders) ────────
+# El `qkc-test-client listen` solo sale por (a) count alcanzado o (b)
+# EOF del peer. Si se pierde algún frame en vuelo (LS_err > 0), n < count
+# y el listener cuelga indefinidamente. Tras 30s lo matamos para que el
+# script termine y reporte el delivered real.
+SUNSET=$((SECONDS + 30))
 for pid in "${LISTENER_PIDS[@]}"; do
-    wait "$pid" || true
+    while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$SUNSET" ]; do
+        sleep 0.1
+    done
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
 done
 WALL_END=$(date +%s.%N)
 TOTAL_ELAPSED=$(awk "BEGIN{printf \"%.3f\",$WALL_END-$WALL_START}")
 
 # ─── 5. Resumir ──────────────────────────────────────────────────────
+# Preferimos las stats del admin HTTP del QKC (autoritativas) sobre
+# greppear el stdout del listener: si SIGTERM mata al listener antes
+# de imprimir "received N frames", el archivo queda sin esa línea
+# pero el QKC sí sabe cuántos delivered locales hizo.
 echo
 echo "── resultados por hoja receptora:"
 TOTAL_RECEIVED=0
+declare -A ADMIN_PORT=( [11]=7211 [22]=7222 [33]=7233 [44]=7244 )
 for leaf in "${LEAVES[@]}"; do
-    out="$TMP/listen-$leaf.txt"
-    received=$(grep -oE 'received [0-9]+ frames' "$out" | grep -oE '[0-9]+' || echo 0)
-    fps=$(grep -oE '\([0-9]+ fps\)' "$out" | grep -oE '[0-9]+' || echo 0)
+    port=${ADMIN_PORT[$leaf]}
+    received=$(curl -fsS "http://127.0.0.1:$port/stats" 2>/dev/null \
+        | jq -r '.service.incoming_delivered // 0' 2>/dev/null || echo 0)
+    if [ "$received" = "null" ] || [ -z "$received" ]; then received=0; fi
     TOTAL_RECEIVED=$((TOTAL_RECEIVED + received))
+    fps=$(awk "BEGIN{printf \"%.0f\", $received/$TOTAL_ELAPSED}")
     echo "  hoja-$leaf: $received / $EXPECTED_PER_LEAF frames  (~$fps fps incoming)"
 done
 

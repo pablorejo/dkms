@@ -20,7 +20,7 @@ pub fn num_chunks(n_bytes: usize, chunk_bytes: usize) -> usize {
     if n_bytes == 0 {
         0
     } else {
-        (n_bytes + chunk_bytes - 1) / chunk_bytes
+        n_bytes.div_ceil(chunk_bytes)
     }
 }
 

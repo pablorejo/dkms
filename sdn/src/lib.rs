@@ -5,6 +5,12 @@
 //! control, and propagates changes to interested parties (DKMS, QKC, ORR)
 //! via streaming gRPC.
 
+// SdnError wraps io::Error, serde_json::Error and anyhow::Error (each
+// ~176 B), so the Err-variant is unavoidably large. Boxing every #[from]
+// variant would be cosmetic churn — control-plane fns don't run in hot
+// paths and Result<(), SdnError> isn't passed around in tight loops.
+#![allow(clippy::result_large_err)]
+
 pub mod config;
 pub mod debounce;
 pub mod error;

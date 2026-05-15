@@ -227,6 +227,10 @@ impl SdnService {
     /// then ticks every `mcf_period_ms` as a heartbeat, asking for a
     /// recompute (which the debouncer will coalesce with whatever
     /// just came in over HTTP).
+    ///
+    /// También spawnea un *version watcher* (200 ms tick) que detecta
+    /// cambios en `topology.version` y emite un `TopologyEvent` por el
+    /// `Pushers` para invalidar cachés en clientes (ORR, DKMS).
     pub async fn run_background_tasks(self) -> Result<()> {
         info!("sdn: background tasks started");
         // Attach the debouncer now, inside the tokio runtime. Honour
@@ -235,6 +239,108 @@ impl SdnService {
         let window_override = (self.cfg.push_debounce_ms != 0)
             .then(|| Duration::from_millis(self.cfg.push_debounce_ms));
         self.attach_debouncer(window_override, None);
+
+        // Version watcher → broadcast TopologyEvent + push de forwarding
+        // tables a los QKCs. Cualquier mutación del grafo dispara:
+        //   1. Broadcast a subscribers (DKMS/ORR vacían cachés).
+        //   2. POST a `http://<qkc.host>/forwarding-table` con la tabla
+        //      `dst_qkc → next_hop` recalculada para cada QKC.
+        // El push inicial (al arrancar SDN con `topology_dir` cargada)
+        // se dispara forzando un primer ciclo: arrancamos `last = -1`.
+        {
+            let topology = self.topology.clone();
+            let pushers = self.pushers.clone();
+            tokio::spawn(async move {
+                use common::proto::sdn::v1::{topology_event, Topology as ProtoTopology, TopologyEvent};
+                let http = reqwest::Client::builder()
+                    .timeout(Duration::from_millis(1500))
+                    .build()
+                    .expect("reqwest client");
+                let mut last: i64 = -1; // fuerza primer push al arrancar
+                let mut tick = tokio::time::interval(Duration::from_millis(200));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let snap = topology.load();
+                    let now = snap.version;
+                    if now != last {
+                        // 1) Forwarding push: una POST por QKC. Concurrent
+                        //    via join_all para no serializar 9 QKCs.
+                        let mut futures = Vec::new();
+                        for (qkc_id, qkc) in &snap.qkcs {
+                            let mut table = std::collections::HashMap::<String, u32>::new();
+                            for other in snap.qkcs.keys() {
+                                if other == qkc_id { continue; }
+                                if let Some(next) = snap.next_hop_qkc(qkc_id, other) {
+                                    if let Ok(nh) = next.parse::<u32>() {
+                                        table.insert(other.clone(), nh);
+                                    }
+                                }
+                            }
+                            let url = format!(
+                                "http://{}:{}/forwarding-table",
+                                qkc.host.ip, qkc.host.port
+                            );
+                            let body = serde_json::json!({"replace": table});
+                            let client = http.clone();
+                            let qid = qkc_id.clone();
+                            futures.push(async move {
+                                match client.post(&url).json(&body).send().await {
+                                    Ok(r) if r.status().is_success() => {
+                                        Ok::<String, String>(qid)
+                                    }
+                                    Ok(r) => Err(format!("{qid}: HTTP {}", r.status())),
+                                    Err(e) => Err(format!("{qid}: {e}")),
+                                }
+                            });
+                        }
+                        let results: Vec<std::result::Result<String, String>> =
+                            futures::future::join_all(futures).await;
+                        let (ok, err): (Vec<_>, Vec<_>) =
+                            results.into_iter().partition(|r| r.is_ok());
+                        info!(
+                            from = last,
+                            to = now,
+                            qkcs_ok = ok.len(),
+                            qkcs_err = err.len(),
+                            "forwarding push done"
+                        );
+                        for e in err.iter().take(3) {
+                            if let Err(s) = e {
+                                warn!(error = %s, "forwarding push failed");
+                            }
+                        }
+
+                        // 2) Broadcast del evento (DKMS/ORR invalidan).
+                        let ev = TopologyEvent {
+                            event: Some(topology_event::Event::Snapshot(ProtoTopology {
+                                nodes:   Vec::new(),
+                                links:   Vec::new(),
+                                version: now,
+                            })),
+                            version: now,
+                        };
+                        pushers.broadcast(ev).await;
+                        info!(from = last, to = now, "topology version changed; broadcast");
+
+                        // SOLO marcamos esta versión como "ya empujada"
+                        // si TODOS los QKCs aceptaron el POST. Si alguno
+                        // falló (típicamente connection refused porque
+                        // el QKC todavía no levantó), no actualizamos
+                        // `last` para reintentar en el próximo tick.
+                        // Esto hace el orden de arranque irrelevante.
+                        if err.is_empty() {
+                            last = now;
+                        } else {
+                            warn!(
+                                qkcs_err = err.len(),
+                                "forwarding push partial; will retry next tick"
+                            );
+                        }
+                    }
+                }
+            });
+        }
 
         let mut tick = tokio::time::interval(Duration::from_millis(self.cfg.mcf_period_ms));
         loop {

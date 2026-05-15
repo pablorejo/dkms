@@ -29,6 +29,34 @@ service SdnControl {
 
   // DKMS metrics push (consumed bytes, latency etc.) — informs MCF weights.
   rpc ReportDkmsMetrics  (stream DkmsMetric)     returns (dkms.common.v1.Status);
+
+  // ── higher-level resolvers (cached por los callers) ─────────────────
+  // Resolución SAE → DKMS/ORR. Lo usa el DKMS para agrupar la
+  // distribución ETSI 014 por instancia destino. El DKMS cachea con
+  // TTL la respuesta vía `SaeBindingCache`.
+  rpc GetSaeBinding (GetSaeBindingRequest) returns (GetSaeBindingResponse);
+
+  // Path ORR-level entre dos ORRs. Devuelve los orr_ids del path
+  // (incluyendo origen y destino — el caller filtra self si quiere).
+  // Lo usa el ORR origen para construir onions con max_hops != 0,1
+  // sin que el cliente tenga que pasar `orr_path` en app_header.
+  rpc GetOrrPath    (GetOrrPathRequest)    returns (GetOrrPathResponse);
+}
+
+message GetSaeBindingRequest  { string sae_id = 1; }
+message GetSaeBindingResponse {
+  string dkms_id = 1;   // DKMS node donde reside el SAE.
+  string orr_id  = 2;   // ORR co-localizado con ese DKMS.
+}
+
+message GetOrrPathRequest {
+  string src_orr = 1;
+  string dst_orr = 2;
+}
+message GetOrrPathResponse {
+  // Orden src → … → dst (ambos incluidos). Vacío si el src == dst o
+  // si no hay path en la topología.
+  repeated string orrs = 1;
 }
 
 message Topology {

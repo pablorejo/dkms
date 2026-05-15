@@ -42,6 +42,13 @@ pub struct DkmsConfig {
     #[serde(default)]
     pub sae_binding: SaeBindingCfg,
 
+    /// SAE → DKMS node estático para local-dev sin SDN. Clave = SAE id,
+    /// valor = node_id del DKMS donde reside. Vacío por defecto: cuando
+    /// la SDN esté cableada, el `SaeBindingCache` la consultará en vez
+    /// de mirar aquí.
+    #[serde(default)]
+    pub sae_bindings: HashMap<String, String>,
+
     #[serde(default)]
     pub request: RequestCfg,
 }
@@ -79,20 +86,67 @@ pub struct TlsCfg {
 pub struct SouthboundCfg {
     pub sdn_endpoint: String,
     pub qkc_endpoint: String,
+    /// gRPC endpoint del ORR co-localizado. Opcional: si está vacío o
+    /// ausente, el DKMS no abre conexión con ORR y sigue funcionando
+    /// con HTTP/2 ETSI 020. Cuando se cablea el nuevo transporte por
+    /// ORR↔QKC se usa este endpoint.
+    #[serde(default)]
+    pub orr_endpoint: Option<String>,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_rpc_timeout_ms")]
     pub rpc_timeout_ms: u64,
+    /// `max_hops` por defecto al mandar vía ORR cuando un peer no lo
+    /// fija explícitamente. `1` = PQC E2E (default seguro: una capa
+    /// onion entre origen y destino, intermedios solo ven xor_ct).
+    #[serde(default = "default_max_hops")]
+    pub default_max_hops: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerCfg {
     /// URL base HTTPS del peer (incluye esquema y puerto). Ej:
-    /// `https://dkms-b.internal:8443`.
+    /// `https://dkms-b.internal:8443`. Usada solo cuando
+    /// `transport == "http"`.
     pub endpoint: String,
     /// SNI a usar en el TLS handshake (si difiere del host del endpoint).
     #[serde(default)]
     pub sni: Option<String>,
+    /// ID lógico del ORR del peer DKMS (ej. `"orr_22"`). Requerido si
+    /// `transport == "orr"`; ignorado si `"http"`.
+    #[serde(default)]
+    pub orr_id: Option<String>,
+    /// Transporte para los envíos de claves a este peer. Default
+    /// `http` para no romper despliegues existentes.
+    #[serde(default)]
+    pub transport: PeerTransport,
+    /// Override de `max_hops` para envíos ORR a este peer. Si ausente,
+    /// usa `southbound.default_max_hops`.
+    #[serde(default)]
+    pub max_hops: Option<i32>,
+    /// Hint de `orr_path` para modos onion `>=2` o `-1`. CSV de
+    /// orr_ids (sin el origen — el ORR filtra self automáticamente —
+    /// terminando en el orr_id del peer destino). Necesario mientras
+    /// la SDN no calcule paths en Rust.
+    #[serde(default)]
+    pub orr_path: Option<String>,
+}
+
+/// Selector de transporte por peer.
+///
+/// * `Http` — POST ETSI 020 sobre HTTP/2 + mTLS (`peer_client.rs`).
+///   Comportamiento original; AEAD-wrap con clave de transporte del
+///   pool QKC.
+/// * `Orr` — gRPC al ORR co-localizado (`southbound::orr::OrrClient`)
+///   con body = K raw y `header_dkms` en `app_header`. El ORR aplica
+///   onion según `max_hops` y el QKC OTP-cifra por enlace. NO se hace
+///   AEAD-wrap encima.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerTransport {
+    #[default]
+    Http,
+    Orr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,4 +247,7 @@ fn default_connect_timeout_ms() -> u64 {
 }
 fn default_rpc_timeout_ms() -> u64 {
     3_000
+}
+fn default_max_hops() -> i32 {
+    1
 }

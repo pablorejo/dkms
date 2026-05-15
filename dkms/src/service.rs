@@ -52,7 +52,7 @@ use chacha20poly1305::{
 use futures::future::join_all;
 use rand::{rngs::OsRng, RngCore};
 use serde_json::Value;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -71,11 +71,17 @@ use etsi::{
 
 use crate::{
     admission::Admission,
-    config::DkmsConfig,
+    config::{DkmsConfig, PeerTransport},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
     sae_binding::SaeBindingCache,
-    southbound::{QkcClient, SdnClient},
+    southbound::{
+        orr::{
+            HDR_FLOW_ID, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_REQUEST_ID, HDR_SAE_DESTINATION,
+            HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS,
+        },
+        OrrClient, QkcClient, SdnClient,
+    },
     state::{BufferPool, PendingStore},
     token_bucket::{compute_cost, SaeBuckets},
 };
@@ -97,7 +103,15 @@ pub struct DkmsService {
 
     pub sdn: Option<Arc<SdnClient>>,
     pub qkc: Option<Arc<QkcClient>>,
-    pub peer_client: Arc<PeerHttpClient>,
+    /// Cliente gRPC al ORR co-localizado. Si está presente, el DKMS
+    /// puede usar el transporte ORR↔QKC (binario sobre TCP) como
+    /// alternativa al HTTP/2 ETSI 020 entre DKMSs. Se cablea como
+    /// `Option` para no romper despliegues sin ORR.
+    pub orr: Option<Arc<OrrClient>>,
+    /// Cliente HTTP/2 ETSI 020 hacia DKMSs peer. `None` en despliegues
+    /// donde todos los peers usan `transport = "orr"` (no se intenta
+    /// abrir un Reqwest TLS context si nadie lo usa).
+    pub peer_client: Option<Arc<PeerHttpClient>>,
 
     /// Estado de admisión — consultado por el `AdmissionLayer` del HTTP y
     /// pilotado por el RPC `Drain` del plano gRPC.
@@ -115,7 +129,8 @@ impl DkmsService {
         sae_binding: Arc<SaeBindingCache>,
         sdn: Option<Arc<SdnClient>>,
         qkc: Option<Arc<QkcClient>>,
-        peer_client: Arc<PeerHttpClient>,
+        orr: Option<Arc<OrrClient>>,
+        peer_client: Option<Arc<PeerHttpClient>>,
     ) -> Self {
         Self {
             cfg,
@@ -126,6 +141,7 @@ impl DkmsService {
             sae_binding,
             sdn,
             qkc,
+            orr,
             peer_client,
             admission: Admission::new(),
         }
@@ -241,30 +257,51 @@ impl DkmsService {
             }
         }
 
-        // 6) Construir y enviar una ETSI 020 por cada DKMS remoto.
-        let mut envelopes: Vec<(NodeId, Etsi020ExtKeyContainer)> =
-            Vec::with_capacity(remote_groups.len());
-        let mut transport_keys_consumed = 0usize;
+        // 6) Distribuir cada (K, peer DKMS) por el transporte elegido en
+        //    config (ETSI 020 HTTP/2 o ORR gRPC). Particionamos primero
+        //    para no consumir transport keys del pool QKC en el caso ORR
+        //    (donde la cripto la dan onion + OTP por enlace QKC↔QKC).
+        let (http_peers, orr_peers): (Vec<_>, Vec<_>) = remote_groups
+            .iter()
+            .partition(|(node, _)| {
+                self.cfg
+                    .peers
+                    .get(node.as_str())
+                    .map(|p| p.transport == PeerTransport::Http)
+                    .unwrap_or(true) // default = http si no hay entry
+            });
 
-        for (peer_node, peer_saes) in remote_groups.iter() {
-            // (Construcción de envelope ANTES de enviar — el pop de
-            // transport keys es síncrono; si falla aquí ya no consumimos
-            // tokens para los demás).
+        // 6a) Construcción de envelopes ETSI 020 (síncrono — el pop del
+        //     buffer_enc no debe quedar a medias por un error tardío).
+        let mut envelopes: Vec<(NodeId, Etsi020ExtKeyContainer)> =
+            Vec::with_capacity(http_peers.len());
+        let mut transport_keys_consumed = 0usize;
+        for (peer_node, peer_saes) in http_peers.iter() {
             let envelope =
                 self.build_ext_keys_envelope(master, peer_node, peer_saes, &session_keys)?;
             transport_keys_consumed += envelope.keys.len();
-            envelopes.push((peer_node.clone(), envelope));
+            envelopes.push(((*peer_node).clone(), envelope));
         }
 
-        let mut futures = Vec::with_capacity(envelopes.len());
+        // 6b) Futuros de envío. Un Vec mixto: cada futuro devuelve
+        //     `Result<NodeId, DkmsError>` para que el join_all sea
+        //     uniforme. Las dos ramas comparten política de error.
+        type SendFuture =
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<NodeId>> + Send>>;
+        let mut futures: Vec<SendFuture> = Vec::with_capacity(http_peers.len() + orr_peers.len());
+
         for (peer_node, envelope) in envelopes.into_iter() {
-            let pc = self.peer_client.clone();
+            let pc = self.peer_client.clone().ok_or_else(|| {
+                DkmsError::BadRequest(format!(
+                    "peer dkms {peer_node} requires http transport but peer_client is disabled"
+                ))
+            })?;
             let peer_cfg = self.cfg.peers.get(peer_node.as_str()).cloned().ok_or_else(|| {
                 DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
             })?;
             let peer_id_str = peer_node.to_string();
             let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
-            futures.push(async move {
+            futures.push(Box::pin(async move {
                 let r = tokio::time::timeout(
                     send_timeout,
                     pc.send_ext_keys(&peer_id_str, &peer_cfg, &envelope),
@@ -275,7 +312,88 @@ impl DkmsService {
                     Ok(Err(e)) => Err(e),
                     Err(_) => Err(DkmsError::PeerAckTimeout { peer: peer_id_str }),
                 }
-            });
+            }));
+        }
+
+        for (peer_node, peer_saes) in orr_peers.into_iter() {
+            let orr = self.orr.clone().ok_or_else(|| DkmsError::PeerOrrMisconfig {
+                peer: peer_node.to_string(),
+                missing: "southbound.orr_endpoint",
+            })?;
+            let peer_cfg = self.cfg.peers.get(peer_node.as_str()).cloned().ok_or_else(|| {
+                DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
+            })?;
+            let dest_orr_id = peer_cfg.orr_id.clone().ok_or_else(|| {
+                DkmsError::PeerOrrMisconfig {
+                    peer: peer_node.to_string(),
+                    missing: "peer.orr_id",
+                }
+            })?;
+            let max_hops = peer_cfg
+                .max_hops
+                .unwrap_or(self.cfg.southbound.default_max_hops);
+            let orr_path_hint = peer_cfg.orr_path.clone();
+            let initiator = master.to_string();
+            let key_bits = body.size;
+            let request_id = Uuid::new_v4().to_string();
+            // Una send_key por (K × target_sae): el receptor maneja
+            // (key_id, sae_destination) → PendingStore.
+            let pairs: Vec<(KeyId, Vec<u8>, SaeId)> = session_keys
+                .iter()
+                .flat_map(|(_uuid, kid, k_bytes)| {
+                    peer_saes
+                        .iter()
+                        .map(move |sae| (kid.clone(), k_bytes.to_vec(), sae.clone()))
+                })
+                .collect();
+            let peer_node_owned = peer_node.clone();
+            let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
+            futures.push(Box::pin(async move {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let mut subfutures = Vec::with_capacity(pairs.len());
+                for (kid, k_bytes, sae) in pairs {
+                    let mut header: BTreeMap<String, String> = BTreeMap::new();
+                    header.insert(HDR_KEY_ID.into(), kid.to_string());
+                    header.insert(HDR_SAE_ORIGIN.into(), initiator.clone());
+                    header.insert(HDR_SAE_DESTINATION.into(), sae.to_string());
+                    header.insert(HDR_KEY_SIZE_BITS.into(), key_bits.to_string());
+                    header.insert(HDR_REQUEST_ID.into(), request_id.clone());
+                    header.insert(HDR_TIMESTAMP_MS.into(), now_ms.to_string());
+                    if let Some(path) = &orr_path_hint {
+                        // Hint para modos onion >=2 / -1: el ORR lee
+                        // app_header["orr_path"] para armar la cebolla.
+                        // Cuando la SDN exista, se calculará allí en
+                        // vez de venir hardcoded en config.
+                        header.insert("orr_path".into(), path.clone());
+                    }
+                    let _ = HDR_FLOW_ID; // reservado para routing por flujo; no se setea hoy.
+                    let orr_cloned = orr.clone();
+                    let dest = dest_orr_id.clone();
+                    subfutures.push(async move {
+                        tokio::time::timeout(send_timeout, orr_cloned.send_key(&dest, k_bytes, header, max_hops)).await
+                    });
+                }
+                for r in join_all(subfutures).await {
+                    match r {
+                        Ok(Ok(_resp)) => {}
+                        Ok(Err(e)) => {
+                            return Err(DkmsError::OrrSendFailed {
+                                peer: peer_node_owned.to_string(),
+                                source: anyhow::anyhow!(e.to_string()),
+                            });
+                        }
+                        Err(_) => {
+                            return Err(DkmsError::PeerAckTimeout {
+                                peer: peer_node_owned.to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(peer_node_owned)
+            }));
         }
 
         let results = join_all(futures).await;
@@ -283,7 +401,7 @@ impl DkmsService {
             results.iter().filter_map(|r| r.as_ref().err()).collect();
         if !failures.is_empty() {
             for e in &failures {
-                error!(error = %e, "ETSI 020 distribution failure");
+                error!(error = %e, "key distribution failure");
             }
             // Reembolso y retracción local.
             self.buckets.refund(master, cost);
@@ -300,7 +418,7 @@ impl DkmsService {
                     .first()
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "unknown".into()),
-                source: anyhow::anyhow!("one or more peer DKMSs failed during ext_keys"),
+                source: anyhow::anyhow!("one or more peer DKMSs failed during key distribution"),
             });
         }
 
@@ -478,6 +596,17 @@ impl DkmsService {
         let sweep_period = self.cfg.pending.sweep_interval_secs;
         tokio::spawn(crate::state::pending::sweeper_task(pending, sweep_period));
 
+        // Pump del transporte ORR. Si el cliente está conectado, abre
+        // `StreamDeliveries` y vuelca cada `DeliveredMessage` al
+        // `PendingStore` como una clave entregada. Esto es el ETSI 020
+        // pero sobre transporte ORR↔QKC en vez de HTTP/2.
+        if self.orr.is_some() {
+            let pump = self.clone();
+            tokio::spawn(async move {
+                pump.run_orr_delivery_pump().await;
+            });
+        }
+
         // TODO: refill de buffer_enc desde QKC (Reserve→fetch material)
         // y suscripción a topology updates de SDN para invalidar
         // sae_binding cache.
@@ -486,6 +615,97 @@ impl DkmsService {
         loop {
             tick.tick().await;
         }
+    }
+
+    /// Bucle que mantiene abierto el `StreamDeliveries` del ORR
+    /// co-localizado. Reconecta con backoff si la suscripción cae.
+    async fn run_orr_delivery_pump(&self) {
+        let Some(orr) = self.orr.clone() else { return };
+        let subscriber_id = format!("dkms-{}", self.cfg.node_id);
+        let mut backoff_ms: u64 = 250;
+        loop {
+            match orr.subscribe_deliveries(&subscriber_id).await {
+                Ok(mut stream) => {
+                    info!(subscriber = %subscriber_id, "orr deliveries pump connected");
+                    backoff_ms = 250;
+                    while let Some(item) = stream.message().await.transpose() {
+                        match item {
+                            Ok(msg) => {
+                                if let Err(e) = self.handle_orr_delivery(msg).await {
+                                    warn!(error = %e, "orr delivery handle failed");
+                                }
+                            }
+                            Err(s) => {
+                                warn!(status = %s, "orr deliveries stream broken; reconnecting");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => warn!(error = %e, "orr deliveries subscribe failed; retrying"),
+            }
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(5_000);
+        }
+    }
+
+    /// Procesa un `DeliveredMessage` que llega vía ORR. Espera que el
+    /// `app_header` traiga las claves canónicas que define
+    /// `southbound::orr` (`HDR_*`). El `payload` son los bytes crudos de
+    /// la clave QKD.
+    async fn handle_orr_delivery(
+        &self,
+        msg: common::proto::orr::v1::DeliveredMessage,
+    ) -> Result<()> {
+        let app = &msg.app_header;
+        let key_id_str = app
+            .get(HDR_KEY_ID)
+            .ok_or_else(|| DkmsError::BadRequest(format!("orr delivery missing {HDR_KEY_ID}")))?;
+        let initiator = app
+            .get(HDR_SAE_ORIGIN)
+            .ok_or_else(|| DkmsError::BadRequest(format!("orr delivery missing {HDR_SAE_ORIGIN}")))?
+            .clone();
+        let dest_sae = app
+            .get(HDR_SAE_DESTINATION)
+            .ok_or_else(|| {
+                DkmsError::BadRequest(format!("orr delivery missing {HDR_SAE_DESTINATION}"))
+            })?
+            .clone();
+        // Estos campos son informativos hoy — los leemos para validar
+        // y loguear, no se usan más allá.
+        let key_size = app.get(HDR_KEY_SIZE_BITS).and_then(|v| v.parse::<u32>().ok());
+        let request_id = app.get(HDR_REQUEST_ID).cloned();
+        let _flow_id = app.get(HDR_FLOW_ID).cloned();
+        let _ts_ms = app.get(HDR_TIMESTAMP_MS).cloned();
+
+        if let Some(bits) = key_size {
+            let expected = (bits as usize).div_ceil(8);
+            if msg.payload.len() != expected {
+                return Err(DkmsError::BadRequest(format!(
+                    "orr delivery {key_id_str}: payload {} bytes, header says {bits} bits ({expected} bytes)",
+                    msg.payload.len()
+                )));
+            }
+        }
+
+        let key_id = KeyId::new(key_id_str.clone());
+        let initiator_sae = SaeId::new(initiator);
+        let mut authorized: HashSet<SaeId> = HashSet::new();
+        authorized.insert(SaeId::new(dest_sae));
+
+        self.pending.insert(
+            key_id,
+            initiator_sae,
+            authorized,
+            msg.payload,
+            None, // TTL por defecto del config
+        );
+        debug!(
+            key_id = %key_id_str,
+            request_id = ?request_id,
+            "orr delivery → pending store",
+        );
+        Ok(())
     }
 }
 

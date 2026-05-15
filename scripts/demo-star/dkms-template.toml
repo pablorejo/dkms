@@ -1,0 +1,91 @@
+# Plantilla DKMS para la demo-star. `start-dkms.sh` sustituye los
+# placeholders __NN__ / __ROOT__ y la suelta en
+# /tmp/dkms-star-demo/dkms-NN/default.toml antes de arrancar.
+node_id = "dkms-__NN__"
+
+[listen]
+sae_addr     = "127.0.0.1:84__NN__"
+peer_addr    = "127.0.0.1:85__NN__"
+grpc_addr    = "127.0.0.1:86__NN__"
+metrics_addr = "127.0.0.1:97__NN__"
+
+[tls]
+cert_path     = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.crt"
+key_path      = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.key"
+sae_client_ca = "__ROOT__/scripts/demo-star/tls/ca.crt"
+peer_dkms_ca  = "__ROOT__/scripts/demo-star/tls/ca.crt"
+
+[southbound]
+# SDN: con la demo-star levantada por start-sdn.sh, el DKMS hará
+# `GetSaeBinding` por gRPC y cacheará vía `SaeBindingCache`. Si no
+# hay SDN, cae al `[sae_bindings]` estático del fondo.
+sdn_endpoint       = "http://127.0.0.1:50053"
+# QKC: no lo usamos aún (el ETSI 020 HTTP es lo que mantenía el cliente
+# QKC; con transport=orr no hace falta).
+qkc_endpoint       = "http://127.0.0.1:1"
+orr_endpoint       = "http://127.0.0.1:505__NN__"
+connect_timeout_ms = 1500
+rpc_timeout_ms     = 5000
+default_max_hops   = __MAX_HOPS__
+
+[buffer]
+capacity_per_peer    = 4096
+refill_low_watermark = 1024
+refill_batch         = 256
+
+[pending]
+default_ttl_secs    = 86400
+sweep_interval_secs = 30
+
+[sae]
+# Subimos el rate por defecto: el saturate manda miles de reqs/s
+# por SAE y queremos que el cuello sea el transporte ORR, no el
+# token bucket.
+default_rate_keys_per_sec = 200000
+default_burst_keys        = 400000
+token_unit_bytes          = 32
+
+[sae_binding]
+ttl_secs    = 60
+max_entries = 16384
+
+[request]
+peer_send_timeout_ms  = 5000
+ack_wait_timeout_ms   = 5000
+max_concurrent_peers  = 32
+
+# SAE → DKMS estático (sustituye a la consulta SDN mientras la SDN
+# no esté cableada). Cada SAE vive en el DKMS cuyo sufijo coincide
+# con su par {aa→11, bb→22, cc→33, dd→44}.
+[sae_bindings]
+sae_aa = "dkms-11"
+sae_bb = "dkms-22"
+sae_cc = "dkms-33"
+sae_dd = "dkms-44"
+
+# Vecinos DKMS (todos por ORR). Cada peer apunta al ORR del peer
+# vía su `orr_id`; el HTTPS endpoint se mantiene por compatibilidad
+# pero no se usa porque `transport = "orr"`.
+[peers.dkms-11]
+endpoint  = "https://127.0.0.1:8411"
+transport = "orr"
+orr_id    = "orr_11"
+# orr_path  = "__ORR_PATH_11__"  # uncomment to bypass SDN GetOrrPath
+
+[peers.dkms-22]
+endpoint  = "https://127.0.0.1:8422"
+transport = "orr"
+orr_id    = "orr_22"
+# orr_path  = "__ORR_PATH_22__"
+
+[peers.dkms-33]
+endpoint  = "https://127.0.0.1:8433"
+transport = "orr"
+orr_id    = "orr_33"
+# orr_path  = "__ORR_PATH_33__"
+
+[peers.dkms-44]
+endpoint  = "https://127.0.0.1:8444"
+transport = "orr"
+orr_id    = "orr_44"
+# orr_path  = "__ORR_PATH_44__"

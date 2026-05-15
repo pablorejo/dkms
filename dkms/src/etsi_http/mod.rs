@@ -93,8 +93,12 @@ pub fn error_to_response(err: DkmsError) -> Response {
         DkmsError::PeerUnreachable { .. }
         | DkmsError::PeerRejected { .. }
         | DkmsError::PeerAckTimeout { .. }
+        | DkmsError::OrrSendFailed { .. }
         | DkmsError::SdnUnreachable(_)
         | DkmsError::QkcUnreachable(_) => (StatusCode::BAD_GATEWAY, err.to_string()),
+        DkmsError::PeerOrrMisconfig { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        }
         DkmsError::SaeBindingLookupFailed(_) => (StatusCode::NOT_FOUND, err.to_string()),
         DkmsError::Tls(_)
         | DkmsError::Crypto(_)

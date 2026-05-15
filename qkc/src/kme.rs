@@ -111,11 +111,16 @@ impl KmeClient {
         let bytes = resp.bytes().await?;
         let pairs = binary::unpack_keys(&bytes)
             .map_err(|e| QkcError::Quditto(format!("enc_keys binary decode: {e}")))?;
-        let n = pairs.len() as u32;
-        if n < number {
+        // Aceptamos batches parciales (n < number): el quditto puede
+        // estar generando a R0 lento y devolvernos lo que tenga.
+        // Rechazar y reintentar deja claves zombi en su buffer
+        // `delivered` — preferimos llevarnos lo que sí entregó.
+        // Solo 0 sigue siendo error (significa que el quditto está
+        // realmente seco; el caller dormirá 100 ms antes del retry).
+        if pairs.is_empty() {
             return Err(QkcError::NotEnoughKeys {
                 requested: number,
-                received: n,
+                received: 0,
             });
         }
         Ok(pairs

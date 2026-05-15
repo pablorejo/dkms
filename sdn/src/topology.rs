@@ -842,10 +842,10 @@ impl TopologyStore {
             // old and the new mapping.
             let old_qkc = t.orrs.get(&orr.id).map(|o| o.qkc_id.clone());
             if let Some(old) = old_qkc {
-                if old != orr.qkc_id {
-                    if t.orr_by_qkc.get(&old).map(String::as_str) == Some(orr.id.as_str()) {
-                        t.orr_by_qkc.remove(&old);
-                    }
+                if old != orr.qkc_id
+                    && t.orr_by_qkc.get(&old).map(String::as_str) == Some(orr.id.as_str())
+                {
+                    t.orr_by_qkc.remove(&old);
                 }
             }
             t.orr_by_qkc.insert(orr.qkc_id.clone(), orr.id.clone());
@@ -1081,7 +1081,7 @@ mod tests {
         // Edge "1"-"2" must be gone.
         assert!(!snap.edges.contains_key(&("1".to_string(), "2".to_string())));
         // Neighbor's adjacency cleaned up.
-        assert!(snap.graph.get("2").map(|s| s.contains("1")).unwrap_or(false) == false);
+        assert!(!snap.graph.get("2").map(|s| s.contains("1")).unwrap_or(false));
     }
 
     #[test]
@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(snap.dkms["d1"].orr_id, "o2");
         // dkms_by_qkc now points at q2; the q1 entry has been cleared.
         assert_eq!(snap.dkms_by_qkc.get("q2").map(String::as_str), Some("d1"));
-        assert!(snap.dkms_by_qkc.get("q1").is_none());
+        assert!(!snap.dkms_by_qkc.contains_key("q1"));
     }
 
     #[test]

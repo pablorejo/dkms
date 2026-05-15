@@ -5,7 +5,7 @@
 //!   * **Higher-layer** (lo que usa el DKMS):
 //!     `SendMessage` — empuja un payload hacia un ORR destino.
 //!     `StreamDeliveries` — el DKMS se suscribe y recibe lo que el
-//!       QKC local entrega para este nodo.
+//!     QKC local entrega para este nodo.
 //!
 //!   * **Onion-circuit** (`OpenCircuit` / `Relay` / …): stubs. La
 //!     cebolla PQC capa-a-capa todavía no está cableada — devuelven
@@ -18,7 +18,8 @@
 use common::proto::common::v1::{NodeId, Status as ProtoStatus};
 use common::proto::orr::v1::{
     orr_control_server::{OrrControl, OrrControlServer},
-    Circuit as ProtoCircuit, CloseCircuitRequest, DeliveredMessage, GetCircuitRequest,
+    Circuit as ProtoCircuit, CloseCircuitRequest, DeliveredMessage, EstablishSecretRequest,
+    EstablishSecretResponse, GetCircuitRequest, GetPublicKeyRequest, GetPublicKeyResponse,
     ListCircuitsRequest, OpenCircuitRequest, OpenCircuitResponse, RelayFrame,
     SendMessageRequest, SendMessageResponse, StreamDeliveriesRequest,
 };
@@ -116,6 +117,76 @@ impl OrrControl for OrrGrpc {
         });
 
         Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+
+    #[instrument(skip_all)]
+    async fn get_public_key(
+        &self,
+        _req: Request<GetPublicKeyRequest>,
+    ) -> std::result::Result<Response<GetPublicKeyResponse>, Status> {
+        let id = &self.svc.identity;
+        Ok(Response::new(GetPublicKeyResponse {
+            public_key: id.public_key.clone(),
+            suite:      id.suite.clone(),
+            orr_id:     Some(NodeId { value: self.svc.cfg.orr_id.clone() }),
+        }))
+    }
+
+    #[instrument(skip_all, fields(from))]
+    async fn establish_secret(
+        &self,
+        req: Request<EstablishSecretRequest>,
+    ) -> std::result::Result<Response<EstablishSecretResponse>, Status> {
+        let m = req.into_inner();
+        let from = m
+            .from
+            .as_ref()
+            .map(|n| n.value.to_lowercase())
+            .unwrap_or_default();
+        if from.is_empty() {
+            return Ok(Response::new(EstablishSecretResponse {
+                ok:    false,
+                error: "from field required".into(),
+            }));
+        }
+        tracing::Span::current().record("from", tracing::field::display(&from));
+
+        // Idempotente: si ya teníamos master_secret con este peer, no
+        // sobreescribimos (puede ser un reintento del initiator). Aún
+        // así devolvemos ok para que el initiator no haga loop.
+        if self.svc.peers.has_master_secret(&from) {
+            debug!(peer = %from, "orr.establish_secret already_set idempotent_ok");
+            return Ok(Response::new(EstablishSecretResponse {
+                ok:    true,
+                error: String::new(),
+            }));
+        }
+
+        // Decapsular con nuestra sk.
+        let ss = match self.svc.identity.decap(&m.ciphertext) {
+            Ok(ss) => ss,
+            Err(e) => {
+                warn!(peer = %from, error = %e, "orr.establish_secret decap_failed");
+                return Ok(Response::new(EstablishSecretResponse {
+                    ok:    false,
+                    error: format!("decap: {e}"),
+                }));
+            }
+        };
+        if ss.len() != 32 {
+            return Ok(Response::new(EstablishSecretResponse {
+                ok:    false,
+                error: format!("shared_secret unexpected len {}", ss.len()),
+            }));
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&ss);
+        self.svc.peers.put_master_secret(from.clone(), secret);
+        info!(peer = %from, "orr.establish_secret stored");
+        Ok(Response::new(EstablishSecretResponse {
+            ok:    true,
+            error: String::new(),
+        }))
     }
 
     // ── onion-circuit surface (stubs) ──────────────────────────────────

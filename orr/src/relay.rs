@@ -62,6 +62,10 @@ impl CircuitTable {
         self.circuits.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.circuits.is_empty()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = Circuit> + '_ {
         self.circuits.iter().map(|r| r.clone())
     }

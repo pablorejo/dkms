@@ -27,7 +27,7 @@ pub enum TlsError {
 pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let mut rd = BufReader::new(File::open(path)?);
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut rd).collect();
-    Ok(certs.map_err(|_| TlsError::BadPem(path.display().to_string()))?)
+    certs.map_err(|_| TlsError::BadPem(path.display().to_string()))
 }
 
 pub fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {

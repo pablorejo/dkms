@@ -13,6 +13,8 @@ common/src/proto/generated/
 *.key
 !**/certs_test/*.pem
 certs/
+# Demo TLS material (generado por scripts/demo-star/gen-tls.sh)
+scripts/demo-star/tls/
 
 # Editor
 .vscode/

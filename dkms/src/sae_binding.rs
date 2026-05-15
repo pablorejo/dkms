@@ -72,6 +72,38 @@ impl SaeResolver for StaticSaeResolver {
     }
 }
 
+/// Resolver que pregunta a la SDN vía gRPC `GetSaeBinding`. Pensado
+/// para envolverse en [`SaeBindingCache`] (TTL + single-flight) para
+/// que sólo la **primera** consulta de un SAE pegue a la red —
+/// las siguientes se sirven desde la cache hasta que expire la TTL.
+pub struct SdnSaeResolver {
+    sdn: Arc<crate::southbound::SdnClient>,
+}
+
+impl SdnSaeResolver {
+    pub fn new(sdn: Arc<crate::southbound::SdnClient>) -> Self {
+        Self { sdn }
+    }
+}
+
+#[async_trait]
+impl SaeResolver for SdnSaeResolver {
+    async fn resolve(&self, sae: &SaeId) -> Result<NodeId> {
+        let binding = self.sdn.get_sae_binding(sae.as_str()).await.map_err(|e| {
+            // Cualquier error de red lo convertimos a "lookup failed"
+            // para que el caller no se cuelgue y la moka cache no
+            // memoize el error indefinidamente — la TTL la borra a
+            // tiempo, igual que con un SAE realmente desconocido.
+            tracing::debug!(error = %e, sae = %sae, "sdn get_sae_binding failed");
+            DkmsError::SaeBindingLookupFailed(sae.clone())
+        })?;
+        if binding.dkms_id.is_empty() {
+            return Err(DkmsError::SaeBindingLookupFailed(sae.clone()));
+        }
+        Ok(NodeId::new(binding.dkms_id))
+    }
+}
+
 /// Caché con TTL y *single-flight* delante de cualquier [`SaeResolver`].
 pub struct SaeBindingCache {
     cache: Cache<SaeId, NodeId>,

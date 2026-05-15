@@ -13,15 +13,16 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
 
 use common::{logging, metrics::Metrics};
 use dkms::{
     config::DkmsConfig,
     etsi_http, grpc_server,
     peer_client::PeerHttpClient,
-    sae_binding::{SaeBindingCache, StaticSaeResolver},
+    sae_binding::{SaeBindingCache, SaeResolver, SdnSaeResolver, StaticSaeResolver},
     service::DkmsService,
+    southbound::{OrrClient, QkcClient, SdnClient},
     state::{BufferPool, PendingStore},
     token_bucket::SaeBuckets,
 };
@@ -66,32 +67,138 @@ async fn main() -> Result<()> {
         cfg.sae.default_burst_keys,
     ));
 
+    // ─── Cliente DKMS↔DKMS (HTTP/2 ETSI 020) ──────────────────────────
+    // Construido sólo si algún peer usa `transport = "http"`. En modo
+    // ORR-only el PeerHttpClient no se invoca, así que evitamos pagar
+    // el coste (y los problemas de TLS backend) cuando nadie lo necesita.
+    use dkms::config::PeerTransport;
+    let needs_http_peer_client = cfg
+        .peers
+        .values()
+        .any(|p| p.transport == PeerTransport::Http);
+    let peer_client = if needs_http_peer_client {
+        Some(Arc::new(
+            PeerHttpClient::build(
+                &cfg.tls.cert_path,
+                &cfg.tls.key_path,
+                &cfg.tls.peer_dkms_ca,
+                cfg.request.clone(),
+            )
+            .context("peer http client")?,
+        ))
+    } else {
+        info!("no http transport peers configured; skipping peer http client");
+        None
+    };
+
+    // ─── Clientes sur (SDN / QKC / ORR) ──────────────────────────────
+    // Cada uno intenta conectar; si falla, se loguea y se sigue con
+    // `None`. El DKMS arranca aunque sus vecinos no estén listos —
+    // útil en bring-up donde los pods se inician en cualquier orden.
+    let sdn = match SdnClient::connect(&cfg.southbound, None).await {
+        Ok(c) => {
+            info!(endpoint = %cfg.southbound.sdn_endpoint, "sdn client connected");
+            Some(std::sync::Arc::new(c))
+        }
+        Err(e) => {
+            warn!(error = %e, endpoint = %cfg.southbound.sdn_endpoint, "sdn unreachable at boot; continuing without it");
+            None
+        }
+    };
+
     // ─── SAE binding resolver ─────────────────────────────────────────
-    // Por ahora resolver estático: identidad (un SAE vive en este DKMS).
-    // Cuando SDN exponga su RPC, se cambia a un `SdnSaeResolver`.
-    let static_resolver = Arc::new(StaticSaeResolver::new());
+    // Si la SDN está disponible, usamos un `SdnSaeResolver` que consulta
+    // `GetSaeBinding` por gRPC. La `SaeBindingCache` envuelve cualquier
+    // resolver y cachea con TTL — "primera vez SDN, siguientes en
+    // memoria" sale gratis. El mapa estático `[sae_bindings]` del config
+    // sólo se usa cuando la SDN no está cableada (local-dev/CI).
+    let resolver: Arc<dyn SaeResolver> = if let Some(sdn_client) = &sdn {
+        info!("using SdnSaeResolver (SDN-backed)");
+        Arc::new(SdnSaeResolver::new(sdn_client.clone()))
+    } else {
+        let static_resolver = Arc::new(StaticSaeResolver::new());
+        for (sae, node) in &cfg.sae_bindings {
+            static_resolver.insert(
+                common::ids::SaeId::new(sae.clone()),
+                common::ids::NodeId::new(node.clone()),
+            );
+        }
+        if !cfg.sae_bindings.is_empty() {
+            info!(
+                n = cfg.sae_bindings.len(),
+                "loaded static sae bindings from config (SDN unreachable)"
+            );
+        }
+        static_resolver
+    };
     let sae_binding = Arc::new(SaeBindingCache::new(
-        static_resolver,
+        resolver,
         cfg.sae_binding.ttl_secs,
         cfg.sae_binding.max_entries,
     ));
 
-    // ─── Cliente DKMS↔DKMS ────────────────────────────────────────────
-    let peer_client = Arc::new(
-        PeerHttpClient::build(
-            &cfg.tls.cert_path,
-            &cfg.tls.key_path,
-            &cfg.tls.peer_dkms_ca,
-            cfg.request.clone(),
-        )
-        .context("peer http client")?,
-    );
-
-    // ─── Clientes sur (SDN/QKC) ───────────────────────────────────────
-    // En esta fase del rewrite arrancan en None (la SDN y QKC están en
-    // flujo). El servicio funciona sin ellos para el plano norte+este.
-    let sdn = None;
-    let qkc = None;
+    // Suscripción a `StreamTopology`: cuando la SDN avisa de un
+    // cambio, invalidamos la cache de SAE bindings. La siguiente
+    // request volverá a preguntar a la SDN y la cache se rellenará.
+    // Reconnect con backoff exponencial si el stream cae.
+    if let Some(sdn_client) = sdn.clone() {
+        let cache = sae_binding.clone();
+        tokio::spawn(async move {
+            let mut backoff_ms: u64 = 250;
+            loop {
+                match sdn_client.stream_topology().await {
+                    Ok(mut stream) => {
+                        info!("dkms.topology_subscriber connected");
+                        backoff_ms = 250;
+                        while let Some(item) = stream.message().await.transpose() {
+                            match item {
+                                Ok(ev) => {
+                                    cache.invalidate_all().await;
+                                    info!(
+                                        version = ev.version,
+                                        "dkms.sae_binding_cache invalidated"
+                                    );
+                                }
+                                Err(s) => {
+                                    warn!(status = %s, "dkms.topology stream broken");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "dkms.topology subscribe failed; retrying"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(5_000);
+            }
+        });
+    }
+    let qkc = match QkcClient::connect(&cfg.southbound, None).await {
+        Ok(c) => {
+            info!(endpoint = %cfg.southbound.qkc_endpoint, "qkc client connected");
+            Some(std::sync::Arc::new(c))
+        }
+        Err(e) => {
+            warn!(error = %e, endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable at boot; continuing without it");
+            None
+        }
+    };
+    // ORR es opcional por config: si `southbound.orr_endpoint` está
+    // vacío/ausente, `connect_opt` devuelve `Ok(None)` sin loguear.
+    let orr = match OrrClient::connect_opt(&cfg.southbound, None).await {
+        Ok(Some(c)) => {
+            info!(
+                endpoint = %cfg.southbound.orr_endpoint.as_deref().unwrap_or(""),
+                "orr client connected",
+            );
+            Some(std::sync::Arc::new(c))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!(error = %e, "orr unreachable at boot; continuing without it");
+            None
+        }
+    };
 
     let svc = DkmsService::new(
         cfg.clone(),
@@ -102,6 +209,7 @@ async fn main() -> Result<()> {
         sae_binding,
         sdn,
         qkc,
+        orr,
         peer_client,
     );
 

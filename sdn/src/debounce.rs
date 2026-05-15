@@ -220,8 +220,10 @@ impl Debouncer {
 fn spawn_fire(inner: &Arc<Inner>) {
     let f = inner.fire.clone();
     // spawn_blocking so a long MCF solve doesn't tie up a tokio worker.
-    // We don't await the JoinHandle — fires are fire-and-forget.
-    let _ = tokio::task::spawn_blocking(move || {
+    // We don't await the JoinHandle — fires are fire-and-forget. Bound
+    // it with a name (vs `let _ = ...`) so clippy doesn't think we're
+    // dropping an un-awaited future without spawning.
+    let _handle = tokio::task::spawn_blocking(move || {
         // Catch panics so a buggy fire fn can't kill the runtime.
         if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
             warn!(?payload, "debouncer fire panicked");

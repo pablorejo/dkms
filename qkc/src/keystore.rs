@@ -41,14 +41,23 @@ use crate::{
 /// Cantidad objetivo de claves en el buffer ENC.
 pub const BUFFER_TARGET: usize = 2048;
 /// Umbral bajo el cual el worker dispara un refill.
-pub const REFILL_THRESHOLD: usize = 1024;
-/// Lote por refill cuando el buffer baja del threshold.
-pub const REFILL_BATCH: u32 = 1024;
+///
+/// Se mantiene bajo (256) para que el worker reaccione antes y no
+/// haya largos periodos de buffer drenado durante carga. Con R0 bajo
+/// (p.ej. 2000 keys/s) además interactúa mal tener un umbral grande:
+/// el worker espera demasiado entre refills.
+pub const REFILL_THRESHOLD: usize = 256;
+/// Lote por refill. Igual a `max_key_per_request` del quditto (128)
+/// para que cada request HTTP se sirva COMPLETA en el tick siguiente
+/// (200 keys/100 ms a R0=2000) sin partials → menos overhead.
+pub const REFILL_BATCH: u32 = 128;
 
 /// Tope de IDs pendientes de `dec_keys` antes de aplastar. Si el peer
 /// notifica más rápido de lo que podemos absorber, el remanente queda
-/// en la cola interna.
-const DEC_BATCH_MAX: usize = 4096;
+/// en la cola interna. Lo mantenemos pequeño para igual razón que
+/// `REFILL_BATCH`: lotes grandes con quditto sin stock generan
+/// roundtrips lentos.
+const DEC_BATCH_MAX: usize = 128;
 
 pub struct KeyStore {
     /// Buffer FIFO de claves listas para cifrar (mías a cuenta del peer).
@@ -375,7 +384,7 @@ impl KeyStore {
             // volvemos a esperar el siguiente notify.
             while self.enc.len() < REFILL_THRESHOLD {
                 let space = self.enc.capacity() - self.enc.len();
-                let batch = (space as u32).min(REFILL_BATCH).max(1);
+                let batch = (space as u32).clamp(1, REFILL_BATCH);
                 match self.kme.enc_keys(batch).await {
                     Ok(keys) => {
                         self.n_refills_enc.fetch_add(1, Ordering::Relaxed);

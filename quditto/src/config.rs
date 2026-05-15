@@ -43,7 +43,7 @@ impl QudittoConfig {
         if self.max_buffer_keys == 0 {
             return Err("max_buffer_keys must be > 0".into());
         }
-        if self.key_size_bits == 0 || self.key_size_bits % 8 != 0 {
+        if self.key_size_bits == 0 || !self.key_size_bits.is_multiple_of(8) {
             return Err(format!(
                 "key_size_bits must be a positive multiple of 8, got {}",
                 self.key_size_bits

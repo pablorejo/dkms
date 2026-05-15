@@ -1,3 +1,8 @@
+// OrrError envuelve io::Error/anyhow::Error (~176 B) por #[from], lo que
+// dispara `result_large_err` en cada Result<(), OrrError>. Boxearlos sería
+// churn cosmético — los retornos no van por hot paths.
+#![allow(clippy::result_large_err)]
+
 //! ORR — Onion Routing Router.
 //!
 //! Capa entre el DKMS (gRPC, `OrrControl`) y el QKC co-localizado
@@ -16,7 +21,9 @@
 //! XOR-cipher ("OTP-style") por capa usando los secrets concatenados.
 //! Ver [`onion`] para el formato exacto.
 
+pub mod bootstrap;
 pub mod config;
+pub mod dkms_header;
 pub mod error;
 pub mod grpc_server;
 pub mod handshake;
@@ -26,4 +33,5 @@ pub mod onion;
 pub mod peers;
 pub mod qkc_link;
 pub mod relay;
+pub mod sdn_client;
 pub mod service;

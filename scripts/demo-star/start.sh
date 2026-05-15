@@ -91,7 +91,18 @@ wait_http() {
 }
 
 # ─── 4. Arrancar los 8 qudittos ───────────────────────────────────────
-echo "── arrancando 8 qudittos (R0=100M, buffer=1M)…"
+# Parametrizable por env vars para pruebas de QKD realista:
+#   QD_R0           — keys/s a distancia 0 (default 100M para no estrangular)
+#   QD_ALPHA        — atenuación dB/km (default 0)
+#   QD_DISTANCE_KM  — distancia óptica del enlace (default 0)
+#   QD_BUFFER       — max-buffer (default 1M claves)
+#   QD_KEY_BITS     — key-size-bits (default 1024)
+QD_R0=${QD_R0:-100000000}
+QD_ALPHA=${QD_ALPHA:-0}
+QD_DISTANCE_KM=${QD_DISTANCE_KM:-0}
+QD_BUFFER=${QD_BUFFER:-1048576}
+QD_KEY_BITS=${QD_KEY_BITS:-1024}
+echo "── arrancando 8 qudittos (R0=$QD_R0 alpha=$QD_ALPHA d=$QD_DISTANCE_KM km buf=$QD_BUFFER kbits=$QD_KEY_BITS)…"
 QD_PORTS=(8011 8012 8021 8022 8031 8032 8041 8042)
 QD_NAMES=("qd-1a" "qd-1b" "qd-2a" "qd-2b" "qd-3a" "qd-3b" "qd-4a" "qd-4b")
 for i in "${!QD_PORTS[@]}"; do
@@ -99,7 +110,8 @@ for i in "${!QD_PORTS[@]}"; do
     name=${QD_NAMES[$i]}
     start_bg "$name" "$ROOT/target/release/quditto" \
         --listen "127.0.0.1:$port" \
-        --r0 100000000 --alpha 0 --distance 0 --max-buffer 1048576 --key-size-bits 1024
+        --r0 "$QD_R0" --alpha "$QD_ALPHA" --distance "$QD_DISTANCE_KM" \
+        --max-buffer "$QD_BUFFER" --key-size-bits "$QD_KEY_BITS"
 done
 for port in "${QD_PORTS[@]}"; do
     wait_http "http://127.0.0.1:$port/healthz" "qd-port-$port" 15
@@ -126,6 +138,12 @@ for p in "${PEER_LOCAL_PORTS[@]}"; do
 done
 
 # ─── 6. Forwarding tables ─────────────────────────────────────────────
+# Si la SDN va a empujar las tablas (SKIP_FORWARDING=1), no hace falta
+# que las populemos nosotros con curl — la SDN las recalcula desde su
+# topología y hace POST a cada QKC al arrancar y en cada version bump.
+if [ "${SKIP_FORWARDING:-0}" = "1" ]; then
+    echo "── (skipping forwarding bootstrap; será empujado por SDN)"
+else
 echo "── poblando forwarding tables…"
 # HUB-0: vecinos directos {1,2,3,4}. Las hojas NO son vecinos directos
 # (su único enlace es con su intermedio), así que hay que enseñar
@@ -173,6 +191,8 @@ curl -fsS -X POST http://127.0.0.1:7233/forwarding-table \
 curl -fsS -X POST http://127.0.0.1:7244/forwarding-table \
     -H 'content-type: application/json' \
     -d '{"replace":{"0":4,"1":4,"2":4,"3":4,"11":4,"22":4,"33":4}}' >/dev/null
+
+fi  # end SKIP_FORWARDING
 
 echo
 echo "✓ topología estrella arriba (1 hub + 4 ramas × 2 nodos)."
