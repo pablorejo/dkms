@@ -68,6 +68,8 @@ class Orchestator:
         image_sdn: str | None = None,
         image_dkms: str | None = None,
         image_quditto: str | None = None,
+        image_orr: str | None = None,
+        image_qkc: str | None = None,
         image_pull_secret: str | None = None,
         image_pull_policy: str | None = None,
     ) -> None:
@@ -79,6 +81,13 @@ class Orchestator:
         self.image_sdn = image_sdn or os.getenv("SDN_IMAGE")
         self.image_dkms = image_dkms or os.getenv("DKMS_IMAGE")
         self.image_quditto = image_quditto or os.getenv("QUDITTO_IMAGE")
+        # Rust split (opt-in vía K8S_DKMS_RUST_SIDECARS en pods.py). Si no
+        # se pasan, los defaults vienen del módulo ``pods`` con sus env
+        # vars correspondientes — esto es seguro tener siempre seteado
+        # porque ``PodDKMS.create_pod`` ignora ``orr_image``/``qkc_image``
+        # cuando el flag de sidecars está desactivado.
+        self.image_orr = image_orr or os.getenv("ORR_IMAGE")
+        self.image_qkc = image_qkc or os.getenv("QKC_IMAGE")
         self.image_pull_secret = image_pull_secret or os.getenv("K8S_IMAGE_PULL_SECRET")
         self.image_pull_policy = image_pull_policy or os.getenv("K8S_IMAGE_PULL_POLICY")
         self.namespace_delete_timeout_seconds = max(
@@ -845,6 +854,8 @@ class Orchestator:
                     image_pull_secret=self.image_pull_secret,
                     env_vars=dkms_env,
                     quditto_image=self.image_quditto,
+                    orr_image=self.image_orr,
+                    qkc_image=self.image_qkc,
                 )
 
             pod_sdn.create_simulation_ingress(dkms_pods=dkms_pods, sdn_pod=pod_sdn)
@@ -1016,6 +1027,8 @@ class Orchestator:
                     "DKMS_SDN_PORT": str(sdn_service_port),
                 },
                 quditto_image=self.image_quditto,
+                orr_image=self.image_orr,
+                qkc_image=self.image_qkc,
             )
             self.pods_dkms[(simulation_key, dkms_id)] = pod_dkms
 
