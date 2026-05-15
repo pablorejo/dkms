@@ -3,7 +3,7 @@ export type LinkType = "QKD" | "PQC" | "HYBRID";
 export type RunStatus = "QUEUED" | "RUNNING" | "DONE" | "FAILED";
 export type SimulationStatus = "pending" | "running" | "finished" | "error";
 
-export const DEFAULT_QUDITTO_RATE_R0 = 120;
+export const DEFAULT_QUDITTO_RATE_R0 = 2000;
 export const DEFAULT_QUDITTO_RATE_ALPHA = 0.2;
 
 export interface SimulationNodeInput {

@@ -952,18 +952,20 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
   );
 
   const fetchSaeAndRuntimeData = useCallback(
-    async (): Promise<{
+    async (signal?: AbortSignal): Promise<{
       saes: SaeAdminRecord[];
       runtimeByNode: Record<string, DkmsRuntimeInfo>;
     }> => {
       const [saesResponse, runtimeResponse] = await Promise.all([
         fetch(apiPath(`/api/simulations/${simulationId}/saes`), {
           method: "GET",
-          cache: "no-store"
+          cache: "no-store",
+          signal
         }),
         fetch(apiPath(`/api/simulations/${simulationId}/dkms-runtime`), {
           method: "GET",
-          cache: "no-store"
+          cache: "no-store",
+          signal
         })
       ]);
 
@@ -1014,7 +1016,8 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
             try {
               const response = await fetch(apiPath(`/api/simulations/${simulationId}/saes?dkmsId=${nodeId}`), {
                 method: "GET",
-                cache: "no-store"
+                cache: "no-store",
+                signal
               });
               if (!response.ok) {
                 return [] as SaeAdminRecord[];
@@ -1046,23 +1049,31 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     [simulationId]
   );
 
-  const refreshSaeOverlayData = useCallback(async () => {
+  const refreshSaeOverlayData = useCallback(async (signal?: AbortSignal) => {
     try {
       setSaeOverlayLoading(true);
-      const { saes: saeRecords, runtimeByNode } = await fetchSaeAndRuntimeData();
+      const { saes: saeRecords, runtimeByNode } = await fetchSaeAndRuntimeData(signal);
 
+      if (signal?.aborted) {
+        return;
+      }
       setAllSaes(saeRecords);
       setDkmsRuntimeMap(runtimeByNode);
       const nextGraph = applySaeOverlayToGraph(nodesRef.current, edgesRef.current, saeRecords, runtimeByNode);
       setNodes(nextGraph.nodes);
       setEdges(nextGraph.edges);
-    } catch {
+    } catch (error) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        return;
+      }
       if (!saeOverlayEnabled) {
         return;
       }
       setActionMessage("Could not load SAE overlay data.");
     } finally {
-      setSaeOverlayLoading(false);
+      if (!signal?.aborted) {
+        setSaeOverlayLoading(false);
+      }
     }
   }, [applySaeOverlayToGraph, fetchSaeAndRuntimeData, saeOverlayEnabled]);
 
@@ -1079,7 +1090,11 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
       setSelectedNodeId((current) => (current?.startsWith("sae-") ? null : current));
       return;
     }
-    void refreshSaeOverlayData();
+    const controller = new AbortController();
+    void refreshSaeOverlayData(controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, [saeOverlayEnabled]);
 
   useEffect(() => {

@@ -27,8 +27,18 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<ProtoTopology>,
     ) -> std::result::Result<Response<ProtoStatus>, Status> {
-        // TODO: parse the proto, build a fresh Topology, swap it in.
-        Ok(Response::new(ProtoStatus::default()))
+        // FUERA DE ESCALCANCE: mutar la topología (añadir/quitar QKC,
+        // ORR, DKMS, enlaces) en runtime no forma parte de este
+        // proyecto. La topología se carga al boot desde
+        // `cfg.topology_dir` (JSON) y vive inmutable hasta reiniciar
+        // el SDN. Las únicas mutaciones soportadas son las del SAE
+        // binding vía HTTP admin (`/sae`, `/sae/:id`). Ver CLAUDE.md
+        // "Scope boundaries" para detalles.
+        Err(Status::unimplemented(
+            "PutTopology is out of scope: topology is loaded at boot from `topology_dir` \
+             and immutable until SDN restart. Only SAE bindings are mutable at runtime \
+             via HTTP admin (POST/PUT/DELETE /sae)."
+        ))
     }
 
     #[instrument(skip_all)]
@@ -36,7 +46,14 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<LinkUpdate>,
     ) -> std::result::Result<Response<ProtoStatus>, Status> {
-        Ok(Response::new(ProtoStatus::default()))
+        // FUERA DE ALCANCE: ver `put_topology`. La capacidad de un
+        // enlace SÍ se puede mutar, pero por el HTTP admin endpoint
+        // `POST /link-capacity` (no por gRPC).
+        Err(Status::unimplemented(
+            "UpdateLink is out of scope. For link-capacity updates use HTTP admin \
+             `POST /link-capacity`. Topology mutations (links, nodes) are not \
+             supported at runtime."
+        ))
     }
 
     #[instrument(skip_all)]

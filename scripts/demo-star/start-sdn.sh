@@ -44,6 +44,14 @@ echo "── generando topología estrella en $TOPO/"
 rm -rf "$TOPO" "$CFG"
 mkdir -p "$TOPO/QKC" "$TOPO/ORR" "$TOPO/DKMS" "$TOPO/SAE" "$CFG"
 
+# Parámetros del modelo de quditto que la SDN usa para calcular capacidades.
+# Idealmente coinciden con los que pasaste a `start.sh` para el quditto real;
+# si no, los rates que devuelve `GET /rate` no reflejan la realidad.
+SDN_QD_R0=${SDN_QD_R0:-${QD_R0:-100000000}}
+SDN_QD_ALPHA=${SDN_QD_ALPHA:-${QD_ALPHA:-0}}
+SDN_QD_BUFFER=${SDN_QD_BUFFER:-${QD_BUFFER:-1048576}}
+echo "── SDN model: R0=$SDN_QD_R0 alpha=$SDN_QD_ALPHA buffer=$SDN_QD_BUFFER"
+
 # 9 QKCs: hub (0), 4 intermedios (1-4), 4 hojas (11/22/33/44).
 # Cada QKC tiene su host {id, ip, port} y opcionalmente `kmes` (canales).
 emit_qkc() {
@@ -52,7 +60,7 @@ emit_qkc() {
     local first=1
     for n in "$@"; do
         if [ $first -eq 1 ]; then first=0; else nei+=","; fi
-        nei+="$(printf '{"neighbor_qkc_id":"%s","channel":{"distance":1,"quditto_rate_r0":100000000,"quditto_rate_alpha":0,"quditto_max_buffer_size":1048576}}' "$n")"
+        nei+="$(printf '{"neighbor_qkc_id":"%s","channel":{"distance":1,"quditto_rate_r0":%s,"quditto_rate_alpha":%s,"quditto_max_buffer_size":%s}}' "$n" "$SDN_QD_R0" "$SDN_QD_ALPHA" "$SDN_QD_BUFFER")"
     done
     cat > "$TOPO/QKC/qkc-$id.json" <<EOF
 {

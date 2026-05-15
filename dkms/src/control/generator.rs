@@ -1,0 +1,507 @@
+//! Generator: scheduler que rellena los buffers ENC compartidos con
+//! cada peer DKMS al ritmo que dicte el SDN.
+//!
+//! Estructura por peer:
+//!
+//! ```text
+//!   rate (HashMap<(peer, role), f64>)
+//!     ↓ refill cada N ms
+//!   token_bucket (HashMap<peer, BucketState>)
+//!     ↓ consume tokens en cada tick
+//!   key_bytes = random(key_size)
+//!   key_id    = uuid4()
+//!     ↓ insert
+//!   ack_pending[peer][key_id] = (bytes, deadline)
+//!     ↓ send via ORR
+//!   orr.send_key(peer, bytes, header={msg_type=DKMS_BUFFER, key_id, ack_endpoint, …}, max_hops=1)
+//! ```
+//!
+//! Cuando el peer recibe la clave (handle_orr_delivery), la guarda en su
+//! `buffer_dec[source]` y manda FRAME_ACK por TCP a `ack_endpoint`. El
+//! ACK socket de este DKMS lo recibe y llama a [`Generator::on_ack`],
+//! que mueve la clave de `ack_pending` a `BufferPool.enc[peer]`.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
+use rand::RngCore;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use common::ids::KeyId;
+
+use crate::{
+    config::{DkmsConfig, GeneratorCfg, PeerTransport},
+    control::ack_pending::{AckPendingEntry, AckPendingStore},
+    control::priority::{classify, BufferQos},
+    southbound::{
+        orr::{
+            HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_REQUEST_ID,
+            HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
+        },
+        sdn_http::PriorityUpdate,
+        OrrClient, SdnHttpClient,
+    },
+    state::{buffer::TransportKey, BufferPool},
+};
+
+/// Estado de un token bucket per (peer, role=ENC). El refill se calcula
+/// en cada operación a partir del tiempo transcurrido y la rate cacheada.
+#[derive(Debug, Clone, Copy)]
+struct BucketState {
+    /// Tokens disponibles (`f64` para soportar rates fraccionarias).
+    tokens: f64,
+    /// Último instante en que se refilló.
+    last_refill: Instant,
+}
+
+impl BucketState {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: 0.0,
+            last_refill: now,
+        }
+    }
+
+    /// Refilla tokens según `rate × elapsed`, cap en `cap`. Devuelve la
+    /// cantidad entera tomada respetando `max_take`.
+    fn refill_and_take(&mut self, now: Instant, rate: f64, cap: f64, max_take: u32) -> u32 {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(cap);
+        self.last_refill = now;
+        let to_take = (self.tokens as u32).min(max_take);
+        self.tokens -= to_take as f64;
+        if self.tokens < 0.0 {
+            self.tokens = 0.0;
+        }
+        to_take
+    }
+}
+
+#[derive(Clone)]
+pub struct Generator {
+    cfg:          Arc<GeneratorCfg>,
+    my_dkms_id:   String,
+    /// Mapa peer_dkms_id → orr_id, derivado de cfg.peers en el constructor.
+    /// Solo se incluyen peers con `transport = "orr"`.
+    peers_orr:    Arc<HashMap<String, String>>,
+    /// Rate cacheada por (peer, role). Solo usamos role=Enc para refill.
+    rates_enc:    Arc<Mutex<HashMap<String, f64>>>,
+    buckets:      Arc<Mutex<HashMap<String, BucketState>>>,
+    /// Contador acumulativo de claves que llegaron a `buffer_enc[peer]`
+    /// vía ACK. Permite calcular la **rate efectiva de fill** comparando
+    /// dos snapshots — clave para validar la rate asignada por el SDN.
+    /// `peer_dkms_id → contador`. Se accede sin lock porque AtomicU64.
+    emit_counters: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    pool:         Arc<BufferPool>,
+    pub ack_pending: Arc<AckPendingStore>,
+    orr:          Arc<OrrClient>,
+    sdn_http:     Arc<SdnHttpClient>,
+    ack_endpoint: Option<String>,
+    default_max_hops: i32,
+}
+
+impl Generator {
+    /// Construye el Generator. No lanza ningún task — para arrancar los
+    /// loops llamar a [`Generator::spawn_background`].
+    pub fn new(
+        cfg: &DkmsConfig,
+        orr: Arc<OrrClient>,
+        sdn_http: Arc<SdnHttpClient>,
+        pool: Arc<BufferPool>,
+        ack_pending: Arc<AckPendingStore>,
+    ) -> Self {
+        let mut peers_orr = HashMap::new();
+        for (peer_id, pc) in &cfg.peers {
+            if pc.transport == PeerTransport::Orr {
+                if let Some(orr_id) = &pc.orr_id {
+                    peers_orr.insert(peer_id.clone(), orr_id.clone());
+                } else {
+                    warn!(
+                        peer = peer_id,
+                        "generator: peer transport=orr sin orr_id configurado, se ignora"
+                    );
+                }
+            }
+        }
+        let ack_endpoint = cfg.generator.ack_socket_addr.map(|a| a.to_string());
+        Self {
+            cfg: Arc::new(cfg.generator.clone()),
+            my_dkms_id: cfg.node_id.clone(),
+            peers_orr: Arc::new(peers_orr),
+            rates_enc: Arc::new(Mutex::new(HashMap::new())),
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+            emit_counters: Arc::new(Mutex::new(HashMap::new())),
+            pool,
+            ack_pending,
+            orr,
+            sdn_http,
+            ack_endpoint,
+            default_max_hops: cfg.southbound.default_max_hops,
+        }
+    }
+
+    /// Handle a la tabla de rates polleada del SDN. Útil para compartir
+    /// con el `SaeBufferBuckets` que necesita la misma `link_capacity`
+    /// para calcular `refill = capacity / N_active_SAEs`.
+    pub fn rates_handle(&self) -> Arc<Mutex<HashMap<String, f64>>> {
+        self.rates_enc.clone()
+    }
+
+    /// Obtiene (o crea) el counter acumulativo para un peer.
+    fn counter_for(&self, peer: &str) -> Arc<AtomicU64> {
+        let mut g = self.emit_counters.lock();
+        g.entry(peer.to_owned())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    /// Lanza los 3 loops del Generator (refresh de rates, scheduler tick,
+    /// reaper de ack_pending). Devuelve un `JoinSet` para que el caller
+    /// pueda await o abort.
+    pub fn spawn_background(self) -> Arc<Self> {
+        let me = Arc::new(self);
+        if !me.cfg.enabled {
+            info!("generator: deshabilitado por config");
+            return me;
+        }
+        if me.peers_orr.is_empty() {
+            info!("generator: ningún peer con transport=orr — no se generan claves");
+            return me;
+        }
+        let rate_loop = me.clone();
+        tokio::spawn(async move {
+            rate_loop.run_rate_refresh_loop().await;
+        });
+        let tick_loop = me.clone();
+        tokio::spawn(async move {
+            tick_loop.run_tick_loop().await;
+        });
+        let reaper_loop = me.clone();
+        tokio::spawn(async move {
+            reaper_loop.run_reaper_loop().await;
+        });
+        let log_loop = me.clone();
+        tokio::spawn(async move {
+            log_loop.run_state_log_loop().await;
+        });
+        let priority_loop = me.clone();
+        tokio::spawn(async move {
+            priority_loop.run_priority_loop().await;
+        });
+        info!(
+            my_dkms = %me.my_dkms_id,
+            n_peers = me.peers_orr.len(),
+            tick_ms = me.cfg.tick_ms,
+            ack_timeout_ms = me.cfg.ack_timeout_ms,
+            "generator background started",
+        );
+        me
+    }
+
+    /// Cada 5s loguea el estado de buffers ENC, DEC, ack_pending y la
+    /// **rate de emit observada** comparando contadores cumulativos
+    /// entre snapshots — comparar con la rate asignada por el SDN para
+    /// validar el plumbing.
+    async fn run_state_log_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // saltar el primer tick inmediato
+        tick.tick().await;
+
+        let mut prev: HashMap<String, (u64, Instant)> = HashMap::new();
+        loop {
+            tick.tick().await;
+            let now = Instant::now();
+            let pool_snap = self.pool.snapshot();
+            let ack_snap: HashMap<String, usize> = self
+                .ack_pending
+                .snapshot()
+                .into_iter()
+                .collect();
+            let rates_snap = self.rates_enc.lock().clone();
+            let counters_snap: HashMap<String, u64> = {
+                let g = self.emit_counters.lock();
+                g.iter()
+                    .map(|(p, c)| (p.clone(), c.load(Ordering::Relaxed)))
+                    .collect()
+            };
+            // Unión de peers que aparecen en pool_snap y en peers_orr.
+            let mut all_peers: std::collections::BTreeSet<String> =
+                pool_snap.iter().map(|(p, _, _)| p.clone()).collect();
+            for p in self.peers_orr.keys() {
+                all_peers.insert(p.clone());
+            }
+            for peer in all_peers {
+                let (enc_len, dec_len) = pool_snap
+                    .iter()
+                    .find(|(p, _, _)| p == &peer)
+                    .map(|(_, e, d)| (*e, *d))
+                    .unwrap_or((0, 0));
+                let ack_pending = ack_snap.get(&peer).copied().unwrap_or(0);
+                let rate_sdn = rates_snap.get(&peer).copied().unwrap_or(0.0);
+                let emit_total = counters_snap.get(&peer).copied().unwrap_or(0);
+                let observed_rate = if let Some((prev_total, prev_t)) = prev.get(&peer) {
+                    let dt = now.saturating_duration_since(*prev_t).as_secs_f64();
+                    if dt > 0.0 {
+                        (emit_total.saturating_sub(*prev_total) as f64) / dt
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                prev.insert(peer.clone(), (emit_total, now));
+                info!(
+                    peer = %peer,
+                    enc = enc_len,
+                    dec = dec_len,
+                    ack_pending,
+                    emit_total,
+                    observed_keys_per_s = format!("{observed_rate:.1}"),
+                    sdn_rate_keys_per_s = format!("{rate_sdn:.1}"),
+                    "generator.state",
+                );
+            }
+        }
+    }
+
+    /// Punto de entrada del ACK socket: el peer confirma que recibió la
+    /// clave `key_id`. Movemos la entrada de `ack_pending[peer]` a
+    /// `BufferPool.enc[peer]`. Devuelve `true` si se movió.
+    pub fn on_ack(&self, peer_dkms_id: &str, key_id: &KeyId) -> bool {
+        let Some(entry) = self.ack_pending.take(peer_dkms_id, key_id) else {
+            debug!(peer = peer_dkms_id, key_id = %key_id, "generator.on_ack miss");
+            return false;
+        };
+        let buf = self.pool.for_peer(peer_dkms_id);
+        let key = TransportKey {
+            id:    key_id.clone(),
+            bytes: entry.bytes,
+        };
+        if let Err(rejected) = buf.enc.try_push(key) {
+            // Buffer lleno: la clave se descarta (zeroize en Drop).
+            warn!(
+                peer = peer_dkms_id,
+                key_id = %rejected.id,
+                "generator.on_ack: buffer_enc full, key dropped",
+            );
+            return false;
+        }
+        self.counter_for(peer_dkms_id).fetch_add(1, Ordering::Relaxed);
+        debug!(peer = peer_dkms_id, key_id = %key_id, "generator.ack ok → buffer_enc");
+        true
+    }
+
+    // ────────────────────── internal loops ──────────────────────────────
+
+    /// Polling periódico de `GET /rate/{dkms_id}`. Actualiza el caché
+    /// `rates_enc`. Reintentos con backoff si el SDN no responde.
+    async fn run_rate_refresh_loop(self: Arc<Self>) {
+        let period = Duration::from_millis(self.cfg.rate_refresh_ms);
+        let mut backoff_ms = 500u64;
+        loop {
+            match self.sdn_http.get_rates(&self.my_dkms_id).await {
+                Ok(resp) => {
+                    let mut by_peer: HashMap<String, f64> = HashMap::new();
+                    for (peer, rate) in resp.peers.iter() {
+                        // Solo nos interesa la rate de ENC (generación).
+                        // DEC la lleva el SDN simétricamente pero no la
+                        // usamos para refill del bucket local.
+                        by_peer.insert(peer.clone(), rate.enc);
+                    }
+                    let n = by_peer.len();
+                    *self.rates_enc.lock() = by_peer;
+                    backoff_ms = 500;
+                    debug!(
+                        peers = n,
+                        topology_version = resp.topology_version,
+                        "generator.rates refreshed from SDN",
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        error = %e,
+                        backoff_ms,
+                        "generator.rates refresh failed; will retry",
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(10_000);
+                    continue;
+                }
+            }
+            tokio::time::sleep(period).await;
+        }
+    }
+
+    /// Scheduler tick: por cada peer, consume tokens según rate y emite
+    /// claves vía ORR. Cada tick es independiente del anterior.
+    async fn run_tick_loop(self: Arc<Self>) {
+        let tick_period = Duration::from_millis(self.cfg.tick_ms);
+        loop {
+            let started = Instant::now();
+            self.tick_once(started).await;
+            let elapsed = started.elapsed();
+            if elapsed < tick_period {
+                tokio::time::sleep(tick_period - elapsed).await;
+            }
+        }
+    }
+
+    async fn tick_once(self: &Arc<Self>, now: Instant) {
+        // Snapshot del rate cache (lock corto).
+        let rates_snapshot: Vec<(String, f64)> = {
+            let g = self.rates_enc.lock();
+            g.iter().map(|(p, r)| (p.clone(), *r)).collect()
+        };
+        for (peer, rate) in rates_snapshot {
+            if rate <= 0.0 {
+                continue;
+            }
+            // El peer debe estar configurado con transport=orr para
+            // generar — los rates vienen para todos los peers DKMS del
+            // grafo pero solo emitimos hacia los nuestros.
+            if !self.peers_orr.contains_key(&peer) {
+                continue;
+            }
+            let cap = (self.cfg.bucket_cap_seconds * rate).max(2.0);
+            let tokens = {
+                let mut b = self.buckets.lock();
+                let st = b.entry(peer.clone()).or_insert_with(|| BucketState::new(now));
+                st.refill_and_take(now, rate, cap, self.cfg.max_tokens_per_peer_per_tick)
+            };
+            if tokens == 0 {
+                continue;
+            }
+            // Si el buffer_enc destino está lleno, no quemamos tokens
+            // generando: ya tenemos material reservado pero pendiente
+            // de consumo. Esto evita acumular keys que se zeroizan al
+            // expirar el ack_pending sin uso.
+            let buf = self.pool.for_peer(&peer);
+            if buf.enc.len() + self.ack_pending.pending_count(&peer) >= buf.enc.capacity() {
+                continue;
+            }
+            for _ in 0..tokens {
+                if let Err(e) = self.clone().emit_key(&peer).await {
+                    warn!(peer = %peer, error = %e, "generator.emit failed");
+                }
+            }
+        }
+    }
+
+    /// Emite UNA clave hacia el peer: genera bytes, registra en
+    /// ack_pending, envía vía ORR.
+    async fn emit_key(self: Arc<Self>, peer_dkms_id: &str) -> anyhow::Result<()> {
+        let Some(dest_orr_id) = self.peers_orr.get(peer_dkms_id).cloned() else {
+            return Ok(()); // no debería pasar (filtrado antes)
+        };
+        let mut bytes = vec![0u8; self.cfg.key_size_bytes];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let key_id_str = Uuid::new_v4().to_string();
+        let key_id = KeyId::new(&key_id_str);
+        let deadline = Instant::now() + Duration::from_millis(self.cfg.ack_timeout_ms);
+        // Registramos ANTES de mandar — si el ACK llega antes del .await
+        // del send (poco probable pero existe), el on_ack ya tiene la
+        // entrada.
+        let entry_bytes = bytes.clone();
+        self.ack_pending.insert(
+            peer_dkms_id,
+            key_id.clone(),
+            AckPendingEntry::new(entry_bytes, deadline),
+        );
+
+        let mut header: BTreeMap<String, String> = BTreeMap::new();
+        header.insert(HDR_MSG_TYPE.into(), MSG_TYPE_DKMS_BUFFER.into());
+        header.insert(HDR_KEY_ID.into(), key_id_str.clone());
+        header.insert(HDR_SAE_ORIGIN.into(), self.my_dkms_id.clone());
+        header.insert(
+            HDR_KEY_SIZE_BITS.into(),
+            (self.cfg.key_size_bytes * 8).to_string(),
+        );
+        header.insert(
+            HDR_TIMESTAMP_MS.into(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+                .to_string(),
+        );
+        header.insert(HDR_REQUEST_ID.into(), format!("gen-{}", key_id_str));
+        if let Some(ep) = &self.ack_endpoint {
+            header.insert(HDR_ACK_ENDPOINT.into(), ep.clone());
+        }
+        if let Err(e) = self
+            .orr
+            .send_key(&dest_orr_id, bytes, header, self.default_max_hops)
+            .await
+        {
+            // Si el ORR falla, no esperamos ACK — retiramos del pending.
+            let _ = self.ack_pending.take(peer_dkms_id, &key_id);
+            return Err(anyhow::anyhow!(e.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn run_reaper_loop(self: Arc<Self>) {
+        let period = Duration::from_millis(self.cfg.ack_reaper_ms);
+        loop {
+            let removed = self.ack_pending.reap_expired(Instant::now());
+            if removed > 0 {
+                warn!(removed, "generator.ack_reaper: expired pending keys");
+            }
+            tokio::time::sleep(period).await;
+        }
+    }
+
+    /// Cada `priority_refresh_ms` recalcula el `BufferQos` de cada peer
+    /// a partir del fill_ratio de `buffer_enc[peer]` (incluyendo el
+    /// `ack_pending` como "en vuelo"). Si la clase cambió respecto a la
+    /// última reportada, POSTea al SDN. El SDN re-computa MCF y la
+    /// siguiente consulta de `get_rates` ya devuelve las nuevas rates
+    /// para que el token bucket per-peer se ajuste.
+    async fn run_priority_loop(self: Arc<Self>) {
+        // Refresh a la misma cadencia que rates (default 5 s) — basta
+        // para reaccionar sin spamear.
+        let period = Duration::from_millis(self.cfg.rate_refresh_ms);
+        let mut last_reported: HashMap<String, BufferQos> = HashMap::new();
+        loop {
+            tokio::time::sleep(period).await;
+            let mut updates: Vec<PriorityUpdate> = Vec::new();
+            for peer in self.peers_orr.keys() {
+                let buf = self.pool.for_peer(peer);
+                let occupancy = buf.enc.len() + self.ack_pending.pending_count(peer);
+                let cap = buf.enc.capacity().max(1);
+                let fill = (occupancy as f64 / cap as f64).clamp(0.0, 1.0);
+                let prev = last_reported.get(peer).copied();
+                let new_class = classify(fill, prev);
+                if Some(new_class) != prev {
+                    info!(
+                        peer = %peer,
+                        fill = format!("{:.3}", fill),
+                        from = ?prev.map(|p| p.as_str()),
+                        to = new_class.as_str(),
+                        "generator.priority transition",
+                    );
+                    updates.push(PriorityUpdate {
+                        dkms_id: self.my_dkms_id.clone(),
+                        peer:    peer.clone(),
+                        role:    "enc_keys".into(),
+                        class:   new_class.as_str().into(),
+                    });
+                    last_reported.insert(peer.clone(), new_class);
+                }
+            }
+            if updates.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.sdn_http.post_priority(&updates).await {
+                warn!(error = %e, n = updates.len(), "generator.priority POST failed");
+            }
+        }
+    }
+}

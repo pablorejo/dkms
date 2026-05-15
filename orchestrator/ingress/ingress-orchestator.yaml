@@ -11,7 +11,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  - host: dkms.uvigo.com
+  - host: __INGRESS_HOST__
     http:
       paths:
       - path: /orch(/|$)(.*)

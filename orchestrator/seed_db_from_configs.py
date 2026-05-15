@@ -724,7 +724,7 @@ def main() -> int:
         session.flush()
         user_id = user_entity.id
 
-        placeholder_sdn = ModelSDN(id=None, id_host=None, host=None, type_http=HTTPType.HTTPS)
+        placeholder_sdn = ModelSDN(id=None, id_host=None, host=None, type_http=HTTPType.HTTP)
         simulation = ModelSimulation(
             id_user=user_id,
             name=args.simulation_name,

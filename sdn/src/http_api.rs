@@ -17,6 +17,8 @@
 //! Auth/JWT is intentionally out of scope here; the web frontend gates
 //! access at its own layer.
 
+use std::str::FromStr;
+
 use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
@@ -71,6 +73,143 @@ async fn get_dkms_all(State(svc): State<SdnService>) -> impl IntoResponse {
 
 async fn get_saes(State(svc): State<SdnService>) -> impl IntoResponse {
     Json(svc.topology.load().saes.values().cloned().collect::<Vec<_>>())
+}
+
+/// GET /rate/{dkms_id} — devuelve las rates per-peer asignadas por el MCF solver.
+///
+/// Formato:
+/// ```json
+/// {
+///   "dkms_id": "dkms-11",
+///   "version": 7,
+///   "peers": {
+///     "dkms-22": {"enc": 333.0, "dec": 333.0},
+///     "dkms-33": {"enc": 333.0, "dec": 333.0}
+///   }
+/// }
+/// ```
+///
+/// El DKMS hace polling cada N segundos (típico 5s, configurable) y usa la
+/// rate como refill del token bucket per-peer del Generator.
+async fn get_rate(
+    AxumPath(dkms_id): AxumPath<String>,
+    State(svc): State<SdnService>,
+) -> impl IntoResponse {
+    let snap = svc.mcf_snapshot.load();
+    let topology = svc.topology.load();
+    if !topology.dkms.contains_key(&dkms_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("dkms {dkms_id} unknown")})),
+        );
+    }
+    let mut peers = serde_json::Map::new();
+    if let Some(my_rates) = snap.rates_by_dkms.get(&dkms_id) {
+        let mut grouped: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::new();
+        for ((peer, role), rate) in my_rates.iter() {
+            let entry = grouped.entry(peer.clone()).or_insert((0.0, 0.0));
+            match role {
+                crate::priority::BufferRole::EncKeys => entry.0 = *rate,
+                crate::priority::BufferRole::DecKeys => entry.1 = *rate,
+            }
+        }
+        for (peer, (enc, dec)) in grouped {
+            peers.insert(peer, json!({"enc": enc, "dec": dec}));
+        }
+    }
+    let topo_version = topology.version;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "dkms_id":          dkms_id,
+            "topology_version": topo_version,
+            "peers":            peers,
+        })),
+    )
+}
+
+/// POST /priority — el DKMS reporta el class de uno o varios de sus
+/// buffers. Equivalente al `PATCH /flows/{flow_id}/class` del Python.
+///
+/// Body:
+/// ```json
+/// {
+///   "updates": [
+///     {"dkms_id": "dkms-11", "peer": "dkms-22", "role": "enc_keys", "class": "important"},
+///     {"dkms_id": "dkms-11", "peer": "dkms-33", "role": "enc_keys", "class": "best_effort"}
+///   ]
+/// }
+/// ```
+///
+/// `role`: `enc_keys` | `dec_keys`.
+/// `class`: `priority` | `important` | `quickly` | `relax` | `best_effort` | `saturated`.
+///
+/// Tras aplicar, dispara `recompute_mcf` para que `/rate` refleje las
+/// rates nuevas inmediatamente (sin esperar al periódico de 5 s).
+#[derive(Deserialize)]
+struct PriorityUpdate {
+    dkms_id: String,
+    peer:    String,
+    role:    String,
+    class:   String,
+}
+
+#[derive(Deserialize)]
+struct PriorityBatch {
+    updates: Vec<PriorityUpdate>,
+}
+
+async fn post_priority(
+    State(svc): State<SdnService>,
+    Json(body): Json<PriorityBatch>,
+) -> impl IntoResponse {
+    let topology = svc.topology.load();
+    let mut applied = 0;
+    let mut errors: Vec<String> = Vec::new();
+    for u in body.updates.iter() {
+        if !topology.dkms.contains_key(&u.dkms_id) {
+            errors.push(format!("unknown dkms {}", u.dkms_id));
+            continue;
+        }
+        if !topology.dkms.contains_key(&u.peer) {
+            errors.push(format!("unknown peer {}", u.peer));
+            continue;
+        }
+        let role = match crate::priority::BufferRole::from_str(&u.role) {
+            Ok(r) => r,
+            Err(e) => { errors.push(format!("role: {e}")); continue; }
+        };
+        let pri = match crate::priority::TrafficPriority::from_str(&u.class) {
+            Ok(p) => p,
+            Err(e) => { errors.push(format!("class: {e}")); continue; }
+        };
+        svc.priorities.set(&u.dkms_id, &u.peer, role, pri);
+        applied += 1;
+    }
+    if applied > 0 {
+        // Recompute inmediato para que `GET /rate` vea las nuevas rates.
+        // No es caro: el MCF tarda <10ms para 12 commodities.
+        let _ = svc.recompute_mcf();
+    }
+    let status = if errors.is_empty() { StatusCode::OK } else { StatusCode::PARTIAL_CONTENT };
+    (status, Json(json!({"applied": applied, "errors": errors})))
+}
+
+async fn get_priorities(State(svc): State<SdnService>) -> impl IntoResponse {
+    let snap = svc.priorities.snapshot();
+    let arr: Vec<Value> = snap
+        .into_iter()
+        .map(|((dkms, peer, role), pri)| {
+            json!({
+                "dkms_id": dkms,
+                "peer":    peer,
+                "role":    role.as_str(),
+                "class":   pri.as_str(),
+            })
+        })
+        .collect();
+    Json(json!({"priorities": arr}))
 }
 
 async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
@@ -296,6 +435,8 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/sae-bindings/:dkms_id",    get(list_sae_bindings))
         .route("/link-capacity",            post(update_link_capacity))
         .route("/paths",                    post(compute_path))
+        .route("/rate/:dkms_id",            get(get_rate))
+        .route("/priority",                 post(post_priority).get(get_priorities))
         .with_state(svc);
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "sdn HTTP listening");

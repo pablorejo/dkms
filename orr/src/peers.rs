@@ -1,15 +1,19 @@
 //! Directorio de peers ORR.
 //!
 //! Equivalente al `PeerDirectory` del ORR Python: dado un `orr_id` lógico,
-//! devuelve dos cosas:
+//! devuelve:
 //!
 //!   * `qkc_id`: el QKC al que está pegado ese ORR — lo que va en
 //!     `dest_final` de los frames hacia el QKC.
 //!   * `public_key`: la clave pública ML-KEM del ORR — necesaria para
-//!     hacer `encap` cuando armamos una capa onion contra ese peer.
+//!     hacer `encap` UNA VEZ al arrancar contra ese peer y generar el
+//!     `master_secret`.
+//!   * `master_secret`: shared secret de 32 B compartido con ese peer.
+//!     Establecido por el bootstrap (`bootstrap.rs`) y consumido por
+//!     `onion::derive_key` para producir K per-frame.
 //!
-//! Sembrado al arrancar desde TOML (`orr/config/default.toml`) — el
-//! Python lo hacía leyendo ficheros JSON por peer.
+//! Sembrado al arrancar desde TOML (`orr/config/default.toml`); pubkeys y
+//! master_secrets se rellenan por gRPC (`GetPublicKey` + `EstablishSecret`).
 //! Mutables en caliente: la SDN (otra sesión) podrá empujar updates
 //! por gRPC en el futuro.
 
@@ -18,17 +22,22 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 
 pub struct PeerRegistry {
-    by_orr:       RwLock<HashMap<String, u32>>,     // orr_id → qkc_id
-    pubkeys:      RwLock<HashMap<String, Vec<u8>>>, // orr_id → ML-KEM pubkey
-    local_orr_id: String,
-    local_qkc_id: u32,
+    by_orr:         RwLock<HashMap<String, u32>>,        // orr_id → qkc_id
+    pubkeys:        RwLock<HashMap<String, Vec<u8>>>,    // orr_id → ML-KEM pubkey
+    /// orr_id → master_secret 32 B compartido con ese peer (vía ML-KEM
+    /// encap al arrancar). `derive_key` hace HKDF-SHA256 sobre estos
+    /// 32 B + key_id + body_len para producir la K per-frame.
+    master_secrets: RwLock<HashMap<String, [u8; 32]>>,
+    local_orr_id:   String,
+    local_qkc_id:   u32,
 }
 
 impl PeerRegistry {
     pub fn new(seed_qkc: HashMap<String, u32>, local_orr_id: String, local_qkc_id: u32) -> Self {
         Self {
-            by_orr:  RwLock::new(seed_qkc),
-            pubkeys: RwLock::new(HashMap::new()),
+            by_orr:         RwLock::new(seed_qkc),
+            pubkeys:        RwLock::new(HashMap::new()),
+            master_secrets: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -43,8 +52,9 @@ impl PeerRegistry {
         local_qkc_id: u32,
     ) -> Self {
         Self {
-            by_orr:  RwLock::new(seed_qkc),
-            pubkeys: RwLock::new(seed_pubkeys),
+            by_orr:         RwLock::new(seed_qkc),
+            pubkeys:        RwLock::new(seed_pubkeys),
+            master_secrets: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -81,6 +91,28 @@ impl PeerRegistry {
 
     pub fn remove_pubkey(&self, orr_id: &str) {
         self.pubkeys.write().remove(orr_id);
+    }
+
+    /// Master_secret 32 B compartido con el peer. `None` si todavía no
+    /// hicimos el handshake (caller debe esperar o fallar).
+    pub fn master_secret(&self, orr_id: &str) -> Option<[u8; 32]> {
+        self.master_secrets.read().get(orr_id).copied()
+    }
+
+    pub fn put_master_secret(&self, orr_id: String, secret: [u8; 32]) {
+        self.master_secrets.write().insert(orr_id, secret);
+    }
+
+    pub fn has_master_secret(&self, orr_id: &str) -> bool {
+        self.master_secrets.read().contains_key(orr_id)
+    }
+
+    /// Snapshot del set de peers con master_secret establecido. Útil
+    /// para `/healthz` y diagnóstico de bootstrap incompleto.
+    pub fn peers_with_secret(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.master_secrets.read().keys().cloned().collect();
+        v.sort_unstable();
+        v
     }
 
     pub fn local_orr_id(&self) -> &str {
@@ -140,5 +172,17 @@ mod tests {
         let reg = PeerRegistry::with_pubkeys(q, p, "ORR_1".into(), 1);
         assert_eq!(reg.qkc_id("ORR_2"), Some(2));
         assert_eq!(reg.public_key("ORR_2"), Some(vec![0xBB; 16]));
+    }
+
+    #[test]
+    fn master_secret_storage() {
+        let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
+        assert!(reg.master_secret("orr_2").is_none());
+        assert!(!reg.has_master_secret("orr_2"));
+        let s = [0xCC; 32];
+        reg.put_master_secret("orr_2".into(), s);
+        assert_eq!(reg.master_secret("orr_2"), Some(s));
+        assert!(reg.has_master_secret("orr_2"));
+        assert_eq!(reg.peers_with_secret(), vec!["orr_2"]);
     }
 }

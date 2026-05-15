@@ -51,6 +51,9 @@ pub struct DkmsConfig {
 
     #[serde(default)]
     pub request: RequestCfg,
+
+    #[serde(default)]
+    pub generator: GeneratorCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,11 +191,19 @@ impl Default for PendingCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SaeCfg {
     pub default_rate_keys_per_sec: u64,
     pub default_burst_keys: u64,
     /// Bytes que cuesta 1 token (ETSI 014: tradicionalmente 32).
     pub token_unit_bytes: u32,
+    /// Ventana de observación para activar SAEs y eviction (segundos).
+    /// SAEs sin peticiones en esta ventana pierden su bucket y dejan de
+    /// contar en `active_sae_count`. Réplica del Python (default 60s).
+    pub observation_window_secs: f64,
+    /// Floor mínimo del bucket capacity. Evita que `live_occupancy=0`
+    /// en warmup haga rate-limit instant al primer cliente.
+    pub min_capacity_tokens: f64,
 }
 
 impl Default for SaeCfg {
@@ -201,6 +212,8 @@ impl Default for SaeCfg {
             default_rate_keys_per_sec: 100,
             default_burst_keys: 400,
             token_unit_bytes: 32,
+            observation_window_secs: 60.0,
+            min_capacity_tokens: 1.0,
         }
     }
 }
@@ -238,6 +251,56 @@ impl Default for RequestCfg {
             peer_send_timeout_ms: 1_500,
             ack_wait_timeout_ms: 2_500,
             max_concurrent_peers: 32,
+        }
+    }
+}
+
+/// Configuración del Generator que rellena los buffers ENC/DEC compartidos
+/// entre DKMSs a la tasa que dicte el SDN.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneratorCfg {
+    /// Si false, el Generator no arranca (caso de despliegues legacy HTTP/2
+    /// puros donde el ENC buffer se llena via el flow ETSI 020 incoming).
+    pub enabled: bool,
+    /// Tamaño del key material a generar por clave (bytes). Típico 32 B
+    /// (256 bits) — coincide con `token_unit_bytes` de la SAE config.
+    pub key_size_bytes: usize,
+    /// Periodo del scheduler tick (ms). Más pequeño = burst más fino.
+    pub tick_ms: u64,
+    /// Periodo de polling de rates al SDN (ms). El SDN re-calcula MCF
+    /// cada `mcf_period_ms` (5s típico), así que 5000-10000 está bien.
+    pub rate_refresh_ms: u64,
+    /// Deadline máximo que una clave permanece en `ack_pending` antes
+    /// de descartarse (ms). Debe cubrir el round-trip ORR+QKC+ACK socket.
+    pub ack_timeout_ms: u64,
+    /// Periodo de barrido del reaper de `ack_pending` (ms).
+    pub ack_reaper_ms: u64,
+    /// Dirección TCP en la que este DKMS escucha ACKs entrantes de peers.
+    /// Los peers la reciben en el header `ack_endpoint` de cada mensaje
+    /// DKMS-BUFFER. Si no se configura, el Generator usa `listen.peer_addr`
+    /// con un puerto offset definido por `ack_socket_port_offset`.
+    pub ack_socket_addr: Option<SocketAddr>,
+    /// Cap de tokens consumibles por un peer por tick. Evita que un peer
+    /// hot monopolice el dispatch.
+    pub max_tokens_per_peer_per_tick: u32,
+    /// Cap superior del bucket (cuántos segundos de rate pueden acumularse
+    /// si el peer no ha consumido). Default 2s.
+    pub bucket_cap_seconds: f64,
+}
+
+impl Default for GeneratorCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            key_size_bytes: 32,
+            tick_ms: 100,
+            rate_refresh_ms: 5_000,
+            ack_timeout_ms: 30_000,
+            ack_reaper_ms: 1_000,
+            ack_socket_addr: None,
+            max_tokens_per_peer_per_tick: 32,
+            bucket_cap_seconds: 2.0,
         }
     }
 }

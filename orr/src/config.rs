@@ -4,20 +4,27 @@
 //! overrides opcionales en `config/local.toml` y variables de entorno
 //! con prefijo `ORR_` (ver `common::config::load_config`).
 //!
+//! **Case-insensitivity en `orr_id` y peers**: la crate `config` lowercase
+//! silenciosamente las claves de HashMap al leer el TOML, así que el
+//! servicio normaliza `orr_id`, `peers` y `peer_pubkeys` a lowercase al
+//! arrancar. Escribe `ORR_1` u `orr_1` indistintamente; en runtime todos
+//! los ids serán lowercase.
+//!
 //! Ejemplo:
 //!
 //! ```toml
-//! orr_id          = "ORR_1"
+//! orr_id          = "orr_1"
 //! qkc_id          = 1
 //! qkc_local_addr  = "127.0.0.1:7100"   # local_listen del QKC co-localizado
 //! grpc_addr       = "0.0.0.0:50052"    # API hacia el DKMS / clientes
 //! sdn_url         = "http://127.0.0.1:50053"
 //! metrics_addr    = "0.0.0.0:9101"
 //! default_max_hops = 0                 # 0 = passthrough, 1 = PQC E2E, -1 = onion
+//! default_pqc_suite = "ml-kem-768"     # ml-kem-512 / 768 / 1024
 //!
 //! [peers]                              # orr_id -> qkc_id del peer
-//! ORR_2 = 2
-//! ORR_3 = 3
+//! orr_2 = 2
+//! orr_3 = 3
 //! ```
 
 use std::collections::HashMap;
@@ -67,6 +74,15 @@ pub struct OrrConfig {
     #[serde(default)]
     pub peer_pubkeys: HashMap<String, String>,
 
+    /// Mapa `orr_id -> URL gRPC del peer ORR`. Lo usa el bootstrap
+    /// task al arrancar para pedir las pubkeys a los peers vía
+    /// `OrrControl::GetPublicKey` con backoff. Permite arrancar la
+    /// red sin pegar pubkeys en TOML (que se regeneran cada boot).
+    /// Las entradas que aparezcan también en `peer_pubkeys` se
+    /// saltan (TOML tiene prioridad).
+    #[serde(default)]
+    pub peer_grpc_addrs: HashMap<String, String>,
+
     /// Suite PQC por defecto para handshakes onion. Hoy es informativo
     /// — el backend PQC todavía no está cableado (ver `handshake.rs`).
     #[serde(default = "default_suite")]
@@ -84,7 +100,10 @@ fn default_metrics() -> String {
     "0.0.0.0:9101".into()
 }
 fn default_suite() -> String {
-    "kyber1024+dilithium5".into()
+    // Debe ser uno de los nombres soportados por
+    // `common::crypto::pqc::suite::{ML_KEM_512, ML_KEM_768, ML_KEM_1024}`.
+    // ML-KEM-768 es el sweet-spot NIST: pubkey 1184 B, ct 1088 B, ss 32 B.
+    common::crypto::pqc::suite::ML_KEM_768.into()
 }
 fn default_deliver_queue() -> usize {
     4096

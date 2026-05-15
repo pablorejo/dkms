@@ -53,6 +53,14 @@ gen_cert "sae_bb" "sae_bb" "URI:sae://sae_bb"
 gen_cert "sae_cc" "sae_cc" "URI:sae://sae_cc"
 gen_cert "sae_dd" "sae_dd" "URI:sae://sae_dd"
 
+# ─── 100 SAEs para tests de ramp ──────────────────────────────────────
+# Pre-generamos sae_001..sae_100 para los tests `ramp-saes.sh`. La
+# asignación SAE→DKMS es config runtime (en el controller), aquí solo
+# emitimos el material TLS. Idempotente: ya generados se saltan.
+for n in $(seq -f "%03g" 1 100); do
+    gen_cert "sae_$n" "sae_$n" "URI:sae://sae_$n"
+done
+
 rm -f "$TLS"/*.srl
 
 echo

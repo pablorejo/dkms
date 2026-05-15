@@ -4,16 +4,33 @@
 //! * **ORR ↔ QKC** — frames `FRAME_LOCAL_SEND` / `FRAME_LOCAL_DELIVER`
 //!   (mismo wire, otra tag de kind).
 //!
+//! ## Modelo de capas
+//!
+//! Cada capa (QKC, ORR, DKMS) tiene su propio header **en claro** que
+//! viaja al lado del cifrado y que nadie más toca:
+//!
+//! ```text
+//!   payload          ← qkc_crypt{ orr_crypt{ body_dkms } }
+//!   header_dkms_mp   ← cleartext, lo añade DKMS, nadie lo toca
+//!   header_orr_mp    ← cleartext, lo añade ORR, nadie lo toca
+//!   header_qkc_mp    ← cleartext, lo añade QKC, varía hop a hop
+//! ```
+//!
+//! El QKC propaga `header_orr_mp` y `header_dkms_mp` byte-a-byte sin
+//! parsearlos. Solo escribe/lee `header_qkc_mp`. El ORR equivalente con
+//! `header_orr_mp`. El DKMS pone los metadatos de la clave que está
+//! transportando en `header_dkms_mp`.
+//!
 //! Confidencialidad del payload: la pone el OTP del enlace QKC↔QKC. Los
 //! frames LOCAL viajan en claro sobre TCP de localhost; el riesgo de
 //! eavesdropping en loopback no aplica al threat model.
 //!
-//! Wire format (little-endian, sin padding):
+//! ## Wire format (little-endian, sin padding)
 //!
 //! ```text
 //! Prefijo fijo (10 B):
-//!   MAGIC      4 B  = b"\x51\x4B\x43\x01"   ('Q','K','C', v1)
-//!   FRAME_TYPE 1 B  = 0x01..0x11
+//!   MAGIC      4 B  = b"\x51\x4B\x43\x02"   ('Q','K','C', v2)
+//!   FRAME_TYPE 1 B  = 0x01..0x20
 //!   RESERVED   1 B  = 0x00
 //!   TOTAL_LEN  4 B  u32 LE — bytes restantes (no incluye prefijo)
 //!
@@ -25,10 +42,14 @@
 //!   N_KEY_IDS     1 B  u8       (0 cuando el frame no lleva keys)
 //!   KEY_ID_LEN    1 B  u8       (longitud uniforme por key_id)
 //!   KEY_IDS       N_KEY_IDS * KEY_ID_LEN
-//!   HEADER_LEN    2 B  u16 LE
-//!   HEADER        HEADER_LEN B  (msgpack(map))
+//!   HDR_QKC_LEN   2 B  u16 LE
+//!   HDR_QKC       HDR_QKC_LEN B   (msgpack — QKC-level metadata)
+//!   HDR_ORR_LEN   2 B  u16 LE
+//!   HDR_ORR       HDR_ORR_LEN B   (msgpack — ORR-level metadata)
+//!   HDR_DKMS_LEN  2 B  u16 LE
+//!   HDR_DKMS      HDR_DKMS_LEN B  (msgpack — DKMS-level metadata)
 //!   PAYLOAD_LEN   4 B  u32 LE
-//!   PAYLOAD       PAYLOAD_LEN B (ciphertext o plaintext según kind)
+//!   PAYLOAD       PAYLOAD_LEN B   (ciphertext o plaintext según kind)
 //! ```
 
 use std::io;
@@ -37,7 +58,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const MAGIC: [u8; 4] = [0x51, 0x4B, 0x43, 0x01]; // 'Q','K','C',1
+pub const MAGIC: [u8; 4] = [0x51, 0x4B, 0x43, 0x02]; // 'Q','K','C', v2
 
 /// Frame QKC→QKC: el destino final soy yo. Payload cifrado con OTP.
 pub const FRAME_RECV: u8 = 0x01;
@@ -48,11 +69,12 @@ pub const FRAME_RELAY: u8 = 0x02;
 /// ACK aplicación (DKMS-level). Plaintext sin OTP en el wire.
 pub const FRAME_ACK: u8 = 0x03;
 
-/// ORR → QKC: "envía este payload (plaintext) a `dest_final`. Tú te
-/// encargas del cifrado y del routing".
+/// ORR → QKC: "envía este payload a `dest_final`. Tú te encargas del
+/// cifrado del payload (OTP del enlace) y del routing".
 pub const FRAME_LOCAL_SEND: u8 = 0x10;
-/// QKC → ORR: "te entrego este plaintext que llegó dirigido a este
-/// nodo".
+/// QKC → ORR: "te entrego este payload que llegó dirigido a este
+/// nodo". `header_qkc_mp` ya está quitado (vacío) — el ORR solo ve
+/// `header_orr_mp`, `header_dkms_mp` y el payload.
 pub const FRAME_LOCAL_DELIVER: u8 = 0x11;
 
 /// QKC_A → QKC_B (mismo enlace): notificación de que A acaba de pedir
@@ -63,7 +85,7 @@ pub const FRAME_LOCAL_DELIVER: u8 = 0x11;
 ///   COUNT  4 B  u32 LE
 ///   IDs    COUNT * 16 B (UUID raw)
 ///
-/// `key_ids` y `header_mp` van vacíos en este tipo de frame.
+/// `key_ids` y los tres headers van vacíos en este tipo de frame.
 pub const FRAME_KEY_IDS_NOTIFY: u8 = 0x20;
 
 const FIXED_PREFIX: usize = 4 + 1 + 1 + 4;
@@ -84,14 +106,26 @@ pub enum WireError {
 /// Frame deserializado. `kind` lo rellena el reader desde el prefijo.
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub kind:          u8,
-    pub sender_id:     u32,
-    pub receiver_id:   u32,
-    pub dest_final:    u32,
-    pub key_size_bits: u16,
-    pub key_ids:       Vec<String>,
-    pub header_mp:     Vec<u8>,
-    pub payload:       Vec<u8>,
+    pub kind:           u8,
+    pub sender_id:      u32,
+    pub receiver_id:    u32,
+    pub dest_final:     u32,
+    pub key_size_bits:  u16,
+    pub key_ids:        Vec<String>,
+    /// Header QKC en cleartext (msgpack). Lo escribe/lee solo el QKC.
+    /// Reservado para metadatos del propio QKC (priority, ttl, etc.);
+    /// hoy va vacío.
+    pub header_qkc_mp:  Vec<u8>,
+    /// Header ORR en cleartext (msgpack). Lo escribe el ORR origen y lo
+    /// reescribe cada ORR que pela una capa onion. El QKC NO lo toca:
+    /// lo propaga byte-a-byte.
+    pub header_orr_mp:  Vec<u8>,
+    /// Header DKMS en cleartext (msgpack). Lo escribe el DKMS origen y
+    /// solo lo lee el DKMS destino. Ni ORR ni QKC lo tocan: lo propagan
+    /// byte-a-byte. Lleva los metadatos de la clave QKD que viaja en el
+    /// payload (key_id, sae_origin/destination, key_size_bits, etc.).
+    pub header_dkms_mp: Vec<u8>,
+    pub payload:        Vec<u8>,
 }
 
 impl Frame {
@@ -104,7 +138,9 @@ impl Frame {
             dest_final: 0,
             key_size_bits: 0,
             key_ids: Vec::new(),
-            header_mp: Vec::new(),
+            header_qkc_mp: Vec::new(),
+            header_orr_mp: Vec::new(),
+            header_dkms_mp: Vec::new(),
             payload: Vec::new(),
         }
     }
@@ -120,7 +156,9 @@ impl Frame {
 
         let body_len = 4 + 4 + 4 + 2 + 1 + 1
             + (key_id_len as usize) * self.key_ids.len()
-            + 2 + self.header_mp.len()
+            + 2 + self.header_qkc_mp.len()
+            + 2 + self.header_orr_mp.len()
+            + 2 + self.header_dkms_mp.len()
             + 4 + self.payload.len();
 
         let mut buf = BytesMut::with_capacity(FIXED_PREFIX + body_len);
@@ -138,8 +176,12 @@ impl Frame {
         for k in &self.key_ids {
             buf.put_slice(k.as_bytes());
         }
-        buf.put_u16_le(self.header_mp.len() as u16);
-        buf.put_slice(&self.header_mp);
+        buf.put_u16_le(self.header_qkc_mp.len() as u16);
+        buf.put_slice(&self.header_qkc_mp);
+        buf.put_u16_le(self.header_orr_mp.len() as u16);
+        buf.put_slice(&self.header_orr_mp);
+        buf.put_u16_le(self.header_dkms_mp.len() as u16);
+        buf.put_slice(&self.header_dkms_mp);
         buf.put_u32_le(self.payload.len() as u32);
         buf.put_slice(&self.payload);
         buf
@@ -166,12 +208,14 @@ impl Frame {
             key_ids
                 .push(String::from_utf8(buf).map_err(|_| WireError::Truncated("key_id utf-8"))?);
         }
-        let header_len = body.get_u16_le() as usize;
-        if body.remaining() < header_len + 4 {
-            return Err(WireError::Truncated("header_mp"));
+
+        let header_qkc_mp = read_lp16(&mut body, "header_qkc")?;
+        let header_orr_mp = read_lp16(&mut body, "header_orr")?;
+        let header_dkms_mp = read_lp16(&mut body, "header_dkms")?;
+
+        if body.remaining() < 4 {
+            return Err(WireError::Truncated("payload_len"));
         }
-        let header_mp = body[..header_len].to_vec();
-        body.advance(header_len);
         let payload_len = body.get_u32_le() as usize;
         if body.remaining() < payload_len {
             return Err(WireError::Truncated("payload"));
@@ -185,10 +229,26 @@ impl Frame {
             dest_final,
             key_size_bits,
             key_ids,
-            header_mp,
+            header_qkc_mp,
+            header_orr_mp,
+            header_dkms_mp,
             payload,
         })
     }
+}
+
+/// Lee un campo length-prefixed u16 LE.
+fn read_lp16(body: &mut &[u8], what: &'static str) -> Result<Vec<u8>, WireError> {
+    if body.remaining() < 2 {
+        return Err(WireError::Truncated(what));
+    }
+    let len = body.get_u16_le() as usize;
+    if body.remaining() < len {
+        return Err(WireError::Truncated(what));
+    }
+    let out = body[..len].to_vec();
+    body.advance(len);
+    Ok(out)
 }
 
 /// Lee un frame completo desde cualquier `AsyncRead` (TcpStream,
@@ -263,7 +323,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_empty_payload() {
+    fn roundtrip_all_three_headers() {
         let f = Frame {
             kind: FRAME_RECV,
             sender_id: 1,
@@ -271,17 +331,79 @@ mod tests {
             dest_final: 2,
             key_size_bits: 256,
             key_ids: vec!["abcdefgh".into()],
-            header_mp: vec![0x80], // empty msgpack map
-            payload: vec![],
+            header_qkc_mp: vec![0x80], // empty msgpack map
+            header_orr_mp: vec![0x81, 0xa4, 0x66, 0x72, 0x6f, 0x6d, 0xa1, 0x41], // {"from":"A"}
+            header_dkms_mp: vec![0x81, 0xa2, 0x69, 0x64, 0xa3, 0x6b, 0x33, 0x37], // {"id":"k37"}
+            payload: vec![0xde, 0xad, 0xbe, 0xef],
         };
         let buf = f.encode();
         let (_pref, body) = buf.split_at(FIXED_PREFIX);
         let f2 = Frame::decode_body(body).unwrap();
-        assert_eq!(f.sender_id,     f2.sender_id);
-        assert_eq!(f.receiver_id,   f2.receiver_id);
-        assert_eq!(f.dest_final,    f2.dest_final);
-        assert_eq!(f.key_size_bits, f2.key_size_bits);
-        assert_eq!(f.key_ids,       f2.key_ids);
+        assert_eq!(f.sender_id,      f2.sender_id);
+        assert_eq!(f.receiver_id,    f2.receiver_id);
+        assert_eq!(f.dest_final,     f2.dest_final);
+        assert_eq!(f.key_size_bits,  f2.key_size_bits);
+        assert_eq!(f.key_ids,        f2.key_ids);
+        assert_eq!(f.header_qkc_mp,  f2.header_qkc_mp);
+        assert_eq!(f.header_orr_mp,  f2.header_orr_mp);
+        assert_eq!(f.header_dkms_mp, f2.header_dkms_mp);
+        assert_eq!(f.payload,        f2.payload);
+    }
+
+    #[test]
+    fn roundtrip_empty_headers() {
+        // Caso típico de FRAME_LOCAL_SEND inicial donde ni ORR ni DKMS
+        // han metido aún sus headers.
+        let f = Frame {
+            kind: FRAME_LOCAL_SEND,
+            sender_id: 0,
+            receiver_id: 0,
+            dest_final: 3,
+            key_size_bits: 0,
+            key_ids: vec![],
+            header_qkc_mp: vec![],
+            header_orr_mp: vec![],
+            header_dkms_mp: vec![],
+            payload: vec![1, 2, 3, 4, 5],
+        };
+        let buf = f.encode();
+        let (_pref, body) = buf.split_at(FIXED_PREFIX);
+        let f2 = Frame::decode_body(body).unwrap();
+        assert!(f2.header_qkc_mp.is_empty());
+        assert!(f2.header_orr_mp.is_empty());
+        assert!(f2.header_dkms_mp.is_empty());
+        assert_eq!(f2.payload, f.payload);
+    }
+
+    #[test]
+    fn empty_frame_round_trips() {
+        let f = Frame::empty(FRAME_RECV);
+        let buf = f.encode();
+        let (_pref, body) = buf.split_at(FIXED_PREFIX);
+        let f2 = Frame::decode_body(body).unwrap();
+        assert_eq!(f2.sender_id, 0);
+        assert_eq!(f2.payload.len(), 0);
+        assert!(f2.header_qkc_mp.is_empty());
+        assert!(f2.header_orr_mp.is_empty());
+        assert!(f2.header_dkms_mp.is_empty());
+    }
+
+    #[test]
+    fn truncated_dkms_header_errors() {
+        // Construye un buffer válido hasta header_orr_mp y trunca antes
+        // de leer header_dkms_mp.
+        let mut buf = bytes::BytesMut::new();
+        buf.put_u32_le(0); // sender
+        buf.put_u32_le(0); // receiver
+        buf.put_u32_le(0); // dest_final
+        buf.put_u16_le(0); // key_size_bits
+        buf.put_u8(0);     // n_key_ids
+        buf.put_u8(0);     // key_id_len
+        buf.put_u16_le(0); // hdr_qkc len
+        buf.put_u16_le(0); // hdr_orr len
+        // Cortamos antes de hdr_dkms len → Truncated.
+        let err = Frame::decode_body(&buf).unwrap_err();
+        assert!(matches!(err, WireError::Truncated(_)));
     }
 
     #[test]

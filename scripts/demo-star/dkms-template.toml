@@ -9,6 +9,15 @@ peer_addr    = "127.0.0.1:85__NN__"
 grpc_addr    = "127.0.0.1:86__NN__"
 metrics_addr = "127.0.0.1:97__NN__"
 
+# Socket TCP plano para ACKs DKMS↔DKMS (sin ORR/QKC). Cada DKMS escucha
+# aquí los FRAME_ACK que envían sus peers cuando reciben una clave
+# `DKMS_BUFFER`. Va en el header `ack_endpoint` de cada mensaje saliente.
+[generator]
+ack_socket_addr = "127.0.0.1:83__NN__"
+# Refresca rates y reclasifica prioridad cada 1s para que se vean las
+# transiciones de clase QoS durante el fill curve.
+rate_refresh_ms = 1000
+
 [tls]
 cert_path     = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.crt"
 key_path      = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.key"
@@ -29,7 +38,11 @@ rpc_timeout_ms     = 5000
 default_max_hops   = __MAX_HOPS__
 
 [buffer]
-capacity_per_peer    = 4096
+# Subido a 100k para medir la rate sostenida de generación. A 333 keys/s
+# y ventana 30s solo se llenan ~10k claves, lejos del cap. Si bajas a
+# 4096 verás el burst de fill (~13s) y luego rate=0 porque el Generator
+# pausa cuando el buffer está al cap.
+capacity_per_peer    = 10000
 refill_low_watermark = 1024
 refill_batch         = 256
 

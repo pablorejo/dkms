@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createSimulation, errorToResponse, listSimulationSaes, listSimulations } from "@/api/simulations";
+import { createSimulation, errorToResponse, listSimulations } from "@/api/simulations";
 import { validateRequest } from "@/lib/auth/session";
 
 export async function GET() {
@@ -10,22 +10,7 @@ export async function GET() {
     }
 
     const simulations = await listSimulations(user.id, token);
-    const saeCounts = await Promise.all(
-      simulations.map(async (simulation) => {
-        try {
-          const saes = await listSimulationSaes(user.id, token, simulation.id);
-          return { id: simulation.id, count: saes.length };
-        } catch {
-          return { id: simulation.id, count: 0 };
-        }
-      })
-    );
-    const countById = new Map<number, number>(saeCounts.map((item) => [item.id, item.count]));
-    const enriched = simulations.map((simulation) => ({
-      ...simulation,
-      saeCount: countById.get(simulation.id) ?? simulation.saeCount ?? 0
-    }));
-    return NextResponse.json({ simulations: enriched });
+    return NextResponse.json({ simulations });
   } catch (error) {
     const result = errorToResponse(error);
     return NextResponse.json({ error: result.message }, { status: result.status });

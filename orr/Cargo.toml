@@ -9,6 +9,10 @@ description = "Onion Routing Router — relays DKMS payloads through the QKC sub
 name = "orr"
 path = "src/main.rs"
 
+[[bin]]
+name = "orr-test-client"
+path = "src/bin/test_client.rs"
+
 [lib]
 path = "src/lib.rs"
 
@@ -38,3 +42,6 @@ uuid               = { workspace = true }
 chrono             = { workspace = true }
 rand               = { workspace = true }
 base64             = { workspace = true }
+hkdf               = { workspace = true }
+sha2               = { workspace = true }
+serde_bytes        = "0.11"

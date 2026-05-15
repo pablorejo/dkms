@@ -1,93 +1,106 @@
-//! Cabecera ORR.
+//! Cabecera ORR v3.
 //!
-//! Cuando el ORR envía un payload al QKC vía `FRAME_LOCAL_SEND`, mete
-//! una cabecera msgpack en el campo `header_mp` del frame. El QKC la
-//! propaga sin tocarla (es payload para él). Al llegar al ORR destino,
-//! éste la deserializa para saber:
+//! Va en `frame.header_orr_mp` (cleartext) junto al payload (lo que el QKC
+//! OTP-cifrará en cada enlace). El QKC NO la toca: la propaga byte-a-byte.
 //!
-//! * `from`, `to`: ids lógicos de ORR (no de QKC) — el QKC ya hizo el
-//!   routing a nivel de su `dest_final`, pero el ORR puede querer ver
-//!   "vengo de tal ORR".
-//! * `max_hops`: hops cebolla que faltan (0 = ya estoy en el destino o
-//!   modo passthrough).
-//! * `app_header`: metadatos que el cliente DKMS quiere transportar.
-//! * `pqc_layer`: si está a `true`, hay una capa PQC end-to-end por
-//!   descifrar antes de entregar a la capa de aplicación
-//!   (`max_hops == 1`).
-//! * `sdn_path`: cola de QKC ids que faltan por visitar (cebolla guiada
-//!   por la SDN).
+//! ## Diseño v3 (shared-key XOR + key_id pre-shared)
 //!
-//! Mantenemos los nombres de campos compatibles con la implementación
-//! Python para facilitar mixed-deployment (un nodo Rust hablando con
-//! uno Python via QKC).
-
-use std::collections::BTreeMap;
+//! El ORR origen y cada hop (intermedio + destino) comparten un
+//! `master_secret_{from→peer}` de 32 B (establecido al arrancar via ML-KEM
+//! encap, RPC `EstablishSecret`). Por cada frame onion, derivan
+//! `K = HKDF-SHA256(salt="orr.onion.v1", ikm=master_secret,
+//!  info=key_id ‖ u32(len(payload)), L=len(payload))` y hacen XOR.
+//!
+//! Esto reemplaza el esquema v2 (`OnionFrame { kem_cts: Vec<Vec<u8>>, ... }`)
+//! que enviaba ~1.1 KB de ML-KEM ciphertext por cada 32 B de plaintext,
+//! produciendo crecimiento exponencial por capa onion (4 MB en modo -1).
+//!
+//! Campos:
+//!   * `from`, `to`: ids lógicos de ORR (origen final y destino final).
+//!   * `next_orr_id`: dst de ESTA capa — quién pela este wire frame.
+//!     Para passthrough (modo 0) = `to`.
+//!   * `key_id`: UUID v4 que identifica la K usada para cifrar `payload`.
+//!     `None` ⇒ passthrough (no hay capa onion, `payload` es body_dkms
+//!     en claro hacia el QKC, que lo OTP-cifra en el enlace).
+//!   * `max_hops`: hops onion restantes; `0` significa que la siguiente
+//!     vez que un ORR descifre con K, el plaintext es body_dkms directo
+//!     (capa terminal), no un `InnerLayer`.
+//!   * `timestamp`: `time.time()` del emisor, segundos UNIX. Informativo.
+//!
+//! El metadato de la clave QKD (key_id QKD, sae_origin/destination, ...) NO
+//! va aquí — va en `header_dkms_mp`, escrito por el DKMS.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{OrrError, Result};
 
 pub const HEADER_TYPE: &str = "ORR";
-pub const HEADER_VERSION: u32 = 1;
+pub const HEADER_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrrHeader {
-    /// Discriminador. Siempre `"ORR"`. Permite que el QKC enrute frames
-    /// con cabeceras de otros protocolos sin que el ORR los procese.
+    /// Discriminador. Siempre `"ORR"`. Permite distinguir frames con
+    /// cabeceras de otros protocolos sobre el mismo QKC.
     #[serde(rename = "type")]
     pub kind: String,
     pub version: u32,
-    /// ORR de origen.
+    /// ORR de origen (final, no cambia hop-to-hop).
     pub from: String,
-    /// ORR destino final.
+    /// ORR destino final (no cambia hop-to-hop).
     pub to: String,
-    /// Hops cebolla restantes.
+    /// ORR destino de ESTA capa wire. Cambia en cada hop: el peeler usa
+    /// este id para buscar el `master_secret_{from→next_orr_id}` (cuando
+    /// `next_orr_id == self`, ése es siempre el caso al recibir).
+    #[serde(default)]
+    pub next_orr_id: String,
+    /// UUID v4 de la `K` usada para cifrar el `payload`. 16 bytes raw.
+    /// `None` ⇒ modo 0 passthrough (sin capa onion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<[u8; 16]>,
+    /// Hops onion restantes después de pelar ESTA capa. `0` = capa
+    /// terminal (el `payload` cifrado contiene body_dkms directo).
     pub max_hops: i32,
-    /// `time.time()` del emisor, en segundos UNIX (compatible con
-    /// Python). Informativo.
+    /// `time.time()` del emisor, en segundos UNIX. Informativo.
     #[serde(default)]
     pub timestamp: f64,
-    /// Si `true`, este paquete lleva una capa PQC end-to-end con el
-    /// ORR destino. El ORR destino tiene que decapsular antes de
-    /// entregar.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pqc_layer: bool,
-    /// Cuando hay capa PQC, qué ORR es el receptor (informativo, suele
-    /// coincidir con `to`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pqc_destination_orr: Option<String>,
-    /// Cola de QKC ids restantes por visitar en la cebolla SDN-driven
-    /// (sólo `max_hops != 0`). Se almacenan como strings para mantener
-    /// la compatibilidad con la implementación Python.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sdn_path: Vec<String>,
-    /// `flow_id` promovido al top-level cuando viene en `app_header`,
-    /// para que el QKC (que indexa su tabla por `flow_id`) lo encuentre
-    /// sin tener que abrir el `app_header` anidado.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_id: Option<String>,
-    /// Metadatos que el cliente (DKMS) pasa a la aplicación destino.
-    /// Lo dejamos como `BTreeMap<String, String>` para coincidir con
-    /// `map<string, string> app_header` del proto y para tener orden
-    /// determinista al serializar.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub app_header: BTreeMap<String, String>,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 impl OrrHeader {
-    pub fn new(from: &str, to: &str, max_hops: i32) -> Self {
+    /// Header para modo 0 (passthrough). `key_id = None`, `max_hops = 0`,
+    /// `next_orr_id == to`. El `payload` es body_dkms en claro (lo
+    /// cifrará el QKC del enlace con su OTP).
+    pub fn passthrough(from: &str, to: &str) -> Self {
         Self {
             kind: HEADER_TYPE.to_string(),
             version: HEADER_VERSION,
             from: from.to_string(),
             to: to.to_string(),
+            next_orr_id: to.to_string(),
+            key_id: None,
+            max_hops: 0,
+            timestamp: now_unix_secs(),
+        }
+    }
+
+    /// Header para una capa onion. `payload = K ⊕ inner`, donde `K` se
+    /// deriva con HKDF a partir de `master_secret_{from→next_orr_id}` y
+    /// el `key_id` que va aquí.
+    pub fn onion(
+        from: &str,
+        to: &str,
+        next_orr_id: &str,
+        key_id: [u8; 16],
+        max_hops: i32,
+    ) -> Self {
+        Self {
+            kind: HEADER_TYPE.to_string(),
+            version: HEADER_VERSION,
+            from: from.to_string(),
+            to: to.to_string(),
+            next_orr_id: next_orr_id.to_string(),
+            key_id: Some(key_id),
             max_hops,
             timestamp: now_unix_secs(),
-            ..Default::default()
         }
     }
 
@@ -97,10 +110,7 @@ impl OrrHeader {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self> {
-        // Cabecera vacía válida (`0x80` = map vacío msgpack): produce
-        // un header default — útil para los tests del QKC que envían
-        // `header_mp = vec![0x80]`.
-        if buf == [0x80] {
+        if buf.is_empty() || buf == [0x80] {
             return Ok(Self::default());
         }
         rmp_serde::from_slice(buf)
@@ -121,31 +131,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip_minimal() {
-        let h = OrrHeader::new("ORR_1", "ORR_3", 0);
+    fn passthrough_round_trip() {
+        let h = OrrHeader::passthrough("orr_1", "orr_3");
         let buf = h.encode().unwrap();
         let h2 = OrrHeader::decode(&buf).unwrap();
         assert_eq!(h2.kind, HEADER_TYPE);
-        assert_eq!(h2.from, "ORR_1");
-        assert_eq!(h2.to, "ORR_3");
+        assert_eq!(h2.version, 3);
+        assert_eq!(h2.from, "orr_1");
+        assert_eq!(h2.to, "orr_3");
+        assert_eq!(h2.next_orr_id, "orr_3");
+        assert!(h2.key_id.is_none());
         assert_eq!(h2.max_hops, 0);
     }
 
     #[test]
-    fn round_trip_with_app_header() {
-        let mut h = OrrHeader::new("ORR_1", "ORR_2", 0);
-        h.app_header.insert("flow_id".into(), "abc".into());
-        h.flow_id = Some("abc".into());
+    fn onion_round_trip() {
+        let kid = [0xAB; 16];
+        let h = OrrHeader::onion("orr_1", "orr_4", "orr_2", kid, 2);
         let buf = h.encode().unwrap();
         let h2 = OrrHeader::decode(&buf).unwrap();
-        assert_eq!(h2.app_header.get("flow_id").map(String::as_str), Some("abc"));
-        assert_eq!(h2.flow_id.as_deref(), Some("abc"));
+        assert_eq!(h2.from, "orr_1");
+        assert_eq!(h2.to, "orr_4");
+        assert_eq!(h2.next_orr_id, "orr_2");
+        assert_eq!(h2.key_id, Some(kid));
+        assert_eq!(h2.max_hops, 2);
     }
 
     #[test]
-    fn empty_map_decodes_to_default() {
-        let h = OrrHeader::decode(&[0x80]).unwrap();
+    fn empty_buf_decodes_to_default() {
+        let h = OrrHeader::decode(&[]).unwrap();
         assert_eq!(h.from, "");
         assert_eq!(h.max_hops, 0);
+        let h2 = OrrHeader::decode(&[0x80]).unwrap();
+        assert_eq!(h2.from, "");
     }
 }

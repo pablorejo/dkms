@@ -27,6 +27,20 @@ service OrrControl {
   // is what arrived from the QKC plus the ORR-level header.
   rpc StreamDeliveries (StreamDeliveriesRequest) returns (stream DeliveredMessage);
 
+  // Devuelve la pubkey ML-KEM de este ORR. La usan los peers al
+  // arrancar para construir su `peer_pubkeys` registry sin tener que
+  // pegar la clave en TOML (que se regenera cada boot).
+  rpc GetPublicKey     (GetPublicKeyRequest)     returns (GetPublicKeyResponse);
+
+  // Establece un `master_secret` simétrico de 32 B con el peer. El
+  // initiator hace `kem.encap(peer.pubkey)` y manda el ciphertext; el
+  // receptor decapsula con su sk y obtiene el mismo `shared_secret`.
+  // Ambos lados lo guardan en su tabla `master_secrets[peer_orr_id]`.
+  // A partir de ahí, cada frame onion deriva su K per-frame con
+  // `HKDF-SHA256(salt="orr.onion.v1", ikm=master_secret,
+  //  info=key_id ‖ u32(len(body)), L=len(body))`.
+  rpc EstablishSecret  (EstablishSecretRequest)  returns (EstablishSecretResponse);
+
   // ── onion-circuit surface (max_hops != 0) ───────────────────────────
   // Open a new onion circuit toward a destination. SDN computes the path,
   // DKMS calls this to bring the circuit up.
@@ -77,6 +91,32 @@ message StreamDeliveriesRequest {
   // subscribers are allowed and each gets its own copy of every
   // delivery).
   string subscriber_id = 1;
+}
+
+message GetPublicKeyRequest {}
+
+message GetPublicKeyResponse {
+  bytes  public_key = 1;   // raw ML-KEM pubkey bytes (ej. 1184 B para ml-kem-768)
+  string suite      = 2;   // nombre de la suite, p.ej. "ml-kem-768"
+  .dkms.common.v1.NodeId orr_id = 3;
+}
+
+message EstablishSecretRequest {
+  // ORR id del initiator (quien hizo encap). El receptor lo guarda como
+  // clave en `master_secrets[from]`. Va en cleartext porque es lo que
+  // permite identificar de qué peer es el master_secret.
+  .dkms.common.v1.NodeId from = 1;
+  // ML-KEM ciphertext del encap. El receptor lo decapsula con su sk y
+  // obtiene el shared_secret de 32 B.
+  bytes ciphertext            = 2;
+}
+
+message EstablishSecretResponse {
+  // Confirmación. `false` si el decap falló (clave incorrecta, suite
+  // mismatch...) — el initiator deberá reintentar tras backoff.
+  bool ok                    = 1;
+  // Si ok=false, descripción para logs.
+  string error               = 2;
 }
 
 message DeliveredMessage {

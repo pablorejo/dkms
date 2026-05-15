@@ -18,11 +18,15 @@ use tracing::{info, warn};
 use common::{logging, metrics::Metrics};
 use dkms::{
     config::DkmsConfig,
+    control::{
+        ack_pending::AckPendingStore, ack_socket, AckClient, BatchedAckClient, Generator,
+        SaeBufferBuckets,
+    },
     etsi_http, grpc_server,
     peer_client::PeerHttpClient,
     sae_binding::{SaeBindingCache, SaeResolver, SdnSaeResolver, StaticSaeResolver},
     service::DkmsService,
-    southbound::{OrrClient, QkcClient, SdnClient},
+    southbound::{OrrClient, QkcClient, SdnClient, SdnHttpClient},
     state::{BufferPool, PendingStore},
     token_bucket::SaeBuckets,
 };
@@ -33,6 +37,23 @@ struct Cli {
     /// Directorio de configuración (sobrescribe `CONFIG_DIR`).
     #[arg(long, env = "CONFIG_DIR")]
     config_dir: Option<String>,
+}
+
+/// El cliente SDN gRPC apunta a un `http://host:port_grpc`. El endpoint
+/// HTTP-admin del SDN está en otro puerto (50055 en la demo-star).
+/// Como `SouthboundCfg` solo tiene el gRPC, derivamos a partir de él
+/// asumiendo la convención `puerto_grpc + 2 = puerto_http`. Si la demo
+/// usa otros valores, conviene leerlo de config; por simplicidad asumimos
+/// este offset igual al de la demo-star.
+fn derive_sdn_http_url(grpc_url: &str) -> String {
+    // Quitar prefijo http(s)://
+    let trimmed = grpc_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (host, port_str) = trimmed.rsplit_once(':').unwrap_or((trimmed, "50053"));
+    let port: u16 = port_str.split('/').next().unwrap_or("50053").parse().unwrap_or(50053);
+    let http_port = if port == 50053 { 50055 } else { port + 2 };
+    format!("http://{host}:{http_port}")
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -200,18 +221,89 @@ async fn main() -> Result<()> {
         }
     };
 
-    let svc = DkmsService::new(
+    let mut svc = DkmsService::new(
         cfg.clone(),
         metrics.clone(),
-        pool,
+        pool.clone(),
         pending,
         buckets,
         sae_binding,
         sdn,
         qkc,
-        orr,
+        orr.clone(),
         peer_client,
     );
+
+    // ─── Control plane: Generator + AckSocket ────────────────────────
+    // Solo arranca si tenemos ORR conectado (para enviar) y al menos un
+    // peer con transport=orr. El Generator pollerá rates al SDN HTTP
+    // (http_admin del SDN expone GET /rate/{dkms_id}) y rellenará los
+    // buffers ENC compartidos contra cada peer.
+    let mut ack_socket_addr: Option<std::net::SocketAddr> = cfg.generator.ack_socket_addr;
+    let (generator_arc, ack_client_arc, sae_buf_buckets_arc) = if orr.is_some() && cfg.generator.enabled {
+        // Derivar dirección de ACK socket: si no está explícita, usar
+        // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
+        if ack_socket_addr.is_none() {
+            let mut a = cfg.listen.peer_addr;
+            a.set_port(a.port().wrapping_add(1000));
+            ack_socket_addr = Some(a);
+        }
+        let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
+        let sdn_http = Arc::new(
+            SdnHttpClient::new(
+                sdn_http_url,
+                std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
+            )
+            .context("sdn http client")?,
+        );
+        let mut cfg_with_addr = (*cfg).clone();
+        cfg_with_addr.generator.ack_socket_addr = ack_socket_addr;
+        let ack_pending = Arc::new(AckPendingStore::new());
+        let gen = Generator::new(
+            &cfg_with_addr,
+            orr.as_ref().unwrap().clone(),
+            sdn_http,
+            pool.clone(),
+            ack_pending.clone(),
+        );
+        let gen_arc = gen.spawn_background();
+
+        // ACK client batched (envía ACKs hacia los `ack_endpoint` que
+        // viajan en el header de los DKMS_BUFFER entrantes).
+        let ack_client = AckClient::new(cfg.node_id.clone());
+        let batched = Arc::new(BatchedAckClient::new(
+            ack_client,
+            32,
+            std::time::Duration::from_millis(50),
+        ));
+
+        // Servidor TCP de ACKs entrantes.
+        if let Some(addr) = ack_socket_addr {
+            let gen_for_socket = gen_arc.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
+                    warn!(error = %e, "ack_socket server exited");
+                }
+            });
+            info!(%addr, "dkms.ack_socket configured");
+        }
+
+        // SAE buffer buckets dinámicos: comparten el handle de rates SDN
+        // con el Generator para calcular refill = link_capacity / N_SAEs.
+        let sae_buf_buckets = Arc::new(SaeBufferBuckets::new(
+            pool.clone(),
+            gen_arc.rates_handle(),
+            cfg.sae.observation_window_secs,
+            cfg.sae.min_capacity_tokens,
+        ));
+
+        (Some(gen_arc), Some(batched), Some(sae_buf_buckets))
+    } else {
+        info!("generator disabled (no ORR or generator.enabled=false)");
+        (None, None, None)
+    };
+    svc.set_control(generator_arc, ack_client_arc, sae_buf_buckets_arc);
+    let _ = ack_socket_addr; // silencia warning si no se usa
 
     // ─── TLS servidor ─────────────────────────────────────────────────
     let sae_tls = common::tls::server_config(

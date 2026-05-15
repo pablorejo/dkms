@@ -22,6 +22,7 @@
 
 pub mod admission;
 pub mod config;
+pub mod control;
 pub mod error;
 pub mod etsi_http;
 pub mod grpc_server;

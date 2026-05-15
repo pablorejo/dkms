@@ -35,8 +35,10 @@ use crate::{
 const DEC_WAIT_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Tiempo máximo de espera por un batch completo de claves ENC al
 /// pedirle al worker que rellene. Más grande que DEC porque puede
-/// requerir varias rondas HTTP a quditto.
-const ENC_WAIT_TIMEOUT: Duration = Duration::from_millis(5000);
+/// requerir varias rondas HTTP a quditto. Subido a 30s porque bajo
+/// régimen QKD-limited el race del `notify_waiters` no es FIFO y los
+/// tasks unlucky pueden esperar varias veces el promedio.
+const ENC_WAIT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Frame entrante desde otro QKC.
 pub async fn handle_incoming(svc: QkcService, frame: Frame) -> Result<()> {
@@ -63,7 +65,10 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
     let dec_keys = lookup_or_fetch_dec(in_link, &key_ids).await?;
     let plaintext = decrypt(&frame.payload, &key_ids, &dec_keys, in_chunk_bytes)?;
 
-    // ¿Local-deliver o forward?
+    // ¿Local-deliver o forward? En ambos casos el QKC NO toca
+    // header_orr_mp ni header_dkms_mp — los propaga byte-a-byte. Solo
+    // recompone su header_qkc_mp (vacío al ORR; nuevo en el siguiente
+    // hop).
     if frame.dest_final == svc.qkc_id() {
         let mut out = Frame::empty(FRAME_LOCAL_DELIVER);
         out.sender_id = frame.sender_id;
@@ -71,7 +76,9 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         out.dest_final = svc.qkc_id();
         out.key_size_bits = 0;
         out.key_ids = Vec::new();
-        out.header_mp = frame.header_mp;
+        // header_qkc_mp se desecha al entregar al ORR (vacío).
+        out.header_orr_mp = frame.header_orr_mp;
+        out.header_dkms_mp = frame.header_dkms_mp;
         out.payload = plaintext;
         svc.deliver_local(out);
         svc.stats.incoming_delivered.fetch_add(1, Ordering::Relaxed);
@@ -82,7 +89,15 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         .routing
         .next_hop(frame.dest_final)
         .ok_or(QkcError::NoRoute(frame.dest_final))?;
-    forward_plaintext(svc, next_hop, frame.dest_final, &plaintext, frame.header_mp).await?;
+    forward_plaintext(
+        svc,
+        next_hop,
+        frame.dest_final,
+        &plaintext,
+        frame.header_orr_mp,
+        frame.header_dkms_mp,
+    )
+    .await?;
     svc.stats.incoming_forwarded.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -110,7 +125,15 @@ async fn handle_local_send_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         ));
     }
     let next_hop = svc.routing.next_hop(dest).ok_or(QkcError::NoRoute(dest))?;
-    forward_plaintext(svc, next_hop, dest, &frame.payload, frame.header_mp).await
+    forward_plaintext(
+        svc,
+        next_hop,
+        dest,
+        &frame.payload,
+        frame.header_orr_mp,
+        frame.header_dkms_mp,
+    )
+    .await
 }
 
 async fn forward_plaintext(
@@ -118,7 +141,8 @@ async fn forward_plaintext(
     next_hop: u32,
     dest_final: u32,
     plaintext: &[u8],
-    header_mp: Vec<u8>,
+    header_orr_mp: Vec<u8>,
+    header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
     let out_link = svc
         .link_to(next_hop)
@@ -127,7 +151,15 @@ async fn forward_plaintext(
     let needed = num_chunks(plaintext.len(), chunk_bytes);
     let enc_keys = take_or_fetch_enc(out_link, needed).await?;
     let (ciphertext, ids) = encrypt(plaintext, &enc_keys)?;
-    send_frame_to_peer(svc, next_hop, dest_final, ciphertext, ids, header_mp)
+    send_frame_to_peer(
+        svc,
+        next_hop,
+        dest_final,
+        ciphertext,
+        ids,
+        header_orr_mp,
+        header_dkms_mp,
+    )
 }
 
 fn send_frame_to_peer(
@@ -136,7 +168,8 @@ fn send_frame_to_peer(
     dest_final: u32,
     ciphertext: Vec<u8>,
     key_ids: Vec<Uuid>,
-    header_mp: Vec<u8>,
+    header_orr_mp: Vec<u8>,
+    header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
     let out_link = svc
         .link_to(next_hop)
@@ -148,7 +181,10 @@ fn send_frame_to_peer(
     out.dest_final = dest_final;
     out.key_size_bits = out_link.cfg.key_size_bits as u16;
     out.key_ids = key_ids.iter().map(|u| u.to_string()).collect();
-    out.header_mp = header_mp;
+    // header_qkc_mp queda vacío (reservado para metadatos del QKC).
+    // El QKC propaga los headers de ORR y DKMS sin parsearlos.
+    out.header_orr_mp = header_orr_mp;
+    out.header_dkms_mp = header_dkms_mp;
     out.payload = ciphertext;
 
     let addr = svc

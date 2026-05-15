@@ -215,6 +215,7 @@ class WebSimulationSummaryDTO(BaseModel):
     updated_at: str
     node_count: int
     link_count: int
+    sae_count: int = 0
 
 
 class WebSimulationRunDTO(BaseModel):
@@ -433,8 +434,7 @@ def _to_iso(value: Optional[datetime]) -> str:
 
 
 def _normalize_http_type(raw: str) -> HTTPType:
-    # NOTE: current enum names are inverted in models/enums.py.
-    return HTTPType.HTTPS if raw == "http" else HTTPType.HTTP
+    return HTTPType.HTTPS if raw == "https" else HTTPType.HTTP
 
 
 def _http_type_to_text(value: Optional[HTTPType]) -> str:
@@ -850,7 +850,11 @@ def _simulation_to_web_dto(simulation: ModelSimulation) -> WebSimulationDTO:
     )
 
 
-def _summary_from_web_dto(simulation: WebSimulationDTO) -> WebSimulationSummaryDTO:
+def _summary_from_web_dto(
+    simulation: WebSimulationDTO,
+    *,
+    sae_count: int = 0,
+) -> WebSimulationSummaryDTO:
     return WebSimulationSummaryDTO(
         id=simulation.id,
         name=simulation.name,
@@ -860,6 +864,7 @@ def _summary_from_web_dto(simulation: WebSimulationDTO) -> WebSimulationSummaryD
         updated_at=simulation.updated_at,
         node_count=len(simulation.nodes),
         link_count=len(simulation.links),
+        sae_count=int(sae_count),
     )
 
 
@@ -903,6 +908,31 @@ def _sqlalchemy_uow_session():
                 detail="This endpoint requires sqlalchemy persistence backend",
             )
         yield uow, session
+
+
+def _sae_counts_by_simulation(simulation_ids: list[int]) -> dict[int, int]:
+    """Devuelve {simulation_id: sae_count} en una sola query.
+
+    Si el backend no es sqlalchemy o la lista está vacía, retorna {}.
+    """
+    if not simulation_ids:
+        return {}
+    try:
+        from sqlalchemy import func, select
+
+        from persistence.sqlalchemy.data import SAE as SAEEntity
+    except ImportError:
+        return {}
+    try:
+        with _sqlalchemy_uow_session() as (_uow, session):
+            rows = session.execute(
+                select(SAEEntity.simulation_id, func.count(SAEEntity.id))
+                .where(SAEEntity.simulation_id.in_(simulation_ids))
+                .group_by(SAEEntity.simulation_id)
+            ).all()
+            return {int(sim_id): int(count) for sim_id, count in rows if sim_id is not None}
+    except HTTPException:
+        return {}
 
 
 def _to_iso_optional(value: Optional[datetime]) -> Optional[str]:
@@ -3365,10 +3395,14 @@ def web_list_simulations(
     except ValueError as exc:
         raise _value_error_to_http(exc) from exc
 
+    sae_counts = _sae_counts_by_simulation(
+        [sim.id for sim in simulations if sim.id is not None]
+    )
     result: list[WebSimulationSummaryDTO] = []
     for simulation in simulations:
         dto = _simulation_to_web_dto(simulation)
-        result.append(_summary_from_web_dto(dto))
+        count = sae_counts.get(simulation.id, 0) if simulation.id is not None else 0
+        result.append(_summary_from_web_dto(dto, sae_count=count))
     return result
 
 

@@ -196,7 +196,7 @@ mod tests {
         let mut r = build_rng();
         let k = Key::mint(&mut r, 32);
         let id = k.key_id;
-        let mat = k.material;
+        let mat = k.material.clone();
         lb.push(k);
 
         let out = lb.take_for_enc(1);

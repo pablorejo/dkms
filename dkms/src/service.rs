@@ -72,17 +72,19 @@ use etsi::{
 use crate::{
     admission::Admission,
     config::{DkmsConfig, PeerTransport},
+    control::{BatchedAckClient, Generator, SaeBufferBuckets},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
-            HDR_FLOW_ID, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_REQUEST_ID, HDR_SAE_DESTINATION,
-            HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS,
+            HDR_ACK_ENDPOINT, HDR_FLOW_ID, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
+            HDR_REQUEST_ID, HDR_SAE_DESTINATION, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS,
+            MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, QkcClient, SdnClient,
     },
-    state::{BufferPool, PendingStore},
+    state::{buffer::TransportKey, BufferPool, PendingStore},
     token_bucket::{compute_cost, SaeBuckets},
 };
 
@@ -112,6 +114,20 @@ pub struct DkmsService {
     /// donde todos los peers usan `transport = "orr"` (no se intenta
     /// abrir un Reqwest TLS context si nadie lo usa).
     pub peer_client: Option<Arc<PeerHttpClient>>,
+
+    /// Generator que llena `buffer_enc[peer]` al ritmo del SDN. `None` en
+    /// despliegues HTTP/2 puros que prefieran el refill clásico
+    /// (importado desde el ETSI 020 entrante).
+    pub generator: Option<Arc<Generator>>,
+    /// Cliente para mandar ACKs a peers (cuando éste DKMS recibe un
+    /// `DKMS_BUFFER` por ORR). Si `None`, el delivery pump no manda ACK
+    /// (los peers entonces verán expiraciones del ack_pending).
+    pub ack_client: Option<Arc<BatchedAckClient>>,
+    /// Token buckets per `(peer, sae)` con límites dinámicos
+    /// (refill = link_capacity/N_SAEs, capacity = occupancy/N_SAEs).
+    /// Si `None`, se usa el legacy `SaeBuckets` por master-SAE en su
+    /// lugar (despliegues sin Generator/ORR).
+    pub sae_buffer_buckets: Option<Arc<SaeBufferBuckets>>,
 
     /// Estado de admisión — consultado por el `AdmissionLayer` del HTTP y
     /// pilotado por el RPC `Drain` del plano gRPC.
@@ -143,8 +159,25 @@ impl DkmsService {
             qkc,
             orr,
             peer_client,
+            generator: None,
+            ack_client: None,
+            sae_buffer_buckets: None,
             admission: Admission::new(),
         }
+    }
+
+    /// Inyecta el Generator, AckClient y SaeBufferBuckets. Llamado desde
+    /// `main.rs` tras crear el servicio. `Option` para permitir tests
+    /// que no usan el plano de buffers compartidos.
+    pub fn set_control(
+        &mut self,
+        generator: Option<Arc<Generator>>,
+        ack_client: Option<Arc<BatchedAckClient>>,
+        sae_buffer_buckets: Option<Arc<SaeBufferBuckets>>,
+    ) {
+        self.generator = generator;
+        self.ack_client = ack_client;
+        self.sae_buffer_buckets = sae_buffer_buckets;
     }
 
     fn self_node(&self) -> NodeId {
@@ -225,21 +258,57 @@ impl DkmsService {
         }
 
         // 3) Coste y admisión.
+        //
+        // El nuevo modelo (SaeBufferBuckets) carga un bucket POR cada
+        // peer DKMS destino con un coste `cost_per_peer`. El bucket es
+        // por `(peer, sae)` y sus límites se recalculan en cada admit:
+        //   refill   = link_capacity / N_active_SAEs
+        //   capacity = max(buffer_occupancy / N_active_SAEs, refill × window)
+        //
+        // Esto reparte el ancho de banda de cada buffer entre los SAEs
+        // que lo están usando, evitando que un SAE agresivo lo monopolice.
+        //
+        // Fallback legacy: si no hay SaeBufferBuckets cableado
+        // (despliegue sin Generator/ORR) se usa el bucket plano por
+        // master-SAE de `SaeBuckets`.
         let size_bytes = (body.size as u64).div_ceil(8);
-        let num_dkms_destinations = remote_groups.len() as u64;
-        let cost = compute_cost(
+        let cost_per_peer = compute_cost(
             size_bytes,
             body.number as u64,
-            num_dkms_destinations,
+            1,
             self.cfg.sae.token_unit_bytes,
-        );
-        self.buckets
-            .try_consume(master, cost)
-            .map_err(|available| DkmsError::RateLimited {
-                sae: master.clone(),
-                requested: cost,
-                available,
-            })?;
+        ) as f64;
+        let remote_peer_ids: Vec<String> = remote_groups
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
+        if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
+            if !remote_peer_ids.is_empty() {
+                if let Err(fail) = sbb.try_admit_many(&remote_peer_ids, master, cost_per_peer) {
+                    return Err(DkmsError::RateLimited {
+                        sae:       master.clone(),
+                        requested: fail.requested as u64,
+                        available: fail.available as u64,
+                    });
+                }
+            }
+        } else {
+            // Legacy: master-SAE only.
+            let num_dkms_destinations = remote_groups.len() as u64;
+            let cost = compute_cost(
+                size_bytes,
+                body.number as u64,
+                num_dkms_destinations,
+                self.cfg.sae.token_unit_bytes,
+            );
+            self.buckets
+                .try_consume(master, cost)
+                .map_err(|available| DkmsError::RateLimited {
+                    sae: master.clone(),
+                    requested: cost,
+                    available,
+                })?;
+        }
 
         // 4) Generar las `number` claves de sesión.
         let session_keys = generate_session_keys(body.number, size_bytes as usize);
@@ -404,7 +473,14 @@ impl DkmsService {
                 error!(error = %e, "key distribution failure");
             }
             // Reembolso y retracción local.
-            self.buckets.refund(master, cost);
+            if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
+                sbb.refund_many(&remote_peer_ids, master, cost_per_peer);
+            } else {
+                // Legacy path: cost = cost_per_peer × num_dkms_destinations,
+                // que es lo que se consumió en la rama legacy.
+                let legacy_cost = cost_per_peer as u64 * (remote_peer_ids.len() as u64).max(1);
+                self.buckets.refund(master, legacy_cost);
+            }
             for (_uuid, kid, _k) in &session_keys {
                 self.pending.force_remove(kid);
             }
@@ -658,6 +734,103 @@ impl DkmsService {
         msg: common::proto::orr::v1::DeliveredMessage,
     ) -> Result<()> {
         let app = &msg.app_header;
+        let msg_type = app
+            .get(HDR_MSG_TYPE)
+            .map(String::as_str)
+            .unwrap_or(""); // legacy / ETSI020 = vacío
+
+        if msg_type == MSG_TYPE_DKMS_BUFFER {
+            return self.handle_orr_delivery_buffer(msg).await;
+        }
+        // Default: flujo ETSI 020 sobre transporte ORR (existente).
+        self.handle_orr_delivery_etsi020(msg).await
+    }
+
+    /// Maneja un `DKMS_BUFFER` entrante: el peer DKMS_A está rellenando
+    /// nuestro `buffer_dec[A]` con una clave fresca. Lo guardamos y
+    /// disparamos el ACK por socket TCP plano (no por ORR ni QKC).
+    async fn handle_orr_delivery_buffer(
+        &self,
+        msg: common::proto::orr::v1::DeliveredMessage,
+    ) -> Result<()> {
+        let app = &msg.app_header;
+        let key_id_str = app
+            .get(HDR_KEY_ID)
+            .ok_or_else(|| DkmsError::BadRequest(format!("orr buffer delivery missing {HDR_KEY_ID}")))?
+            .clone();
+        let source_dkms = app
+            .get(HDR_SAE_ORIGIN)
+            .ok_or_else(|| {
+                DkmsError::BadRequest(format!("orr buffer delivery missing {HDR_SAE_ORIGIN}"))
+            })?
+            .clone();
+        let ack_endpoint = app.get(HDR_ACK_ENDPOINT).cloned();
+
+        let bits = app.get(HDR_KEY_SIZE_BITS).and_then(|v| v.parse::<u32>().ok());
+        if let Some(bits) = bits {
+            let expected = (bits as usize).div_ceil(8);
+            if msg.payload.len() != expected {
+                return Err(DkmsError::BadRequest(format!(
+                    "orr buffer delivery {key_id_str}: payload {} bytes, header {bits} bits",
+                    msg.payload.len(),
+                )));
+            }
+        }
+
+        let key_id = KeyId::new(&key_id_str);
+        let buf = self.pool.for_peer(&source_dkms);
+        let key = TransportKey {
+            id: key_id.clone(),
+            bytes: zeroize::Zeroizing::new(msg.payload),
+        };
+        if let Err(rejected) = buf.dec.try_push(key) {
+            warn!(
+                source = %source_dkms,
+                key_id = %rejected.id,
+                "dkms_buffer delivery: buffer_dec full, dropping key",
+            );
+            // Aún así mandamos ACK; el peer asumiría ack_timeout y
+            // regeneraría — pero como queremos el feedback explícito
+            // de drop, lo dejamos pendiente y dejamos que su reaper
+            // expire (más coherente con la semántica del Python).
+            return Ok(());
+        }
+
+        // ACK best-effort vía socket TCP plano.
+        if let Some(ep) = ack_endpoint {
+            if let Some(client) = self.ack_client.clone() {
+                client.enqueue(ep, key_id_str.clone()).await;
+            } else {
+                debug!(
+                    source = %source_dkms,
+                    key_id = %key_id_str,
+                    "orr buffer delivery: no ack_client configured, skipping ACK",
+                );
+            }
+        } else {
+            debug!(
+                source = %source_dkms,
+                key_id = %key_id_str,
+                "orr buffer delivery: no ack_endpoint in header, peer won't see ACK",
+            );
+        }
+
+        debug!(
+            source = %source_dkms,
+            key_id = %key_id_str,
+            buffer_dec_len = buf.dec.len(),
+            "orr buffer delivery → buffer_dec[source]",
+        );
+        Ok(())
+    }
+
+    /// Flujo ETSI 020 clásico sobre ORR (existente). Inserta en
+    /// `PendingStore` para que un SAE haga `dec_keys` después.
+    async fn handle_orr_delivery_etsi020(
+        &self,
+        msg: common::proto::orr::v1::DeliveredMessage,
+    ) -> Result<()> {
+        let app = &msg.app_header;
         let key_id_str = app
             .get(HDR_KEY_ID)
             .ok_or_else(|| DkmsError::BadRequest(format!("orr delivery missing {HDR_KEY_ID}")))?;
@@ -671,8 +844,6 @@ impl DkmsService {
                 DkmsError::BadRequest(format!("orr delivery missing {HDR_SAE_DESTINATION}"))
             })?
             .clone();
-        // Estos campos son informativos hoy — los leemos para validar
-        // y loguear, no se usan más allá.
         let key_size = app.get(HDR_KEY_SIZE_BITS).and_then(|v| v.parse::<u32>().ok());
         let request_id = app.get(HDR_REQUEST_ID).cloned();
         let _flow_id = app.get(HDR_FLOW_ID).cloned();
@@ -698,12 +869,12 @@ impl DkmsService {
             initiator_sae,
             authorized,
             msg.payload,
-            None, // TTL por defecto del config
+            None,
         );
         debug!(
             key_id = %key_id_str,
             request_id = ?request_id,
-            "orr delivery → pending store",
+            "orr delivery (ETSI020) → pending store",
         );
         Ok(())
     }

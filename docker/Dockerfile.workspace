@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build all five DKMS runtime binaries (dkms, orr, qkc, sdn, quditto) from
+# the Cargo workspace in a single compile pass, then assemble one runtime
+# image per binary via independent `--target` stages.
+#
+# Usage:
+#   docker build -f docker/Dockerfile.workspace --target image-qkc -t pablopio/qkc:vX .
+#   ...
+# or use scripts/build-images.sh to build the whole set.
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 1: chef — base Rust toolchain + protoc + cargo-chef installed once.
+# ──────────────────────────────────────────────────────────────────────
+FROM rust:1.88-bookworm AS chef
+ENV RUSTUP_TOOLCHAIN=stable
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install --locked cargo-chef@0.1.72
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 2: planner — read the workspace and write a recipe of dep versions.
+# ──────────────────────────────────────────────────────────────────────
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 3: builder — cook deps once for the whole workspace, then build
+# all five release binaries in a single cargo invocation. This is the key
+# win over per-crate Dockerfiles: shared deps (tokio, tonic, rustls, …)
+# compile exactly once.
+# ──────────────────────────────────────────────────────────────────────
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json \
+        -p dkms -p orr -p qkc -p sdn -p quditto
+COPY . .
+RUN cargo build --release \
+        --bin dkms --bin orr --bin qkc --bin sdn --bin quditto
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 4: runtime-base — minimal Debian slim with ca-certs and a
+# non-root user shared by all five final images.
+# ──────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --gid 0 --no-create-home dkms-runtime
+USER 10001
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 5: per-binary runtime images. Each `image-<crate>` target is a
+# self-contained image — `docker build --target image-qkc` builds only
+# the QKC image but still benefits from the shared builder stage cache.
+# ──────────────────────────────────────────────────────────────────────
+FROM runtime-base AS image-dkms
+COPY --from=builder /app/target/release/dkms /usr/local/bin/dkms
+COPY --chown=10001:0 dkms/config /etc/dkms/config
+ENV CONFIG_DIR=/etc/dkms/config
+EXPOSE 8080 50054 9103
+ENTRYPOINT ["/usr/local/bin/dkms"]
+
+FROM runtime-base AS image-orr
+COPY --from=builder /app/target/release/orr /usr/local/bin/orr
+COPY --chown=10001:0 orr/config /etc/orr/config
+ENV CONFIG_DIR=/etc/orr/config
+EXPOSE 50052 9101
+ENTRYPOINT ["/usr/local/bin/orr"]
+
+FROM runtime-base AS image-qkc
+COPY --from=builder /app/target/release/qkc /usr/local/bin/qkc
+COPY --chown=10001:0 qkc/config /etc/qkc/config
+ENV CONFIG_DIR=/etc/qkc/config
+EXPOSE 50051 7001 9100
+ENTRYPOINT ["/usr/local/bin/qkc"]
+
+FROM runtime-base AS image-sdn
+COPY --from=builder /app/target/release/sdn /usr/local/bin/sdn
+COPY --chown=10001:0 sdn/config /etc/sdn/config
+ENV CONFIG_DIR=/etc/sdn/config
+EXPOSE 50053 8081 9102
+ENTRYPOINT ["/usr/local/bin/sdn"]
+
+FROM runtime-base AS image-quditto
+COPY --from=builder /app/target/release/quditto /usr/local/bin/quditto
+# quditto/config does not exist in the repo; runtime config arrives via
+# env vars or a mounted volume.
+EXPOSE 50055 9104
+ENTRYPOINT ["/usr/local/bin/quditto"]

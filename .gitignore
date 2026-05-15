@@ -46,3 +46,6 @@ node_modules/
 # Local config overrides
 **/config/local.toml
 **/config/override.toml
+
+# Claude Code workspace (local state, not for VCS)
+.claude/

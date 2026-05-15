@@ -185,6 +185,13 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+// Fallback usado SOLO cuando AuthZ /me no responde. La firma del token
+// NO se verifica aquí — confiamos en que el orchestrator vuelva a
+// validar el bearer en cada petición. Mantenemos is_active=false por
+// defecto para no marcar como "activo" a un usuario que podría estar
+// deshabilitado en AuthZ; el valor real se rehidrata en la próxima
+// llamada exitosa a /me. Si AuthZ pasa a exponer JWKS, sustituir este
+// decodificador por una verificación de firma con `jose`.
 function userFromJwt(token: string): OrchestratorUser | null {
   const payload = decodeJwtPayload(token);
   if (!payload) {
@@ -199,6 +206,7 @@ function userFromJwt(token: string): OrchestratorUser | null {
 
   const usernameCandidate = payload.username ?? payload.preferred_username ?? payload.name;
   const emailCandidate = payload.email;
+  const activeCandidate = payload.is_active ?? payload.active;
 
   const username =
     typeof usernameCandidate === "string" && usernameCandidate.trim()
@@ -213,7 +221,7 @@ function userFromJwt(token: string): OrchestratorUser | null {
     id: idValue,
     username,
     email,
-    is_active: true
+    is_active: typeof activeCandidate === "boolean" ? activeCandidate : false
   };
 }
 

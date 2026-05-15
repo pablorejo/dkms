@@ -1,0 +1,12 @@
+{
+    "id": 4,
+    "id_dkms": 4,
+    "id_sdn": 1,
+    "id_host": 45,
+    "host": {
+        "id": 45,
+        "id_simulation": 1,
+        "ip": "127.0.0.104",
+        "port": 8080
+    }
+}

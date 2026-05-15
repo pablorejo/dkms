@@ -37,8 +37,9 @@ if [ ! -f "$HERE/tls/ca.crt" ]; then
 fi
 
 # Verifica puertos
-ALL_PORTS=(8411 8422 8433 8444 8511 8522 8533 8544 \
-           8611 8622 8633 8644 9711 9722 9733 9744)
+ALL_PORTS=(8311 8322 8333 8344 8411 8422 8433 8444 \
+           8511 8522 8533 8544 8611 8622 8633 8644 \
+           9711 9722 9733 9744)
 for port in "${ALL_PORTS[@]}"; do
     if (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
         echo "✗ puerto 127.0.0.1:$port ya está en uso"

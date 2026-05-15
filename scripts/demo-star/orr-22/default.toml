@@ -1,0 +1,22 @@
+# ORR de HOJA-22. Co-localizado con qkc-22 (local_listen 7122).
+orr_id          = "orr_22"
+qkc_id          = 22
+qkc_local_addr  = "127.0.0.1:7122"
+grpc_addr       = "0.0.0.0:50522"
+sdn_url         = "http://127.0.0.1:50053"
+metrics_addr    = "0.0.0.0:9522"
+
+default_max_hops = 0
+deliver_queue_capacity = 65536
+
+[peers]
+orr_11 = 11
+orr_33 = 33
+orr_44 = 44
+
+[peer_grpc_addrs]
+orr_11 = "http://127.0.0.1:50511"
+orr_33 = "http://127.0.0.1:50533"
+orr_44 = "http://127.0.0.1:50544"
+
+[peer_pubkeys]

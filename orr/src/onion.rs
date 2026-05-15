@@ -73,14 +73,21 @@ const HKDF_MAX_OUTPUT: usize = 255 * 32; // HKDF-SHA256 ceiling: 8160 B
 
 /// Una capa interna ya cifrada, lista para meter en el `payload` del
 /// wire frame de la capa siguiente (más externa).
+///
+/// `key_id` y `xor_ct` usan `serde_bytes` para que msgpack los serialice
+/// como tipo `bin` (1 byte por byte) en lugar de array (1-2 bytes por
+/// byte). Sin esto, con bytes pseudo-aleatorios, ~50 % de los bytes
+/// inflan a 2 bytes y duplican el overhead per-layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InnerLayer {
     /// ORR destino de la siguiente capa (el peeler que mirará `key_id`
     /// para derivar K y descifrar `xor_ct`).
     pub next_orr_id: String,
     /// UUID v4 raw (16 B) de la K de la siguiente capa.
+    #[serde(with = "serde_bytes")]
     pub key_id: [u8; 16],
     /// `K ⊕ inner_plaintext` de la siguiente capa.
+    #[serde(with = "serde_bytes")]
     pub xor_ct: Vec<u8>,
 }
 

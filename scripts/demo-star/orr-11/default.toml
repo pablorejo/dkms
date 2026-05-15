@@ -1,0 +1,25 @@
+# ORR de HOJA-11. Co-localizado con qkc-11 (local_listen 7111).
+orr_id          = "orr_11"
+qkc_id          = 11
+qkc_local_addr  = "127.0.0.1:7111"
+grpc_addr       = "0.0.0.0:50511"
+sdn_url         = "http://127.0.0.1:50053"
+metrics_addr    = "0.0.0.0:9511"
+
+default_max_hops = 0
+deliver_queue_capacity = 65536  # cola alta para tests de saturación
+
+# Puertos gRPC del resto de ORRs hoja. El bootstrap pide GetPublicKey
+# a cada uno con retry exponencial hasta tenerlas todas.
+[peers]
+orr_22 = 22
+orr_33 = 33
+orr_44 = 44
+
+[peer_grpc_addrs]
+orr_22 = "http://127.0.0.1:50522"
+orr_33 = "http://127.0.0.1:50533"
+orr_44 = "http://127.0.0.1:50544"
+
+[peer_pubkeys]
+# vacío: las pubkeys se piden por gRPC al boot

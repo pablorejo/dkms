@@ -66,10 +66,9 @@ Main routes:
 
 ## Related docs
 
-- [../docs/TOPOLOGY_SCHEMA.md](../docs/TOPOLOGY_SCHEMA.md)
 - [docker/README.md](docker/README.md)
 - [k8s/README.md](k8s/README.md)
-- [../code_dkms/src/k8s/readme.api.orchestator.md](../code_dkms/src/k8s/readme.api.orchestator.md)
+- [../orchestrator/readme.api.orchestator.md](../orchestrator/readme.api.orchestator.md)
 
 ## Known constraints
 

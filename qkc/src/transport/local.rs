@@ -85,17 +85,22 @@ async fn handle_conn(svc: QkcService, stream: TcpStream, inflight: Arc<Semaphore
             }
         };
         if frame.kind == FRAME_LOCAL_SEND {
-            // Spawn ANTES de adquirir el permiso (igual que peer_server).
-            // Adquirir el permiso bloquearía el reader y aunque aquí
-            // sólo hay un kind, queremos que el reader drene el TCP
-            // rápido y la concurrencia real esté capada en el handler.
+            // Adquirir el permiso ANTES de leer el siguiente frame.
+            // Cuando los MAX_INFLIGHT_LOCAL_SEND tasks estén ocupados,
+            // el reader bloquea aquí → TCP recv buffer se llena → el
+            // writer del ORR (kernel-side) se bloquea → su mpsc de
+            // qkc_link no drena → SendMessage espera en el ORR →
+            // backpressure llega al sender. Sin esto el reader drenaba
+            // TCP a tope y los tasks pendientes esperaban > 5s por la
+            // key QKD, fallando con KeyWaitTimeout y dropeando frames
+            // silenciosamente (`local_send_errs`).
+            let permit = match inflight.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
             let svc2 = svc.clone();
-            let inflight = Arc::clone(&inflight);
             tokio::spawn(async move {
-                let _permit = match inflight.acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
+                let _permit = permit;
                 if let Err(e) = relay::handle_local_send(svc2, frame).await {
                     warn!(error = %e, "qkc.local.send_err");
                 }

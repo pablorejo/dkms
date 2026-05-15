@@ -288,6 +288,13 @@ impl KeyStore {
             }
         }
         self.n_wait_enc_succeeded.fetch_add(1, Ordering::Relaxed);
+        // FIFO cascade: si quedan keys en el buffer después de servirnos,
+        // despierta al siguiente waiter (notify_one es FIFO en tokio).
+        // Sin esto, sólo el primer waiter de cada refill obtiene servicio
+        // → resto se quedan dormidos hasta el próximo refill.
+        if !self.enc.is_empty() {
+            self.enc_inserted.notify_one();
+        }
         Ok(out)
     }
 
@@ -395,10 +402,13 @@ impl KeyStore {
                             // dropeamos en silencio — caso raro.
                             let _ = self.enc.push(k);
                         }
-                        // Despierta a los frames que estaban en
-                        // `wait_enc_batch` esperando este refill.
+                        // Despierta UN solo waiter (notify_one es FIFO en
+                        // tokio). El waiter que se despierta, tras coger
+                        // sus claves, hace cascade `notify_one` al siguiente
+                        // si quedan keys. Esto evita el thundering herd
+                        // del antiguo `notify_waiters` y da fairness real.
                         self.enc_inserted_seq.fetch_add(1, Ordering::SeqCst);
-                        self.enc_inserted.notify_waiters();
+                        self.enc_inserted.notify_one();
                         // NOTIFY al peer.
                         self.send_notify(&ids_raw);
                         debug!(

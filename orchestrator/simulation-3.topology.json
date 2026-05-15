@@ -1,0 +1,1970 @@
+{
+  "version": "1.0",
+  "nodes": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50
+  ],
+  "connections": [
+    {
+      "init": 1,
+      "end": 39,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 1,
+      "end": 46,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 1,
+      "end": 47,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 2,
+      "end": 37,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 3,
+      "end": 4,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 3,
+      "end": 15,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 3,
+      "end": 19,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 4,
+      "end": 17,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 4,
+      "end": 20,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 5,
+      "end": 6,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 5,
+      "end": 9,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 5,
+      "end": 26,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 6,
+      "end": 23,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 7,
+      "end": 8,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 7,
+      "end": 24,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 7,
+      "end": 30,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 7,
+      "end": 49,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 8,
+      "end": 28,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 9,
+      "end": 22,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 10,
+      "end": 11,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 10,
+      "end": 14,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 11,
+      "end": 13,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 11,
+      "end": 31,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 12,
+      "end": 27,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 12,
+      "end": 28,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 14,
+      "end": 16,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 14,
+      "end": 32,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 15,
+      "end": 25,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 16,
+      "end": 33,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 18,
+      "end": 29,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 18,
+      "end": 35,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 19,
+      "end": 25,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 19,
+      "end": 39,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 20,
+      "end": 26,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 21,
+      "end": 33,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 22,
+      "end": 26,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 22,
+      "end": 36,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 22,
+      "end": 44,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 23,
+      "end": 30,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 23,
+      "end": 36,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 23,
+      "end": 45,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 24,
+      "end": 28,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 24,
+      "end": 50,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 27,
+      "end": 31,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 27,
+      "end": 40,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 29,
+      "end": 35,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 30,
+      "end": 34,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 30,
+      "end": 41,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 32,
+      "end": 33,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 32,
+      "end": 43,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 34,
+      "end": 45,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 34,
+      "end": 49,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 35,
+      "end": 46,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 36,
+      "end": 41,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 36,
+      "end": 48,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 37,
+      "end": 41,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 37,
+      "end": 48,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 37,
+      "end": 50,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 38,
+      "end": 45,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 39,
+      "end": 46,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 39,
+      "end": 47,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 40,
+      "end": 42,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 40,
+      "end": 50,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 42,
+      "end": 50,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    },
+    {
+      "init": 44,
+      "end": 47,
+      "channel": {
+        "type_channel": "qkd",
+        "distance": 5,
+        "max_buffer_size": 10000,
+        "rate_r0": 2000,
+        "rate_alpha": 0.2
+      },
+      "pqc_simulation": false,
+      "hybrid_enabled": false
+    }
+  ],
+  "sdn": {
+    "ip": "172.30.0.2",
+    "port": 3000,
+    "type_http": "http"
+  },
+  "extensions": {
+    "simulation": {
+      "name": "Prueba con 50 dkms",
+      "description": "test fuerte de 50 dkms"
+    },
+    "editor": {
+      "nodes": [
+        {
+          "uid": "node-0308edef-60b4-4f57-8455-c527c6215db8",
+          "node_type": "DKMS",
+          "node_id": 37,
+          "label": "DKMS 37",
+          "x": 255.9446232719476,
+          "y": -64.45005984339218
+        },
+        {
+          "uid": "node-04a6cfae-a941-45ac-8111-02102e01a1b0",
+          "node_type": "DKMS",
+          "node_id": 24,
+          "label": "DKMS 24",
+          "x": 647.7143393375948,
+          "y": -371.9374989163773
+        },
+        {
+          "uid": "node-05ea5abd-5c0b-4de3-9391-1de85ad14bef",
+          "node_type": "DKMS",
+          "node_id": 3,
+          "label": "DKMS 3",
+          "x": -1500.9113467347777,
+          "y": 554.428561445909
+        },
+        {
+          "uid": "node-0cd726ad-7e50-4f07-aec0-a5ec20b1e7e3",
+          "node_type": "DKMS",
+          "node_id": 16,
+          "label": "DKMS 16",
+          "x": 879.1388698903289,
+          "y": 1050.6455344196324
+        },
+        {
+          "uid": "node-14b79c10-744d-42f4-b5cf-924459b3ed09",
+          "node_type": "DKMS",
+          "node_id": 2,
+          "label": "DKMS 2",
+          "x": 259.83080653112705,
+          "y": 208.26544206517895
+        },
+        {
+          "uid": "node-1662ce8b-93c5-4dc5-aaec-a8af678a9297",
+          "node_type": "DKMS",
+          "node_id": 7,
+          "label": "DKMS 7",
+          "x": 588.8899337733808,
+          "y": -654.4093477633519
+        },
+        {
+          "uid": "node-17fcf15d-4a59-48ac-9f3d-d77d08399813",
+          "node_type": "DKMS",
+          "node_id": 35,
+          "label": "DKMS 35",
+          "x": -374.55221578274137,
+          "y": 1148.6708858015177
+        },
+        {
+          "uid": "node-1daab783-1a9b-4f26-8f9a-a3ad18956c18",
+          "node_type": "DKMS",
+          "node_id": 47,
+          "label": "DKMS 47",
+          "x": -365.3902720334346,
+          "y": 371.747287940295
+        },
+        {
+          "uid": "node-28cb5bc6-d8e0-4eb0-850c-a4c1a02ee939",
+          "node_type": "DKMS",
+          "node_id": 32,
+          "label": "DKMS 32",
+          "x": 927.6162573387537,
+          "y": 710.2063306850895
+        },
+        {
+          "uid": "node-297e121d-850a-4ab3-ad38-7217242f2f99",
+          "node_type": "DKMS",
+          "node_id": 4,
+          "label": "DKMS 4",
+          "x": -1267.4007082089565,
+          "y": 388.418071885265
+        },
+        {
+          "uid": "node-2f0d7ada-a1a4-4573-921e-63889255f79b",
+          "node_type": "DKMS",
+          "node_id": 1,
+          "label": "DKMS 1",
+          "x": -109.7363146880867,
+          "y": 551.7944937905723
+        },
+        {
+          "uid": "node-323c6aae-ad0c-4a19-bb5e-c84c025f8245",
+          "node_type": "DKMS",
+          "node_id": 18,
+          "label": "DKMS 18",
+          "x": -628.6683581063397,
+          "y": 1347.7368294994385
+        },
+        {
+          "uid": "node-32fdc063-7d62-4858-8387-03cd478d9573",
+          "node_type": "DKMS",
+          "node_id": 50,
+          "label": "DKMS 50",
+          "x": 535.404612669377,
+          "y": -103.18980241641887
+        },
+        {
+          "uid": "node-358026be-3649-49d0-84a5-375a5752f1aa",
+          "node_type": "DKMS",
+          "node_id": 10,
+          "label": "DKMS 10",
+          "x": 1565.5718706623202,
+          "y": 430.41916158086735
+        },
+        {
+          "uid": "node-3c3527b1-e355-433e-b8cc-5448876050cb",
+          "node_type": "DKMS",
+          "node_id": 14,
+          "label": "DKMS 14",
+          "x": 1064.046542854226,
+          "y": 878.4148893903563
+        },
+        {
+          "uid": "node-3ee2530c-5469-44a2-8f7b-40e2cc3200b9",
+          "node_type": "DKMS",
+          "node_id": 19,
+          "label": "DKMS 19",
+          "x": -1344.7016069657768,
+          "y": 695.2725478813936
+        },
+        {
+          "uid": "node-4a488eb8-7641-456a-8bce-5c28abb8c1ac",
+          "node_type": "DKMS",
+          "node_id": 26,
+          "label": "DKMS 26",
+          "x": -733.9927813612339,
+          "y": 38.299676238344205
+        },
+        {
+          "uid": "node-4f8eaf93-780a-48aa-a93e-3e992d2f4687",
+          "node_type": "DKMS",
+          "node_id": 44,
+          "label": "DKMS 44",
+          "x": -331.98064587012954,
+          "y": 102.38890154600762
+        },
+        {
+          "uid": "node-5221e533-8049-4470-9054-47ec8fc053f1",
+          "node_type": "DKMS",
+          "node_id": 30,
+          "label": "DKMS 30",
+          "x": 118.44954687164693,
+          "y": -670.8308176606279
+        },
+        {
+          "uid": "node-5de664f6-f2a9-49df-b7c7-2756420df5bb",
+          "node_type": "DKMS",
+          "node_id": 15,
+          "label": "DKMS 15",
+          "x": -1664.8101251064015,
+          "y": 684.9877178400068
+        },
+        {
+          "uid": "node-64f56ccb-e9e2-4c26-97a7-add9af522699",
+          "node_type": "DKMS",
+          "node_id": 27,
+          "label": "DKMS 27",
+          "x": 1139.175615362791,
+          "y": 76.06413945135318
+        },
+        {
+          "uid": "node-6e4ece82-5204-48fa-be85-81065bba3fb2",
+          "node_type": "DKMS",
+          "node_id": 25,
+          "label": "DKMS 25",
+          "x": -1547.8047421274225,
+          "y": 844.2806689740427
+        },
+        {
+          "uid": "node-6f8b5dda-36fe-4d19-83aa-dab7d056f2fa",
+          "node_type": "DKMS",
+          "node_id": 20,
+          "label": "DKMS 20",
+          "x": -1012.3512681835101,
+          "y": 252.36510025905807
+        },
+        {
+          "uid": "node-6fba60fd-8478-4b45-af06-1b29cb163046",
+          "node_type": "DKMS",
+          "node_id": 42,
+          "label": "DKMS 42",
+          "x": 793.06392861641,
+          "y": 172.13075374758552
+        },
+        {
+          "uid": "node-7bb88737-872a-485b-91e2-d7367848c5c7",
+          "node_type": "DKMS",
+          "node_id": 49,
+          "label": "DKMS 49",
+          "x": 605.6041584142366,
+          "y": -1320.7469441141097
+        },
+        {
+          "uid": "node-7cea5d2c-62af-4fe7-b91a-aaa776944d16",
+          "node_type": "DKMS",
+          "node_id": 36,
+          "label": "DKMS 36",
+          "x": -159.46097134210845,
+          "y": -313.0149834564596
+        },
+        {
+          "uid": "node-821bc7a9-df30-4d5b-ac05-49471d79dec1",
+          "node_type": "DKMS",
+          "node_id": 23,
+          "label": "DKMS 23",
+          "x": -269.9344187931184,
+          "y": -588.9584255229736
+        },
+        {
+          "uid": "node-8d53f5e3-7e9a-4f11-8bd7-7215706efd01",
+          "node_type": "DKMS",
+          "node_id": 22,
+          "label": "DKMS 22",
+          "x": -477.60411284226564,
+          "y": -151.45678850735862
+        },
+        {
+          "uid": "node-8d77fd88-cd08-4a8b-aeb4-71c9d3faf9a0",
+          "node_type": "DKMS",
+          "node_id": 5,
+          "label": "DKMS 5",
+          "x": -1054.6849487299282,
+          "y": -118.21610239416486
+        },
+        {
+          "uid": "node-9b0cd536-6c6d-46b5-8269-4fb3c7d1a6ab",
+          "node_type": "DKMS",
+          "node_id": 38,
+          "label": "DKMS 38",
+          "x": -563.080365613842,
+          "y": -1569.744397757032
+        },
+        {
+          "uid": "node-9d590dc5-396b-4964-b63c-fde98da03d42",
+          "node_type": "DKMS",
+          "node_id": 33,
+          "label": "DKMS 33",
+          "x": 737.2944133025842,
+          "y": 878.646071193372
+        },
+        {
+          "uid": "node-9d85d7f4-ddfa-4752-93a4-ef4506252b35",
+          "node_type": "DKMS",
+          "node_id": 11,
+          "label": "DKMS 11",
+          "x": 1535.495651900761,
+          "y": 281.49736150903186
+        },
+        {
+          "uid": "node-a41c705f-97cd-4384-b081-5e7965f23f0a",
+          "node_type": "DKMS",
+          "node_id": 34,
+          "label": "DKMS 34",
+          "x": 241.61742306402675,
+          "y": -1315.2395123932897
+        },
+        {
+          "uid": "node-a6d6f2e8-3f54-4d21-9b20-6798f415af0c",
+          "node_type": "DKMS",
+          "node_id": 40,
+          "label": "DKMS 40",
+          "x": 856.9004728146285,
+          "y": -34.230332961772035
+        },
+        {
+          "uid": "node-a8220311-3ddd-492c-8bc7-c372e10313c9",
+          "node_type": "DKMS",
+          "node_id": 41,
+          "label": "DKMS 41",
+          "x": 205.7457975763345,
+          "y": -280.46595903862317
+        },
+        {
+          "uid": "node-a8272fb8-4efa-4652-a4d6-1297580bae5f",
+          "node_type": "DKMS",
+          "node_id": 28,
+          "label": "DKMS 28",
+          "x": 1050.2119688701434,
+          "y": -190.65026674550063
+        },
+        {
+          "uid": "node-b0a03d1f-f7fd-4a0a-97c6-86c62c082344",
+          "node_type": "DKMS",
+          "node_id": 12,
+          "label": "DKMS 12",
+          "x": 1433.1766809649064,
+          "y": -232.00450805224443
+        },
+        {
+          "uid": "node-b48bfd98-dd40-4015-b01b-50fa933fc88c",
+          "node_type": "DKMS",
+          "node_id": 46,
+          "label": "DKMS 46",
+          "x": -372.01940002521485,
+          "y": 737.3384891628302
+        },
+        {
+          "uid": "node-b54c4af0-1a49-4ced-b636-d6a34c3622d6",
+          "node_type": "DKMS",
+          "node_id": 21,
+          "label": "DKMS 21",
+          "x": 462.85150561120105,
+          "y": 1422.938007511625
+        },
+        {
+          "uid": "node-c024f112-75b4-4686-a76a-f722255bbb80",
+          "node_type": "DKMS",
+          "node_id": 6,
+          "label": "DKMS 6",
+          "x": -1423.8355208928665,
+          "y": -374.8802733057903
+        },
+        {
+          "uid": "node-c080f360-1910-4891-8519-16e1987789a7",
+          "node_type": "DKMS",
+          "node_id": 43,
+          "label": "DKMS 43",
+          "x": 365.38686339915535,
+          "y": 491.9160488022162
+        },
+        {
+          "uid": "node-c16886e8-db0a-4cb2-9fd0-fb81c7f2f9de",
+          "node_type": "DKMS",
+          "node_id": 13,
+          "label": "DKMS 13",
+          "x": 1493.0928357448722,
+          "y": 49.173668601285726
+        },
+        {
+          "uid": "node-cbb75440-7504-48e1-99aa-3b286d5cc54f",
+          "node_type": "DKMS",
+          "node_id": 31,
+          "label": "DKMS 31",
+          "x": 1169.7433985290827,
+          "y": 304.9339410848381
+        },
+        {
+          "uid": "node-cfa1c4bc-df89-48e3-8e31-d66bdf1cdc1b",
+          "node_type": "DKMS",
+          "node_id": 8,
+          "label": "DKMS 8",
+          "x": 1114.7946124491068,
+          "y": -493.5206360210734
+        },
+        {
+          "uid": "node-d0c0f4e8-73af-4393-bba2-7962d4d49658",
+          "node_type": "DKMS",
+          "node_id": 17,
+          "label": "DKMS 17",
+          "x": -2036.5638107015116,
+          "y": 17.402780855321055
+        },
+        {
+          "uid": "node-d2fff8f0-a199-4c6f-bdbd-f1f6e313e671",
+          "node_type": "DKMS",
+          "node_id": 29,
+          "label": "DKMS 29",
+          "x": -143.86597878505472,
+          "y": 1338.3144473849466
+        },
+        {
+          "uid": "node-eb32a1ea-7929-48d6-a294-bbe2d1672a9f",
+          "node_type": "DKMS",
+          "node_id": 45,
+          "label": "DKMS 45",
+          "x": -200.86365456767174,
+          "y": -1323.5063750014785
+        },
+        {
+          "uid": "node-f0130a8e-30ec-418d-8363-fb436ded2a71",
+          "node_type": "DKMS",
+          "node_id": 48,
+          "label": "DKMS 48",
+          "x": -75.53157888345741,
+          "y": -36.18711769845777
+        },
+        {
+          "uid": "node-f0994e47-c74e-4f1a-9a8e-21d609938de0",
+          "node_type": "DKMS",
+          "node_id": 9,
+          "label": "DKMS 9",
+          "x": -816.2694053519058,
+          "y": -356.6837592941792
+        },
+        {
+          "uid": "node-fb4dfed8-c638-4f36-940d-e44ea796984a",
+          "node_type": "DKMS",
+          "node_id": 39,
+          "label": "DKMS 39",
+          "x": -533.1812169374322,
+          "y": 551.134040905251
+        }
+      ],
+      "links": [
+        {
+          "uid": "edge-0b05ff8e-6e0d-4c14-9f80-0e603723093c",
+          "source_uid": "node-8d53f5e3-7e9a-4f11-8bd7-7215706efd01",
+          "target_uid": "node-7cea5d2c-62af-4fe7-b91a-aaa776944d16",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-0d1cd95a-fbe7-44a9-be9a-d77a7cff93b0",
+          "source_uid": "node-297e121d-850a-4ab3-ad38-7217242f2f99",
+          "target_uid": "node-6f8b5dda-36fe-4d19-83aa-dab7d056f2fa",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-0f383075-fe39-416e-8181-36792e0af06a",
+          "source_uid": "node-a6d6f2e8-3f54-4d21-9b20-6798f415af0c",
+          "target_uid": "node-6fba60fd-8478-4b45-af06-1b29cb163046",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-14b627b3-b166-4788-ab0f-e2e37fbb101e",
+          "source_uid": "node-5221e533-8049-4470-9054-47ec8fc053f1",
+          "target_uid": "node-a8220311-3ddd-492c-8bc7-c372e10313c9",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-176b79c4-b496-428a-a691-14cb780c075e",
+          "source_uid": "node-821bc7a9-df30-4d5b-ac05-49471d79dec1",
+          "target_uid": "node-eb32a1ea-7929-48d6-a294-bbe2d1672a9f",
+          "link_type": "QKD",
+          "distance_km": 100,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-21449c26-b2f8-48ae-a62a-bc70ee1afdc1",
+          "source_uid": "node-28cb5bc6-d8e0-4eb0-850c-a4c1a02ee939",
+          "target_uid": "node-3c3527b1-e355-433e-b8cc-5448876050cb",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-267228a9-5e47-4e2d-9247-0c537ada31ff",
+          "source_uid": "node-cbb75440-7504-48e1-99aa-3b286d5cc54f",
+          "target_uid": "node-9d85d7f4-ddfa-4752-93a4-ef4506252b35",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-27845438-db73-41d3-b354-9656d5ae1201",
+          "source_uid": "node-a8220311-3ddd-492c-8bc7-c372e10313c9",
+          "target_uid": "node-0308edef-60b4-4f57-8455-c527c6215db8",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-27c4054c-b4fc-49ac-93ea-f9e8e6f50240",
+          "source_uid": "node-a8272fb8-4efa-4652-a4d6-1297580bae5f",
+          "target_uid": "node-b0a03d1f-f7fd-4a0a-97c6-86c62c082344",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-27c78fd5-6269-4a1c-b848-3b0f8d3f7d8a",
+          "source_uid": "node-4f8eaf93-780a-48aa-a93e-3e992d2f4687",
+          "target_uid": "node-1daab783-1a9b-4f26-8f9a-a3ad18956c18",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-2d56c0a5-5c07-473b-8e39-cacc29eb6e14",
+          "source_uid": "node-cfa1c4bc-df89-48e3-8e31-d66bdf1cdc1b",
+          "target_uid": "node-a8272fb8-4efa-4652-a4d6-1297580bae5f",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-36cdefb9-1292-4f84-ad37-f76dce6a5f07",
+          "source_uid": "node-6f8b5dda-36fe-4d19-83aa-dab7d056f2fa",
+          "target_uid": "node-4a488eb8-7641-456a-8bce-5c28abb8c1ac",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-3e86ca29-4048-4e0f-9beb-d61ecda4d0b6",
+          "source_uid": "node-5de664f6-f2a9-49df-b7c7-2756420df5bb",
+          "target_uid": "node-6e4ece82-5204-48fa-be85-81065bba3fb2",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-41ba535c-3870-4d7c-abf6-35e9ff3881e9",
+          "source_uid": "node-9d85d7f4-ddfa-4752-93a4-ef4506252b35",
+          "target_uid": "node-358026be-3649-49d0-84a5-375a5752f1aa",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-421d5b20-5b94-48f9-b65e-dbf483ea3378",
+          "source_uid": "node-f0130a8e-30ec-418d-8363-fb436ded2a71",
+          "target_uid": "node-7cea5d2c-62af-4fe7-b91a-aaa776944d16",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-44494e9f-e44c-423e-ad98-b13445e7dad2",
+          "source_uid": "node-b48bfd98-dd40-4015-b01b-50fa933fc88c",
+          "target_uid": "node-17fcf15d-4a59-48ac-9f3d-d77d08399813",
+          "link_type": "QKD",
+          "distance_km": 70,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-47d8422b-3686-4cb8-92ab-3f00877a0cd8",
+          "source_uid": "node-9d590dc5-396b-4964-b63c-fde98da03d42",
+          "target_uid": "node-28cb5bc6-d8e0-4eb0-850c-a4c1a02ee939",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-4ce94297-3ebf-4c92-b50a-39935cec2e10",
+          "source_uid": "node-a6d6f2e8-3f54-4d21-9b20-6798f415af0c",
+          "target_uid": "node-32fdc063-7d62-4858-8387-03cd478d9573",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-4f7d7312-b43f-41ae-b7ec-4bce64018b06",
+          "source_uid": "node-3c3527b1-e355-433e-b8cc-5448876050cb",
+          "target_uid": "node-358026be-3649-49d0-84a5-375a5752f1aa",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-5eb77067-b479-41c8-9cc4-e3bdead527ed",
+          "source_uid": "node-0308edef-60b4-4f57-8455-c527c6215db8",
+          "target_uid": "node-14b79c10-744d-42f4-b5cf-924459b3ed09",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-62e4f403-3a24-443e-aefa-da688577a9b5",
+          "source_uid": "node-1662ce8b-93c5-4dc5-aaec-a8af678a9297",
+          "target_uid": "node-5221e533-8049-4470-9054-47ec8fc053f1",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-68eac46c-b7a1-4639-8805-8be72ca39213",
+          "source_uid": "node-297e121d-850a-4ab3-ad38-7217242f2f99",
+          "target_uid": "node-05ea5abd-5c0b-4de3-9391-1de85ad14bef",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-708b02e4-ff82-4708-92f0-b8a839678ebc",
+          "source_uid": "node-05ea5abd-5c0b-4de3-9391-1de85ad14bef",
+          "target_uid": "node-5de664f6-f2a9-49df-b7c7-2756420df5bb",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-759c8eea-aaa4-4375-9c85-952b803fe55d",
+          "source_uid": "node-1daab783-1a9b-4f26-8f9a-a3ad18956c18",
+          "target_uid": "node-2f0d7ada-a1a4-4573-921e-63889255f79b",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-76aab576-64ac-4ddb-92fa-641481493b30",
+          "source_uid": "node-04a6cfae-a941-45ac-8111-02102e01a1b0",
+          "target_uid": "node-1662ce8b-93c5-4dc5-aaec-a8af678a9297",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-7d41530d-2f80-4e10-aeac-526970e07939",
+          "source_uid": "node-7cea5d2c-62af-4fe7-b91a-aaa776944d16",
+          "target_uid": "node-821bc7a9-df30-4d5b-ac05-49471d79dec1",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-84991615-c9fa-4b68-b581-07c09d180adb",
+          "source_uid": "node-2f0d7ada-a1a4-4573-921e-63889255f79b",
+          "target_uid": "node-b48bfd98-dd40-4015-b01b-50fa933fc88c",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-8aaa66a2-bf84-4c75-8f56-ac63ead3136e",
+          "source_uid": "node-9d590dc5-396b-4964-b63c-fde98da03d42",
+          "target_uid": "node-b54c4af0-1a49-4ced-b636-d6a34c3622d6",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-8eea066f-87f6-42cf-95e3-17fd954e6b64",
+          "source_uid": "node-a41c705f-97cd-4384-b081-5e7965f23f0a",
+          "target_uid": "node-7bb88737-872a-485b-91e2-d7367848c5c7",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-9022ecb2-c4ba-47c0-9a71-a028a65027be",
+          "source_uid": "node-b0a03d1f-f7fd-4a0a-97c6-86c62c082344",
+          "target_uid": "node-64f56ccb-e9e2-4c26-97a7-add9af522699",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-9032ee41-13c7-47f2-aae1-ba341973279c",
+          "source_uid": "node-4a488eb8-7641-456a-8bce-5c28abb8c1ac",
+          "target_uid": "node-8d77fd88-cd08-4a8b-aeb4-71c9d3faf9a0",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-917248f8-13a3-4a3b-b69d-ac4f9f994964",
+          "source_uid": "node-3ee2530c-5469-44a2-8f7b-40e2cc3200b9",
+          "target_uid": "node-fb4dfed8-c638-4f36-940d-e44ea796984a",
+          "link_type": "HYBRID",
+          "distance_km": 100,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-9237c836-d074-4e95-9369-3d17e52b2912",
+          "source_uid": "node-821bc7a9-df30-4d5b-ac05-49471d79dec1",
+          "target_uid": "node-c024f112-75b4-4686-a76a-f722255bbb80",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-940cb3d1-c27b-40e9-ae4d-2aa512167f6a",
+          "source_uid": "node-d0c0f4e8-73af-4393-bba2-7962d4d49658",
+          "target_uid": "node-297e121d-850a-4ab3-ad38-7217242f2f99",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-95a3d127-1d4f-44d0-8fb5-1a08254b230d",
+          "source_uid": "node-eb32a1ea-7929-48d6-a294-bbe2d1672a9f",
+          "target_uid": "node-a41c705f-97cd-4384-b081-5e7965f23f0a",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-995bcd14-5e30-4a33-8083-f3dcd46a9d2e",
+          "source_uid": "node-f0994e47-c74e-4f1a-9a8e-21d609938de0",
+          "target_uid": "node-8d53f5e3-7e9a-4f11-8bd7-7215706efd01",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-9c5f3c74-0ac9-40a8-851f-25c047ea6716",
+          "source_uid": "node-32fdc063-7d62-4858-8387-03cd478d9573",
+          "target_uid": "node-04a6cfae-a941-45ac-8111-02102e01a1b0",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-9d9afcdf-9df4-4af9-a867-685eeb25a5ec",
+          "source_uid": "node-5221e533-8049-4470-9054-47ec8fc053f1",
+          "target_uid": "node-a41c705f-97cd-4384-b081-5e7965f23f0a",
+          "link_type": "QKD",
+          "distance_km": 100,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-a302b12c-6756-4b5a-82af-730601f6bf26",
+          "source_uid": "node-0308edef-60b4-4f57-8455-c527c6215db8",
+          "target_uid": "node-32fdc063-7d62-4858-8387-03cd478d9573",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-a3153110-1fd5-4302-b78c-036e184dcb51",
+          "source_uid": "node-cfa1c4bc-df89-48e3-8e31-d66bdf1cdc1b",
+          "target_uid": "node-1662ce8b-93c5-4dc5-aaec-a8af678a9297",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-ab25d4a3-0b7e-4879-b913-eb69007b4310",
+          "source_uid": "node-b48bfd98-dd40-4015-b01b-50fa933fc88c",
+          "target_uid": "node-fb4dfed8-c638-4f36-940d-e44ea796984a",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-b14a22e6-0348-434f-a9d6-79fe58a80028",
+          "source_uid": "node-f0994e47-c74e-4f1a-9a8e-21d609938de0",
+          "target_uid": "node-8d77fd88-cd08-4a8b-aeb4-71c9d3faf9a0",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-b3569680-8aa9-45e0-a8b0-0968d23e58e3",
+          "source_uid": "node-8d77fd88-cd08-4a8b-aeb4-71c9d3faf9a0",
+          "target_uid": "node-c024f112-75b4-4686-a76a-f722255bbb80",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-bd3ece27-c3fa-45e8-97e0-45541bbfc617",
+          "source_uid": "node-6e4ece82-5204-48fa-be85-81065bba3fb2",
+          "target_uid": "node-3ee2530c-5469-44a2-8f7b-40e2cc3200b9",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-c0cb4ef2-130d-4ae6-a575-96ea19026270",
+          "source_uid": "node-8d53f5e3-7e9a-4f11-8bd7-7215706efd01",
+          "target_uid": "node-4f8eaf93-780a-48aa-a93e-3e992d2f4687",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-c15fae31-55ff-41f3-af39-c5a5caccba51",
+          "source_uid": "node-3ee2530c-5469-44a2-8f7b-40e2cc3200b9",
+          "target_uid": "node-05ea5abd-5c0b-4de3-9391-1de85ad14bef",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-c52af97d-ef0a-4e78-8771-6696dea64ad6",
+          "source_uid": "node-821bc7a9-df30-4d5b-ac05-49471d79dec1",
+          "target_uid": "node-5221e533-8049-4470-9054-47ec8fc053f1",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-c5f41046-1023-4dc1-a150-fa1e23ffdbcf",
+          "source_uid": "node-a8272fb8-4efa-4652-a4d6-1297580bae5f",
+          "target_uid": "node-04a6cfae-a941-45ac-8111-02102e01a1b0",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-c9375dc9-aa63-4d0a-af81-669fb85a1053",
+          "source_uid": "node-28cb5bc6-d8e0-4eb0-850c-a4c1a02ee939",
+          "target_uid": "node-c080f360-1910-4891-8519-16e1987789a7",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-cc83d8c9-c4e9-41a1-b995-9ddd534a50ac",
+          "source_uid": "node-d2fff8f0-a199-4c6f-bdbd-f1f6e313e671",
+          "target_uid": "node-17fcf15d-4a59-48ac-9f3d-d77d08399813",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-ccfee76a-ebdf-4ec4-a7f7-a3f874dceca3",
+          "source_uid": "node-64f56ccb-e9e2-4c26-97a7-add9af522699",
+          "target_uid": "node-a6d6f2e8-3f54-4d21-9b20-6798f415af0c",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-d543b818-4ab5-4972-a9cf-ec37c1fc34ab",
+          "source_uid": "node-6fba60fd-8478-4b45-af06-1b29cb163046",
+          "target_uid": "node-32fdc063-7d62-4858-8387-03cd478d9573",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-d78aeb0a-c599-4c59-89e2-d45d51f52ddd",
+          "source_uid": "node-17fcf15d-4a59-48ac-9f3d-d77d08399813",
+          "target_uid": "node-323c6aae-ad0c-4a19-bb5e-c84c025f8245",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-d9f6e2eb-c68f-4a4e-8415-c3c988e6e447",
+          "source_uid": "node-a8220311-3ddd-492c-8bc7-c372e10313c9",
+          "target_uid": "node-7cea5d2c-62af-4fe7-b91a-aaa776944d16",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-e19fec55-ee99-43d7-8684-5500b31671fd",
+          "source_uid": "node-fb4dfed8-c638-4f36-940d-e44ea796984a",
+          "target_uid": "node-2f0d7ada-a1a4-4573-921e-63889255f79b",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-e8d4a132-1f29-4e16-ad4a-6b3cd271361e",
+          "source_uid": "node-1662ce8b-93c5-4dc5-aaec-a8af678a9297",
+          "target_uid": "node-7bb88737-872a-485b-91e2-d7367848c5c7",
+          "link_type": "QKD",
+          "distance_km": 100,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-e9438f3d-8127-47b0-962e-b45b9af8e857",
+          "source_uid": "node-0308edef-60b4-4f57-8455-c527c6215db8",
+          "target_uid": "node-f0130a8e-30ec-418d-8363-fb436ded2a71",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-ea4e1974-10ef-43fa-b311-41d623a19a86",
+          "source_uid": "node-4a488eb8-7641-456a-8bce-5c28abb8c1ac",
+          "target_uid": "node-8d53f5e3-7e9a-4f11-8bd7-7215706efd01",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-eacd30b1-1efa-4593-8399-ab693ef3a7d1",
+          "source_uid": "node-64f56ccb-e9e2-4c26-97a7-add9af522699",
+          "target_uid": "node-cbb75440-7504-48e1-99aa-3b286d5cc54f",
+          "link_type": "PQC",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-ec8c7d35-c199-4171-8ba8-dc4d1eadd114",
+          "source_uid": "node-3c3527b1-e355-433e-b8cc-5448876050cb",
+          "target_uid": "node-0cd726ad-7e50-4f07-aec0-a5ec20b1e7e3",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-f2e2846c-7498-4fb4-92ee-37a92004ac5d",
+          "source_uid": "node-9d85d7f4-ddfa-4752-93a4-ef4506252b35",
+          "target_uid": "node-c16886e8-db0a-4cb2-9fd0-fb81c7f2f9de",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-f69f860a-ca0b-4796-8648-f31feef47835",
+          "source_uid": "node-fb4dfed8-c638-4f36-940d-e44ea796984a",
+          "target_uid": "node-1daab783-1a9b-4f26-8f9a-a3ad18956c18",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-f955705e-d070-4902-85d6-b946b588e314",
+          "source_uid": "node-9b0cd536-6c6d-46b5-8269-4fb3c7d1a6ab",
+          "target_uid": "node-eb32a1ea-7929-48d6-a294-bbe2d1672a9f",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-f955ad05-2a01-47b3-9f4c-14d34b4aad7c",
+          "source_uid": "node-0cd726ad-7e50-4f07-aec0-a5ec20b1e7e3",
+          "target_uid": "node-9d590dc5-396b-4964-b63c-fde98da03d42",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        },
+        {
+          "uid": "edge-fb4a3128-8d4c-4e50-bdff-7fcc0cb9dcab",
+          "source_uid": "node-323c6aae-ad0c-4a19-bb5e-c84c025f8245",
+          "target_uid": "node-d2fff8f0-a199-4c6f-bdbd-f1f6e313e671",
+          "link_type": "QKD",
+          "distance_km": 0,
+          "quditto_max_buffer_size": 100,
+          "quditto_rate_r0": 120,
+          "quditto_rate_alpha": 0.2
+        }
+      ],
+      "saes": []
+    }
+  }
+}

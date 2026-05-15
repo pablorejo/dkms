@@ -534,6 +534,7 @@ export function Inspector({
     }
 
     let alive = true;
+    const controller = new AbortController();
 
     const loadSaes = async () => {
       try {
@@ -543,7 +544,8 @@ export function Inspector({
           apiPath(`/api/simulations/${simulationId}/saes?dkmsId=${selectedDkmsId}`),
           {
             method: "GET",
-            cache: "no-store"
+            cache: "no-store",
+            signal: controller.signal
           }
         );
         const payload = await response.json().catch(() => ({}));
@@ -558,7 +560,7 @@ export function Inspector({
 
         setSaes(items);
       } catch (error) {
-        if (!alive) {
+        if (!alive || (error instanceof DOMException && error.name === "AbortError")) {
           return;
         }
         setSaeError(error instanceof Error ? error.message : "Failed to load SAEs");
@@ -576,6 +578,7 @@ export function Inspector({
 
     return () => {
       alive = false;
+      controller.abort();
       window.clearInterval(intervalId);
     };
   }, [simulationId, selectedDkmsId, selectedNode?.data.nodeType]);

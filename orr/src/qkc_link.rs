@@ -111,8 +111,20 @@ async fn supervisor_loop(inner: Arc<LinkInner>, mut send_rx: mpsc::Receiver<Fram
     }
 }
 
-/// Pulsa una sola sesión TCP: lee del socket, escribe al socket, y
-/// retorna cuando cualquiera de las dos direcciones falla.
+/// Pulsa una sola sesión TCP.
+///
+/// Read y write corren en tasks separadas (no en `tokio::select!` sobre
+/// la misma stream) porque `read_frame` usa `read_exact` internamente,
+/// que NO es cancel-safe: si `select!` lo cancela mid-read, los bytes
+/// ya consumidos del stream se pierden y el siguiente `read_frame` ve
+/// el cuerpo del frame anterior y falla con `bad magic`. Fue lo que
+/// rompía mode 0 a alto throughput (orr_22/orr_11 perdían ~50 % de
+/// frames con disconnects intermitentes).
+///
+/// El writer corre en el task actual; `select!` aquí solo combina dos
+/// futuros cancel-safe: `send_rx.recv()` (mpsc) y `&mut read_task`
+/// (JoinHandle). Si el reader cae, salimos. Si el writer falla, el
+/// reader se aborta antes de retornar.
 async fn run_session(
     stream: TcpStream,
     send_rx: &mut mpsc::Receiver<Frame>,
@@ -120,41 +132,53 @@ async fn run_session(
 ) {
     let (mut read_half, mut write_half) = stream.into_split();
 
-    loop {
-        tokio::select! {
-            // Frame entrante del QKC.
-            recv = read_frame(&mut read_half) => {
-                match recv {
-                    Ok(frame) => {
-                        if frame.kind != FRAME_LOCAL_DELIVER {
-                            debug!(kind = frame.kind, "orr.qkc_link.unexpected_kind");
-                            continue;
-                        }
-                        if let Some(tx) = deliveries.as_ref() {
-                            if tx.send(frame).await.is_err() {
-                                warn!("orr.qkc_link.deliveries_closed");
-                                return;
-                            }
-                        }
+    let mut read_task = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut read_half).await {
+                Ok(frame) => {
+                    if frame.kind != FRAME_LOCAL_DELIVER {
+                        debug!(kind = frame.kind, "orr.qkc_link.unexpected_kind");
+                        continue;
                     }
-                    Err(wire::WireError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        debug!("orr.qkc_link.eof");
-                        return;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "orr.qkc_link.read_err");
-                        return;
+                    if let Some(tx) = deliveries.as_ref() {
+                        if tx.send(frame).await.is_err() {
+                            warn!("orr.qkc_link.deliveries_closed");
+                            return;
+                        }
                     }
                 }
-            }
-            // Frame saliente a transmitir.
-            outgoing = send_rx.recv() => {
-                let Some(frame) = outgoing else { return; };
-                if let Err(e) = write_frame(&mut write_half, &frame).await {
-                    warn!(error = %e, "orr.qkc_link.write_err");
+                Err(wire::WireError::Io(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    debug!("orr.qkc_link.eof");
+                    return;
+                }
+                Err(e) => {
+                    warn!(error = %e, "orr.qkc_link.read_err");
                     return;
                 }
             }
         }
+    });
+
+    loop {
+        tokio::select! {
+            outgoing = send_rx.recv() => {
+                let Some(frame) = outgoing else { break; };
+                if let Err(e) = write_frame(&mut write_half, &frame).await {
+                    warn!(error = %e, "orr.qkc_link.write_err");
+                    break;
+                }
+            }
+            _ = &mut read_task => {
+                // Reader terminó (EOF, error). Salir para reconectar.
+                break;
+            }
+        }
     }
+
+    if !read_task.is_finished() {
+        read_task.abort();
+    }
+    let _ = read_task.await;
 }
