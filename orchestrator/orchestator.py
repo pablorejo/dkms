@@ -917,33 +917,57 @@ class Orchestator:
                 if dkms_topology_b64:
                     dkms_env["DKMS_TOPOLOGY_JSON_B64"] = dkms_topology_b64
                 if getattr(pods, "K8S_DKMS_RUST_SIDECARS", False):
-                    # For this DKMS, enumerate its peers from the kmes
-                    # and produce DKMS__peers__<peer>__{endpoint,transport,orr_id}.
+                    # Override Rust DKMS [buffer] + [generator] sections.
+                    # The Environment loader replaces the whole section, so
+                    # we must pass every field of each section that we
+                    # touch. Defaults (config.rs) are 4096/1024/256 for
+                    # buffer and 32 max_tokens/tick. Both are too low to
+                    # let the generator hit the SDN-allocated rate on a
+                    # busy Y topology — buffers saturate in < 15 s and the
+                    # per-peer token cap pins emission at ~320 keys/s
+                    # regardless of what the MCF solver allocates.
+                    dkms_env.update({
+                        "DKMS__buffer__capacity_per_peer":   "65536",
+                        "DKMS__buffer__refill_low_watermark":"16384",
+                        "DKMS__buffer__refill_batch":         "2048",
+                        "DKMS__generator__enabled":           "true",
+                        "DKMS__generator__key_size_bytes":    "32",
+                        "DKMS__generator__tick_ms":           "100",
+                        "DKMS__generator__rate_refresh_ms":   "5000",
+                        "DKMS__generator__ack_timeout_ms":    "30000",
+                        "DKMS__generator__ack_reaper_ms":     "1000",
+                        "DKMS__generator__max_tokens_per_peer_per_tick": "400",
+                        "DKMS__generator__bucket_cap_seconds":"2.0",
+                    })
+                    # ORR↔ORR sessions are PQC (ML-KEM-768) over gRPC,
+                    # not QKD. Any pair of ORRs reachable on the K8s
+                    # network can bootstrap a shared master_secret,
+                    # regardless of whether their QKCs are directly
+                    # linked by Quditto. Enumerate **every** other DKMS
+                    # in the simulation as a peer so:
+                    #   - the DKMS generator fills buffer_enc[peer] for
+                    #     all destinations, not only QKD-direct ones;
+                    #   - the ORR bootstraps a master_secret with every
+                    #     other ORR up-front (lexicographic-initiator
+                    #     rule in `orr/src/bootstrap.rs` guarantees one
+                    #     encap per pair);
+                    #   - the SDN priority registry receives a class
+                    #     report for every flow and never has to fall
+                    #     back to the default Priority for unobserved
+                    #     pairs.
                     my_model = dkms_pod.model
-                    my_qkc = getattr(getattr(my_model, "orr", None), "qkc", None)
-                    seen_peer_qkc_ids: set[int] = set()
-                    for kme in (getattr(my_qkc, "kmes", []) or []):
-                        n_qkc_id = getattr(kme, "neighbor_qkc_id", None)
-                        try:
-                            n_qkc_id = int(n_qkc_id)
-                        except (TypeError, ValueError):
+                    my_orr = getattr(my_model, "orr", None)
+                    my_qkc = getattr(my_orr, "qkc", None) if my_orr else None
+                    my_qkc_id = int(getattr(my_qkc, "id", 0) or 0)
+                    for n_qkc_id, meta in dkms_meta_by_qkc_id.items():
+                        if n_qkc_id == my_qkc_id:
                             continue
-                        if n_qkc_id in seen_peer_qkc_ids:
-                            continue
-                        meta = dkms_meta_by_qkc_id.get(n_qkc_id)
-                        if not meta:
-                            continue
-                        seen_peer_qkc_ids.add(n_qkc_id)
                         peer_key = meta["dns"]  # e.g. "dkms-15"
                         dkms_env[f"DKMS__peers__{peer_key}__endpoint"] = (
                             f"https://{meta['dns']}:{meta['sae_port']}"
                         )
                         dkms_env[f"DKMS__peers__{peer_key}__transport"] = "orr"
                         dkms_env[f"DKMS__peers__{peer_key}__orr_id"] = meta["orr_id"]
-                        # The sidecar ORR needs to know how to reach the
-                        # peer ORR (gRPC for pubkey bootstrap + onion) and
-                        # map orr_id → qkc_id so ``send_passthrough`` can
-                        # set ``dest_final``. Both maps live in ORR config.
                         dkms_env[f"ORR__peers__{meta['orr_id']}"] = str(n_qkc_id)
                         dkms_env[f"ORR__peer_grpc_addrs__{meta['orr_id']}"] = (
                             f"http://{meta['dns']}:50052"
