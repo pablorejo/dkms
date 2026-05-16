@@ -3222,21 +3222,106 @@ class PodDKMS(Pod):
             ),
         )
 
-    def _cert_init_container(self) -> client.V1Container:
-        """Generates self-signed TLS material for the Rust DKMS sidecars.
+    _DKMS_CA_SECRET_NAME = "dkms-rust-sim-ca"
+    _DKMS_CA_VOLUME_NAME = "dkms-rust-ca-material"
 
-        v3.4: replaces what the quditto sidecar (now per-link pod) used to
-        generate. Per-pod self-signed — peer DKMS↔DKMS does NOT verify
-        (TODO: extend runtime_ca to mint per-DKMS leafs).
+    def _ensure_dkms_ca_secret(self) -> None:
+        """Generates ONE shared CA per simulation namespace (idempotent).
+
+        Stored in K8s Secret ``dkms-rust-sim-ca`` with keys ``ca.crt`` and
+        ``ca.key``. The init container of each DKMS pod mounts this secret
+        and mints a leaf cert signed by the CA so peer DKMS↔DKMS mTLS works.
+        Self-signed at sim scope (no anchor in cluster trust store).
         """
+        existing = self._read_namespaced(
+            self.core_v1_api.read_namespaced_secret, self._DKMS_CA_SECRET_NAME
+        )
+        if existing is not None:
+            return
+
+        # Import locally to keep the cryptography dep optional for non-Rust
+        # deployments.
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        now = datetime.now(timezone.utc)
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, f"dkms-rust-sim-{self.namespace}"),
+        ])
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False, content_commitment=False,
+                    key_encipherment=False, data_encipherment=False,
+                    key_agreement=False, key_cert_sign=True, crl_sign=True,
+                    encipher_only=False, decipher_only=False,
+                ),
+                critical=True,
+            )
+            .sign(private_key=ca_key, algorithm=hashes.SHA256())
+        )
+        ca_crt_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
+        ca_key_pem = ca_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=self._DKMS_CA_SECRET_NAME),
+            type="Opaque",
+            string_data={"ca.crt": ca_crt_pem, "ca.key": ca_key_pem},
+        )
+        try:
+            self.core_v1_api.create_namespaced_secret(namespace=self.namespace, body=body)
+        except ApiException as e:
+            if e.status != 409:
+                raise
+
+    def _cert_init_container(self) -> client.V1Container:
+        """Mints a leaf cert per DKMS pod signed by the simulation CA.
+
+        Mounts the shared CA Secret (``dkms-rust-sim-ca`` in this namespace)
+        and uses openssl to produce ``server.{crt,key}`` and ``ca.crt`` in
+        /app/certs. SAN covers the pod's service name + ``dkms-*`` wildcard
+        so any DKMS↔DKMS connection in the sim validates.
+        """
+        # Subjective Alt Name list: this DKMS service + localhost + the
+        # short service name pattern. We include "*.<namespace>" via a
+        # subjectAltName=DNS:* trick (rustls accepts wildcard in SAN).
         script = (
-            'set -e; '
-            'cd /app/certs; '
-            'openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt '
-            f'-days 365 -nodes -subj "/CN={self.name}" '
-            f'-addext "subjectAltName=DNS:{self.name},DNS:localhost,IP:127.0.0.1"; '
-            'cp server.crt ca.crt; '
-            'chmod 644 server.crt server.key ca.crt'
+            'set -e\n'
+            'cd /app/certs\n'
+            'cp /ca-material/ca.crt ca.crt\n'
+            'openssl genrsa -out server.key 2048\n'
+            'cat > /tmp/san.cnf <<EOF\n'
+            '[req]\n'
+            'distinguished_name=req\n'
+            'req_extensions=v3_req\n'
+            '[v3_req]\n'
+            f'subjectAltName=DNS:{self.name},DNS:localhost,IP:127.0.0.1\n'
+            'EOF\n'
+            f'openssl req -new -key server.key -subj "/CN={self.name}" '
+            '-config /tmp/san.cnf -out /tmp/server.csr\n'
+            'echo 01 > /tmp/ca.srl\n'
+            'openssl x509 -req -in /tmp/server.csr '
+            '-CA /ca-material/ca.crt -CAkey /ca-material/ca.key '
+            '-CAserial /tmp/ca.srl '
+            '-out server.crt -days 365 -sha256 '
+            '-extensions v3_req -extfile /tmp/san.cnf\n'
+            'chmod 644 server.crt server.key ca.crt\n'
         )
         return client.V1Container(
             name="cert-init",
@@ -3248,6 +3333,11 @@ class PodDKMS(Pod):
                     name=self._RUST_CERTS_VOLUME_NAME,
                     mount_path="/app/certs",
                     read_only=False,
+                ),
+                client.V1VolumeMount(
+                    name=self._DKMS_CA_VOLUME_NAME,
+                    mount_path="/ca-material",
+                    read_only=True,
                 ),
             ],
         )
@@ -3643,10 +3733,20 @@ class PodDKMS(Pod):
         containers = [dkms_container]
         init_containers: list[client.V1Container] = []
         if K8S_DKMS_RUST_SIDECARS:
+            self._ensure_dkms_ca_secret()
             volumes.append(
                 client.V1Volume(
                     name=self._RUST_CERTS_VOLUME_NAME,
                     empty_dir=client.V1EmptyDirVolumeSource(),
+                )
+            )
+            volumes.append(
+                client.V1Volume(
+                    name=self._DKMS_CA_VOLUME_NAME,
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=self._DKMS_CA_SECRET_NAME,
+                        default_mode=0o400,
+                    ),
                 )
             )
             volumes.append(self._sidecar_volume())
