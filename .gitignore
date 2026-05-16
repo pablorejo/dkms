@@ -49,3 +49,6 @@ node_modules/
 
 # Claude Code workspace (local state, not for VCS)
 .claude/
+
+# Personal roadmap / scratch notes (local only)
+tareas.md
