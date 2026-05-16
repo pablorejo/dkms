@@ -90,4 +90,4 @@ The Next.js web frontend from the Python project is reused unchanged. See
 
 ## License
 
-LGPL-3.0-or-later. See [LICENSE](LICENSE).
+Apache-2.0. Copyright 2026 Pablo Pío Rejo Iglesias. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
