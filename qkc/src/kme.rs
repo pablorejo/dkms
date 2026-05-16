@@ -19,7 +19,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use etsi::{binary, v014::Etsi014Key, Base64Bytes};
+use etsi::{binary, v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID, Etsi014KeyIDs}, Base64Bytes};
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE},
     Client,
@@ -58,13 +58,11 @@ pub struct KmeClient {
 
 impl KmeClient {
     pub fn new(base: String, sae_id: String, key_size_bits: u32) -> Result<Self> {
-        // HTTP/2 prior knowledge (h2c) + connection pool grande, sin
-        // TLS para loopback. Para producción cambiar a HTTPS+ALPN.
+        // HTTP/1.1 con pool grande (compat con simple_quditto Python que
+        // no soporta h2c). Para loopback con quditto Rust se podría
+        // re-habilitar `http2_prior_knowledge()` cuando el quditto Rust
+        // multi-link esté disponible.
         let http = Client::builder()
-            .http2_prior_knowledge()
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_adaptive_window(true)
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(256)
             .timeout(Duration::from_secs(30))
@@ -85,7 +83,9 @@ impl KmeClient {
     }
 
     /// `GET /api/v1/keys/{sae_id}/enc_keys?number=N&size=B` con
-    /// `Accept: application/octet-stream`.
+    /// `Accept: application/json` (compat con simple_quditto Python que solo
+    /// sirve ETSI 014 JSON; el path binario `application/octet-stream` se
+    /// reactivará cuando el quditto Rust multi-link esté disponible).
     pub async fn enc_keys(&self, number: u32) -> Result<Vec<OtpKey>> {
         if number == 0 {
             return Ok(vec![]);
@@ -98,7 +98,7 @@ impl KmeClient {
         let resp = inner
             .http
             .get(&url)
-            .header(ACCEPT, binary::CONTENT_TYPE)
+            .header(ACCEPT, "application/json")
             .send()
             .await?;
         let status = resp.status();
@@ -108,9 +108,11 @@ impl KmeClient {
                 "enc_keys {url} -> {status}: {text}"
             )));
         }
-        let bytes = resp.bytes().await?;
-        let pairs = binary::unpack_keys(&bytes)
-            .map_err(|e| QkcError::Quditto(format!("enc_keys binary decode: {e}")))?;
+        let container: Etsi014KeyContainer = resp.json().await
+            .map_err(|e| QkcError::Quditto(format!("enc_keys json decode: {e}")))?;
+        let pairs: Vec<(Uuid, Vec<u8>)> = container.keys.into_iter()
+            .map(|k| (k.key_id, k.key.into_inner()))
+            .collect();
         // Aceptamos batches parciales (n < number): el quditto puede
         // estar generando a R0 lento y devolvernos lo que tenga.
         // Rechazar y reintentar deja claves zombi en su buffer
@@ -129,21 +131,20 @@ impl KmeClient {
             .collect())
     }
 
-    /// `POST /api/v1/keys/{sae_id}/dec_keys` con body+accept binarios.
-    /// Recupera las claves indicadas — todas en una sola request.
+    /// `POST /api/v1/keys/{sae_id}/dec_keys` con body JSON ETSI 014.
     pub async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
         let inner = &self.inner;
         let url = format!("{}/api/v1/keys/{}/dec_keys", inner.base, inner.sae_id);
-        let body = binary::pack_key_ids(ids);
+        let key_ids: Vec<Etsi014KeyID> = ids.iter().map(|u| Etsi014KeyID::new(*u)).collect();
         let resp = inner
             .http
             .post(&url)
-            .header(CONTENT_TYPE, binary::CONTENT_TYPE)
-            .header(ACCEPT, binary::CONTENT_TYPE)
-            .body(body)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .json(&serde_json::json!({"key_IDs": key_ids}))
             .send()
             .await?;
         let status = resp.status();
@@ -153,9 +154,11 @@ impl KmeClient {
                 "dec_keys {url} -> {status}: {text}"
             )));
         }
-        let bytes = resp.bytes().await?;
-        let pairs = binary::unpack_keys(&bytes)
-            .map_err(|e| QkcError::Quditto(format!("dec_keys binary decode: {e}")))?;
+        let container: Etsi014KeyContainer = resp.json().await
+            .map_err(|e| QkcError::Quditto(format!("dec_keys json decode: {e}")))?;
+        let pairs: Vec<(Uuid, Vec<u8>)> = container.keys.into_iter()
+            .map(|k| (k.key_id, k.key.into_inner()))
+            .collect();
         Ok(pairs
             .into_iter()
             .map(|(id, mat)| OtpKey { key_id: id, material: mat })

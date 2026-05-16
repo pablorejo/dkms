@@ -95,29 +95,12 @@ K8S_QUDITTO_LOCAL_URL = os.getenv(
 K8S_QUDITTO_CLIENT_CERT_PATH = os.getenv("QUDITTO_CLIENT_CERT_PATH", "/app/certs/client.crt")
 K8S_QUDITTO_CLIENT_KEY_PATH = os.getenv("QUDITTO_CLIENT_KEY_PATH", "/app/certs/client.key")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Rust per-module sidecars (DKMS workspace split: dkms + orr + qkc + quditto)
-#
-# El orchestrator vino del monolito Python donde DKMS embebía ORR + QKC en
-# proceso. La reescritura Rust los separa en 3 binarios. Para no romper los
-# deploys existentes con la imagen monolítica, los sidecars Rust son
-# **opt-in** vía K8S_DKMS_RUST_SIDECARS=true. Cuando se activa, ``PodDKMS``
-# inyecta dos containers adicionales (orr, qkc) en el mismo Pod y configura
-# DKMS para hablar con ellos vía localhost. Las imágenes salen de
-# ``pablopio/orr:v3`` / ``pablopio/qkc:v3`` por defecto; un build futuro
-# debe asegurar que ambas existan y queden con sus Dockerfiles actuales.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Rust per-module sidecars (opt-in v3.4) ──────────────────────────────────
 K8S_DKMS_RUST_SIDECARS = os.getenv("K8S_DKMS_RUST_SIDECARS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
+    "1", "true", "yes",
 }
 K8S_ORR_IMAGE = os.getenv("ORR_IMAGE", "docker.io/pablopio/orr:v2")
 K8S_QKC_IMAGE = os.getenv("QKC_IMAGE", "docker.io/pablopio/qkc:v2")
-# Puertos por defecto que exponen los binarios Rust (ver
-# orr/config/default.toml y qkc/config/default.toml). Cambiables vía env
-# si en producción se quiere mover algo. Sidecars escuchan en 0.0.0.0 y se
-# bind a localhost para el DKMS via DKMS_SOUTHBOUND__*_ENDPOINT.
 K8S_ORR_GRPC_PORT = int(os.getenv("ORR_GRPC_PORT", "50052"))
 K8S_ORR_METRICS_PORT = int(os.getenv("ORR_METRICS_PORT", "9101"))
 K8S_QKC_GRPC_PORT = int(os.getenv("QKC_GRPC_PORT", "50051"))
@@ -125,8 +108,6 @@ K8S_QKC_TCP_PORT = int(os.getenv("QKC_TCP_PORT", "7001"))
 K8S_QKC_METRICS_PORT = int(os.getenv("QKC_METRICS_PORT", "9100"))
 K8S_DKMS_RUST_GRPC_PORT = int(os.getenv("DKMS_RUST_GRPC_PORT", "50054"))
 K8S_DKMS_RUST_METRICS_PORT = int(os.getenv("DKMS_RUST_METRICS_PORT", "9103"))
-# RUST_LOG por sidecar. Permite subir verbose de un binario sin afectar
-# los otros (p.ej. ORR_RUST_LOG=orr=debug,info para depurar onion).
 K8S_DKMS_RUST_LOG = os.getenv("DKMS_RUST_LOG", "info")
 K8S_ORR_RUST_LOG = os.getenv("ORR_RUST_LOG", "info")
 K8S_QKC_RUST_LOG = os.getenv("QKC_RUST_LOG", "info")
@@ -204,7 +185,7 @@ K8S_DKMS_ASYNC_SEND_WORKERS = os.getenv("DKMS_ASYNC_SEND_WORKERS", "500")
 # QKC_DECRYPT_PROCESS_WORKERS=16, el pool de prefetch alimenta al hot
 # path sin que el sender espere; con count=64 el ratio ok/err del POST
 # era 33/372 (8%); con count=128 sube a 39/185 (17%).
-K8S_KME_ENC_PREFETCH_COUNT = os.getenv("KME_ENC_PREFETCH_COUNT", "128")
+K8S_KME_ENC_PREFETCH_COUNT = os.getenv("KME_ENC_PREFETCH_COUNT", "512")
 # Batch HTTP al pedir claves a Quditto: N claves por request. Amortiza
 # RTT entre N claves. Default 64 (validado v2.3.7 en cluster 50 DKMSs):
 # bench directo al sidecar muestra que pasar de batch=8 a batch=64
@@ -494,14 +475,28 @@ def _canonicalize_runtime_dkms_payload(payload: Dict[str, Any]) -> Dict[str, Any
         if neighbor_node_id is None or neighbor_node_id <= 0:
             continue
 
+        # v3.3.1 fix: preserve the ORIGINAL qkc_ids (model-assigned, e.g.
+        # 100001 for web-API sims) BEFORE normalizing item to node_ids.
+        # PodQudittoLink names use the original qkc_ids, so the URL must
+        # match. Also: use the SHORT service name (no .ns.svc.cluster.local
+        # suffix) since DKMS pods live in the same namespace as the
+        # quditto-link pods — avoids needing K8S_SIM_NAMESPACE env var.
+        orig_local_qkc_id = _safe_int(item.get("local_qkc_id")) or int(local_node_id)
+        orig_neighbor_qkc_id = _safe_int(item.get("neighbor_qkc_id")) or int(neighbor_node_id)
+
         item["local_qkc_id"] = int(local_node_id)
         item["neighbor_qkc_id"] = int(neighbor_node_id)
-        # QuDitto identifica peers por el nombre QKD completo (p.ej. DKMS-1),
-        # no por el índice numérico aislado.
-        item["local_qkd_id"] = f"DKMS-{int(local_node_id)}"
-        item["neighbor_qkd_id"] = f"DKMS-{int(neighbor_node_id)}"
+        # QuDitto config.yaml uses `DKMS-{qkc_id}` as node_name. The DKMS
+        # client must ask for the SAME id (otherwise quditto returns 404).
+        # We use the ORIGINAL qkc_id here, which matches what
+        # PodQudittoLink writes into its configmap.
+        item["local_qkd_id"] = f"DKMS-{orig_local_qkc_id}"
+        item["neighbor_qkd_id"] = f"DKMS-{orig_neighbor_qkc_id}"
         item["etsi"] = "ETSI_014"
-        item["local_url_node_qkd"] = K8S_QUDITTO_LOCAL_URL
+        link_a, link_b = sorted([orig_local_qkc_id, orig_neighbor_qkc_id])
+        item["local_url_node_qkd"] = (
+            f"http://quditto-link-{link_a}-{link_b}:5000"
+        )
         if runtime_service_name:
             item["local_qkc_ip"] = runtime_service_name
 
@@ -1132,20 +1127,38 @@ class Pod:
             env_payload["BIND_IP"] = "0.0.0.0"
             env_payload["AGENT_CONTROLLER_PORT"] = "8080"
             env_payload["DKMS_ADVERTISED_HOST"] = self.name
-            # KME_LINK_STORE_ENABLED=false: iter 7 mostró que con cap LRU
-            # 5000 el cache evicta tanto que da peor throughput (2815 vs
-            # 6113 keys/s sin link_store). Mantener desactivado.
+            # v2.10.8 final: KME_LINK_STORE_ENABLED=false por default.
+            # Iter 8/9 históricos rolledback con cap LRU 5000.
+            # Iter 10 (esta sesión) probó con cap 20000 + drain 100ms.
+            # Resultado: drain `all_keys=true` cada 100ms satura CPU
+            # tanto en quditto (serialización JSON masiva) como en KME
+            # parent (parsing+extend), regresión 980/s vs 2200/s del
+            # prefetch básico. Manteniendo OFF.
+            # Patch F12: parallel decrypt activo. link_store y drain
+            # on-demand DESACTIVADOS por default tras medición F12:
+            # provocaron regresión de throughput (latencia 7s/req).
             env_payload.setdefault("KME_LINK_STORE_ENABLED", "false")
-            # Iter 9: rollback tokens/peer/tick (iter 8 con 4 regresó a
-            # 2792 keys/s). Default 32 ya da 6113 keys/s con water-filling.
-            env_payload.setdefault("DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK", "32")
-            # Iter 9: ProcessPool encrypt para sacar el path encrypt del GIL
-            # del DKMS. Hipótesis: 16 send_workers compiten por GIL durante
-            # el HTTP GET a sidecar + XOR. Con 2 procs hijos, true parallelism
-            # del path encrypt → +throughput por DKMS → +keys/s/buffer.
-            # Memory: 2 procs × ~200MB = 400MB extra; baseline DKMS ~1.1GB,
-            # limit=2Gi → margen de ~500MB.
-            env_payload.setdefault("QKC_ENCRYPT_PROCESS_WORKERS", "2")
+            env_payload.setdefault("KME_LINK_STORE_NO_PERIODIC", "1")
+            env_payload.setdefault("QKC_RECV_PARALLEL", "0")
+            env_payload.setdefault("QKC_RECV_PARALLELISM", "64")
+            env_payload.setdefault("QKC_DEC_DRAIN_ON_MISS", "0")
+            env_payload.setdefault("QKC_DEC_DRAIN_ON_MISS_INTERVAL_MS", "20")
+            # F26: max_tokens=512 + batch=64 (con cap=10000 sin oscilación).
+            env_payload.setdefault("DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK", "512")
+            env_payload.setdefault("DKMS_GENERATOR_BATCH_SIZE", "64")
+            # F14: QKC_ENCRYPT_PROCESS_WORKERS=0 (de nuevo). El subprocess
+            # path NO comparte la `_enc_prefetch_queue` con el parent. Cada
+            # call hace un HTTP fresco a quditto. Bajo conc=64 + size=6936
+            # (single-key inflation) quditto cae a 72 calls/s/sidecar.
+            # Path in-thread con prefetch llena la cola en background
+            # (1 thread per KME, num=64 keys/HTTP) → 12k keys/s/sidecar.
+            env_payload.setdefault("QKC_ENCRYPT_PROCESS_WORKERS", "0")
+            # F14: single-key inflation OFF. Si está activa (8192 default)
+            # los send_workers piden size=6936 (1 key gigante por payload)
+            # que bypassea el prefetch (`_pop_prefetched_enc_key` retorna
+            # None si size_bits != 256). Con 0 el encrypt chunkea por
+            # 256 bits → cada chunk popea del prefetch en O(1).
+            env_payload.setdefault("QKC_ENCRYPT_SINGLE_KEY_MAX_BITS", "0")
             self._populate_dkms_config_env(env_payload)
         if env_vars:
             for key, value in env_vars.items():
@@ -1784,7 +1797,12 @@ class PodObservability:
             raise ValueError("El modelo debe incluir host.port para observabilidad.")
         return int(host.port)
 
-    def _prometheus_config(self, dkms_pods: list["PodDKMS"], sdn_pod: "PodSDN") -> str:
+    def _prometheus_config(
+        self,
+        dkms_pods: list["PodDKMS"],
+        sdn_pod: "PodSDN",
+        link_pods: Optional[list["PodQudittoLink"]] = None,
+    ) -> str:
         sdn_target = f"{sdn_pod.name}:{self._model_service_port(sdn_pod.model)}"
         dkms_targets = sorted(
             {
@@ -1792,11 +1810,12 @@ class PodObservability:
                 for pod in dkms_pods
             }
         )
+        # v3.3: quditto-link pods independientes exponen métricas en el
+        # mismo puerto 8000 que el sidecar viejo, pero en Service propio.
         quditto_targets = sorted(
             {
                 f"{pod.name}:{K8S_QUDITTO_METRICS_PORT}"
-                for pod in dkms_pods
-                if pod.has_quditto_sidecar()
+                for pod in (link_pods or [])
             }
         )
         scrape_configs: list[dict[str, Any]] = [
@@ -2086,13 +2105,18 @@ class PodObservability:
         sdn_pod: "PodSDN",
         image_pull_secret: str | None = None,
         image_pull_policy: str | None = None,
+        link_pods: Optional[list["PodQudittoLink"]] = None,
     ):
         if image_pull_policy is None:
             image_pull_policy = K8S_IMAGE_PULL_POLICY
 
         self._upsert_config_map(
             self.prometheus_config_name,
-            {"prometheus.yml": self._prometheus_config(dkms_pods=dkms_pods, sdn_pod=sdn_pod)},
+            {
+                "prometheus.yml": self._prometheus_config(
+                    dkms_pods=dkms_pods, sdn_pod=sdn_pod, link_pods=link_pods,
+                ),
+            },
         )
         self._upsert_config_map(
             self.loki_config_name,
@@ -2571,16 +2595,16 @@ class PodDKMS(Pod):
 
     def __init__(self, id_simulation: str, model_dkms: ModelDKMS):
         super().__init__(id_simulation, model_dkms)
-        self._quditto_volume_name = "quditto-config"
-        self._quditto_config_map_name = f"{self.name}-quditto"
-        self._quditto_cert_volume_name = "quditto-certs"
-        self._quditto_node_name, self._quditto_neighbors = self._extract_quditto_topology()
-        self._quditto_enabled = bool(self._quditto_neighbors)
-        if self._quditto_enabled and not self._quditto_node_name:
-            self._quditto_node_name = f"QKD_{self.name_suffix}"
+        # v3.3: el quditto-sidecar fue eliminado. Conservamos los métodos
+        # `_extract_quditto_topology` y `_quditto_config_yaml` (líneas más
+        # abajo) porque los REUTILIZA `PodQudittoLink` para construir su
+        # config per-link. No hay state ni volumes específicos del sidecar
+        # en este pod ya.
 
     def has_quditto_sidecar(self) -> bool:
-        return self._quditto_enabled
+        # Hard switch v3.3: ya no hay sidecar. Mantenido por compat con
+        # callers existentes (orchestator decides flujo en base a esto).
+        return False
 
     @staticmethod
     def _safe_int(value: Any) -> Optional[int]:
@@ -2684,26 +2708,6 @@ class PodDKMS(Pod):
                         continue
                     ports.append((f"pqc-{pqc_port}", pqc_port))
                     seen_ports.add(pqc_port)
-
-        if K8S_DKMS_RUST_SIDECARS:
-            # Cuando los sidecars Rust están activos, los binarios bindan a
-            # puertos fijos (50051/50052/7001/9100/9101). Expónlos en el
-            # Service para que peers DKMS alcancen ``dkms-X:7001`` (QKC↔QKC
-            # peer hot path) y para que cualquier debugger pueda llegar a
-            # /metrics y al gRPC desde fuera del pod.
-            rust_sidecar_ports = [
-                ("rust-orr-grpc", K8S_ORR_GRPC_PORT),
-                ("rust-orr-metrics", K8S_ORR_METRICS_PORT),
-                ("rust-qkc-grpc", K8S_QKC_GRPC_PORT),
-                ("rust-qkc-peer", K8S_QKC_TCP_PORT),
-                ("rust-qkc-metrics", K8S_QKC_METRICS_PORT),
-                ("rust-dkms-grpc", K8S_DKMS_RUST_GRPC_PORT),
-                ("rust-dkms-metrics", K8S_DKMS_RUST_METRICS_PORT),
-            ]
-            for name, port in rust_sidecar_ports:
-                if port and port not in seen_ports:
-                    ports.append((name, port))
-                    seen_ports.add(port)
 
         return [
             client.V1ServicePort(name=name, port=port, target_port=port)
@@ -2933,301 +2937,8 @@ class PodDKMS(Pod):
 
         return node_name, list(by_neighbor.values())
 
-    def _quditto_config_yaml(self) -> str:
-        payload = {
-            "quditto_version": "3.2",
-            "nodes": [
-                {
-                    "node_name": self._quditto_node_name,
-                    "neighbour_nodes": self._quditto_neighbors,
-                }
-            ],
-        }
-        # JSON es YAML válido, y evita dependencias extra.
-        return json.dumps(payload, ensure_ascii=True, indent=2)
-
-    # ─── Rust sidecars (orr + qkc) ────────────────────────────────────
-    #
-    # Opt-in vía ``K8S_DKMS_RUST_SIDECARS=true``. Cuando se activa,
-    # ``create_pod`` añade dos containers más al mismo Pod del DKMS
-    # (mismo network namespace) y configura DKMS para llamar a
-    # localhost:50051 (qkc) y localhost:50052 (orr). El TLS material del
-    # DKMS se reutiliza del volumen ``quditto-certs`` que ya genera el
-    # sidecar Quditto (server.crt/server.key/ca.crt). Sin el sidecar
-    # Quditto no hay certs, así que en topologías PQC-only los sidecars
-    # Rust no podrán arrancar — pendiente: extender ``runtime_ca.py`` a
-    # generar cert+key por DKMS si no hay Quditto.
-
-    def _sidecar_config_map_name(self) -> str:
-        return f"{self.name}-sidecars"
-
-    def _sidecar_volume_name(self) -> str:
-        return "rust-sidecars-config"
-
-    def _safe_neighbor_host(self, neighbor_id: int) -> str:
-        """``dkms-NN`` Service DNS para alcanzar al QKC vecino cross-pod.
-
-        Los sidecars Rust escuchan en el mismo Pod que el DKMS, así que el
-        ``Service`` del DKMS también expone los puertos del QKC (ver
-        :py:meth:`_dkms_service_ports`). Para que el QKC local hable con
-        el QKC de otro DKMS usamos ``dkms-NN`` como hostname.
-        """
-        return f"dkms-{int(neighbor_id)}"
-
-    def _qkc_runtime_toml(self) -> str:
-        """Genera el TOML del QKC desde la topología del modelo.
-
-        Estructura esperada por ``qkc/src/config.rs::QkcConfig``::
-
-            qkc_id       = 1
-            peer_listen  = "0.0.0.0:7001"
-            local_listen = "0.0.0.0:7100"
-            admin_http   = "0.0.0.0:7200"
-
-            [[links]]
-            neighbor_id        = 2
-            neighbor_peer_addr = "dkms-2:7001"
-            quditto_url        = "http://127.0.0.1:5000"
-            key_size_bits      = 256
-
-        Quditto siempre apunta al sidecar local — cada DKMS lleva su
-        propio Quditto co-localizado.
-        """
-        payload = self._extract_qkc_payload() or {}
-        raw_kmes = payload.get("kmes") or []
-        qkc_id_int = (
-            self._extract_qkc_id()
-            or _safe_int(getattr(self.model, "id", None))
-            or 1
-        )
-
-        lines: list[str] = [
-            "# Generado por orchestrator/pods.py — no editar a mano",
-            f"qkc_id       = {int(qkc_id_int)}",
-            f'peer_listen  = "0.0.0.0:{K8S_QKC_TCP_PORT}"',
-            f'local_listen = "0.0.0.0:7100"',
-            f'admin_http   = "0.0.0.0:7200"',
-            "",
-        ]
-
-        seen_neighbors: set[int] = set()
-        for kme in raw_kmes:
-            if not isinstance(kme, dict):
-                continue
-            neighbor_id = _safe_int(kme.get("neighbor_qkc_id"))
-            if neighbor_id is None or neighbor_id in seen_neighbors:
-                continue
-            if neighbor_id == int(qkc_id_int):
-                continue
-            seen_neighbors.add(neighbor_id)
-
-            key_size = _safe_positive_int(kme.get("key_size_bits"), 256)
-            # Ajusta a múltiplo de 8 (QKC valida).
-            if key_size % 8 != 0:
-                key_size = max(8, (key_size // 8) * 8)
-
-            neighbor_host = self._safe_neighbor_host(neighbor_id)
-            lines.extend([
-                "[[links]]",
-                f"neighbor_id        = {int(neighbor_id)}",
-                f'neighbor_peer_addr = "{neighbor_host}:{K8S_QKC_TCP_PORT}"',
-                f'quditto_url        = "{K8S_QUDITTO_LOCAL_URL}"',
-                f"key_size_bits      = {int(key_size)}",
-                "",
-            ])
-
-        return "\n".join(lines)
-
-    def _orr_runtime_toml(self) -> str:
-        """Default mínimo. Casi todo va por env (``ORR_*``)."""
-        orr_id_int = self._resolve_orr_id_int()
-        qkc_id_int = (
-            self._extract_qkc_id()
-            or _safe_int(getattr(self.model, "id", None))
-            or 1
-        )
-        return (
-            "# Generado por orchestrator/pods.py — no editar a mano\n"
-            f'orr_id          = "orr-{int(orr_id_int)}"\n'
-            f"qkc_id          = {int(qkc_id_int)}\n"
-            f'qkc_local_addr  = "127.0.0.1:7100"\n'
-            f'grpc_addr       = "0.0.0.0:{K8S_ORR_GRPC_PORT}"\n'
-            f'metrics_addr    = "0.0.0.0:{K8S_ORR_METRICS_PORT}"\n'
-            "default_max_hops = 0\n"
-        )
-
-    def _resolve_orr_id_int(self) -> int:
-        orr_model = getattr(self.model, "orr", None)
-        if orr_model is not None:
-            orr_id = (
-                _safe_int(getattr(orr_model, "id", None))
-                or _safe_int(getattr(orr_model, "qkc_id", None))
-            )
-            if orr_id:
-                return int(orr_id)
-        return (
-            self._extract_qkc_id()
-            or _safe_int(getattr(self.model, "id", None))
-            or 1
-        )
-
-    def _orr_runtime_env(self) -> Dict[str, str]:
-        """ENV ORR_* leídos por ``common::config::load_config("orr")``."""
-        orr_id_int = self._resolve_orr_id_int()
-        qkc_id_int = (
-            self._extract_qkc_id()
-            or _safe_int(getattr(self.model, "id", None))
-            or 1
-        )
-        return {
-            "RUST_LOG": K8S_ORR_RUST_LOG,
-            "CONFIG_DIR": "/app/config/orr",
-            "ORR_ORR_ID": f"orr-{int(orr_id_int)}",
-            "ORR_QKC_ID": str(int(qkc_id_int)),
-            "ORR_QKC_LOCAL_ADDR": "127.0.0.1:7100",
-            "ORR_GRPC_ADDR": f"0.0.0.0:{K8S_ORR_GRPC_PORT}",
-            "ORR_METRICS_ADDR": f"0.0.0.0:{K8S_ORR_METRICS_PORT}",
-            "ORR_DEFAULT_MAX_HOPS": "0",
-        }
-
-    def _dkms_rust_env_overrides(
-        self,
-        *,
-        sdn_host: str | None,
-        sdn_port: str | None,
-    ) -> Dict[str, str]:
-        """ENV DKMS_* que mandan al binario Rust en lugar del Python.
-
-        Se mezclan **encima** del payload del Python (no se borra), de
-        forma que si el operador hace rollback a la imagen monolítica con
-        ``K8S_DKMS_RUST_SIDECARS=false`` el conjunto Python sigue
-        completo y operativo. Cuando los sidecars Rust están activos, el
-        binario Rust **solo lee variables con prefijo ``DKMS_`` con
-        separador ``__``**, así que las del Python (KME_*, QKC_*, etc.)
-        son inocuas para él.
-        """
-        sae_port = self._service_port()
-        # peer_addr ETSI 020: siguiente puerto al SAE. Mantener offset
-        # estable evita colisiones con orr/qkc/metrics.
-        peer_addr_port = sae_port + 1
-        if not sdn_host:
-            sdn_host = "sdn"
-        sdn_port_int = _safe_positive_int(sdn_port, 50053)
-        sdn_endpoint = f"http://{sdn_host}:{sdn_port_int}"
-
-        return {
-            "RUST_LOG": K8S_DKMS_RUST_LOG,
-            "CONFIG_DIR": "/app/config/dkms",
-            "DKMS_NODE_ID": self.name,
-            "DKMS_LISTEN__SAE_ADDR": f"0.0.0.0:{int(sae_port)}",
-            "DKMS_LISTEN__PEER_ADDR": f"0.0.0.0:{int(peer_addr_port)}",
-            "DKMS_LISTEN__GRPC_ADDR": f"0.0.0.0:{K8S_DKMS_RUST_GRPC_PORT}",
-            "DKMS_LISTEN__METRICS_ADDR": f"0.0.0.0:{K8S_DKMS_RUST_METRICS_PORT}",
-            "DKMS_SOUTHBOUND__SDN_ENDPOINT": sdn_endpoint,
-            "DKMS_SOUTHBOUND__QKC_ENDPOINT": f"http://127.0.0.1:{K8S_QKC_GRPC_PORT}",
-            "DKMS_SOUTHBOUND__ORR_ENDPOINT": f"http://127.0.0.1:{K8S_ORR_GRPC_PORT}",
-            # Mismas paths que el sidecar Quditto genera en el volumen
-            # ``quditto-certs`` montado en /app/certs. En topologías
-            # PQC-only sin Quditto, este path no existe y el DKMS Rust
-            # rechazará boot — pendiente runtime_ca.py extension.
-            "DKMS_TLS__CERT_PATH": "/app/certs/server.crt",
-            "DKMS_TLS__KEY_PATH": "/app/certs/server.key",
-            "DKMS_TLS__SAE_CLIENT_CA": "/app/certs/ca.crt",
-            "DKMS_TLS__PEER_DKMS_CA": "/app/certs/ca.crt",
-        }
-
-    def _orr_container(
-        self,
-        image: str,
-        image_pull_policy: str,
-    ) -> client.V1Container:
-        env = [client.V1EnvVar(name=k, value=v) for k, v in self._orr_runtime_env().items()]
-        return client.V1Container(
-            name="orr",
-            image=image,
-            image_pull_policy=image_pull_policy,
-            env=env,
-            ports=[
-                client.V1ContainerPort(container_port=K8S_ORR_GRPC_PORT),
-                client.V1ContainerPort(container_port=K8S_ORR_METRICS_PORT),
-            ],
-            resources=client.V1ResourceRequirements(
-                requests={"cpu": "100m", "memory": "128Mi"},
-                limits={"cpu": "1000m", "memory": "512Mi"},
-            ),
-            startup_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_ORR_GRPC_PORT),
-                period_seconds=2,
-                timeout_seconds=2,
-                failure_threshold=60,
-            ),
-            readiness_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_ORR_GRPC_PORT),
-                period_seconds=5,
-                timeout_seconds=2,
-                failure_threshold=6,
-            ),
-            volume_mounts=[
-                client.V1VolumeMount(
-                    name=self._sidecar_volume_name(),
-                    mount_path="/app/config/orr/default.toml",
-                    sub_path="orr.toml",
-                    read_only=True,
-                ),
-            ],
-        )
-
-    def _qkc_container(
-        self,
-        image: str,
-        image_pull_policy: str,
-    ) -> client.V1Container:
-        return client.V1Container(
-            name="qkc",
-            image=image,
-            image_pull_policy=image_pull_policy,
-            command=["/usr/local/bin/qkc", "--config", "/app/config/qkc/qkc.toml"],
-            env=[
-                client.V1EnvVar(name="RUST_LOG", value=K8S_QKC_RUST_LOG),
-            ],
-            ports=[
-                client.V1ContainerPort(container_port=K8S_QKC_TCP_PORT),
-                client.V1ContainerPort(container_port=7100),  # local_listen ORR
-                client.V1ContainerPort(container_port=7200),  # admin_http
-            ],
-            resources=client.V1ResourceRequirements(
-                requests={"cpu": "100m", "memory": "128Mi"},
-                limits={"cpu": "1500m", "memory": "1Gi"},
-            ),
-            startup_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_QKC_TCP_PORT),
-                period_seconds=2,
-                timeout_seconds=2,
-                failure_threshold=60,
-            ),
-            readiness_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_QKC_TCP_PORT),
-                period_seconds=5,
-                timeout_seconds=2,
-                failure_threshold=6,
-            ),
-            volume_mounts=[
-                client.V1VolumeMount(
-                    name=self._sidecar_volume_name(),
-                    mount_path="/app/config/qkc/qkc.toml",
-                    sub_path="qkc.toml",
-                    read_only=True,
-                ),
-            ],
-        )
-
-    def _sidecar_volume(self) -> client.V1Volume:
-        return client.V1Volume(
-            name=self._sidecar_volume_name(),
-            config_map=client.V1ConfigMapVolumeSource(
-                name=self._sidecar_config_map_name(),
-            ),
-        )
+    # v3.3: `_quditto_config_yaml` de PodDKMS (per-node) fue eliminado.
+    # `PodQudittoLink._quditto_config_yaml` genera la config per-link.
 
     def _upsert_config_map(self, name: str, data: Dict[str, str]):
         config_map = client.V1ConfigMap(
@@ -3253,16 +2964,11 @@ class PodDKMS(Pod):
             raise
 
     def crear_config_map(self):
+        # v3.3: el ConfigMap del quditto-sidecar fue eliminado. La config
+        # per-link la genera `PodQudittoLink` para su propio pod.
         base = super().crear_config_map()
-        if self._quditto_enabled:
-            self._upsert_config_map(
-                self._quditto_config_map_name,
-                {"config.yaml": self._quditto_config_yaml()},
-            )
         if K8S_DKMS_RUST_SIDECARS:
-            # QKC consume su config TOML por --config /app/config/qkc.toml,
-            # y ORR puede consumir config local opcional en orr.toml (la
-            # mayoría de campos los pasamos como env vars ORR_*).
+            # qkc.toml + orr.toml para los sidecars Rust.
             sidecar_data = {
                 "qkc.toml": self._qkc_runtime_toml(),
                 "orr.toml": self._orr_runtime_toml(),
@@ -3270,19 +2976,289 @@ class PodDKMS(Pod):
             self._upsert_config_map(self._sidecar_config_map_name(), sidecar_data)
         return base
 
-    def _build_runtime_env_payload(
+    # ─── Rust sidecars (orr + qkc, opt-in via K8S_DKMS_RUST_SIDECARS) ─────
+    _RUST_CERTS_VOLUME_NAME = "dkms-rust-certs"
+
+    def _sidecar_config_map_name(self) -> str:
+        return f"{self.name}-sidecars"
+
+    def _sidecar_volume_name(self) -> str:
+        return "rust-sidecars-config"
+
+    def _safe_neighbor_host(self, neighbor_id: int) -> str:
+        return f"dkms-{int(neighbor_id)}"
+
+    def _resolve_orr_id_int(self) -> int:
+        orr_model = getattr(self.model, "orr", None)
+        if orr_model is not None:
+            orr_id = (
+                _safe_int(getattr(orr_model, "id", None))
+                or _safe_int(getattr(orr_model, "qkc_id", None))
+            )
+            if orr_id:
+                return int(orr_id)
+        return (
+            self._extract_qkc_id()
+            or _safe_int(getattr(self.model, "id", None))
+            or 1
+        )
+
+    def _qkc_runtime_toml(self) -> str:
+        payload = self._extract_qkc_payload() or {}
+        raw_kmes = payload.get("kmes") or []
+        # We need the ORIGINAL qkc_id (e.g. 100001) for naming compatibility
+        # with PodQudittoLink. The payload may have either the original
+        # qkc_id or the post-normalization node_id (1..N). Prefer the
+        # original from the model.
+        qkc_id_int = (
+            self._extract_qkc_id()
+            or _safe_int(getattr(self.model, "id", None))
+            or 1
+        )
+        lines: list[str] = [
+            "# Generado por orchestrator/pods.py — no editar a mano",
+            f"qkc_id       = {int(qkc_id_int)}",
+            f'peer_listen  = "0.0.0.0:{K8S_QKC_TCP_PORT}"',
+            'local_listen = "0.0.0.0:7100"',
+            'admin_http   = "0.0.0.0:7200"',
+            "",
+        ]
+        seen_neighbors: set[int] = set()
+        for kme in raw_kmes:
+            if not isinstance(kme, dict):
+                continue
+            neighbor_id = _safe_int(kme.get("neighbor_qkc_id"))
+            if neighbor_id is None or neighbor_id in seen_neighbors:
+                continue
+            if neighbor_id == int(qkc_id_int):
+                continue
+            seen_neighbors.add(neighbor_id)
+            key_size = _safe_positive_int(kme.get("key_size_bits"), 256)
+            if key_size % 8 != 0:
+                key_size = max(8, (key_size // 8) * 8)
+            # neighbor_peer_addr: el QKC vecino vive dentro del DKMS pod
+            # vecino. El Service del DKMS vecino se llama por su host_id
+            # (no por qkc_id). Sacamos el host del kme.neighbor_qkc_ip
+            # que ya lo trae `_canonicalize_runtime_dkms_payload`.
+            neighbor_host = str(kme.get("neighbor_qkc_ip") or f"dkms-{neighbor_id}")
+            # quditto_url: pod per-link con qkc_ids canónicos
+            local_for_link = sorted([int(qkc_id_int), int(neighbor_id)])
+            quditto_svc = f"quditto-link-{local_for_link[0]}-{local_for_link[1]}"
+            lines.extend([
+                "[[links]]",
+                f"neighbor_id        = {int(neighbor_id)}",
+                f'neighbor_peer_addr = "{neighbor_host}:{K8S_QKC_TCP_PORT}"',
+                f'quditto_url        = "http://{quditto_svc}:5000"',
+                f"key_size_bits      = {int(key_size)}",
+                "",
+            ])
+        return "\n".join(lines)
+
+    def _orr_runtime_toml(self) -> str:
+        orr_id_int = self._resolve_orr_id_int()
+        qkc_id_int = (
+            self._extract_qkc_id()
+            or _safe_int(getattr(self.model, "id", None))
+            or 1
+        )
+        return (
+            "# Generado por orchestrator/pods.py — no editar a mano\n"
+            f'orr_id          = "orr-{int(orr_id_int)}"\n'
+            f"qkc_id          = {int(qkc_id_int)}\n"
+            'qkc_local_addr  = "127.0.0.1:7100"\n'
+            f'grpc_addr       = "0.0.0.0:{K8S_ORR_GRPC_PORT}"\n'
+            f'metrics_addr    = "0.0.0.0:{K8S_ORR_METRICS_PORT}"\n'
+            "default_max_hops = 0\n"
+        )
+
+    def _orr_runtime_env(self) -> Dict[str, str]:
+        orr_id_int = self._resolve_orr_id_int()
+        qkc_id_int = (
+            self._extract_qkc_id()
+            or _safe_int(getattr(self.model, "id", None))
+            or 1
+        )
+        # common::config::load_config usa Environment::with_prefix("ORR")
+        # con separator("__"). Para que tanto el split del prefix como
+        # de los campos nested funcione, TODOS los separadores entre
+        # tokens deben ser "__". Por eso usamos lowercase ya que el
+        # Environment normaliza a lowercase para hacer match con los
+        # campos serde.
+        sdn_endpoint_url = f"http://sdn-{self._resolve_sdn_suffix()}:3000"
+        return {
+            "RUST_LOG": K8S_ORR_RUST_LOG,
+            "CONFIG_DIR": "/app/config/orr",
+            "ORR__orr_id": f"orr-{int(orr_id_int)}",
+            "ORR__qkc_id": str(int(qkc_id_int)),
+            "ORR__qkc_local_addr": "127.0.0.1:7100",
+            "ORR__grpc_addr": f"0.0.0.0:{K8S_ORR_GRPC_PORT}",
+            "ORR__metrics_addr": f"0.0.0.0:{K8S_ORR_METRICS_PORT}",
+            "ORR__sdn_url": sdn_endpoint_url,
+            "ORR__default_max_hops": "0",
+        }
+
+    def _resolve_sdn_suffix(self) -> int:
+        """Best-effort: find the SDN host_id from the simulation namespace.
+
+        SDN pod/service is named `sdn-{host_id}` (e.g. sdn-100030). We
+        don't have direct access to the SDN model here, so we just list
+        services in our namespace matching `sdn-*` and pick the first one.
+        Falls back to host_id+10 if no SDN service is found yet.
+        """
+        try:
+            services = self.core_v1_api.list_namespaced_service(self.namespace)
+            for svc in (services.items or []):
+                name = (svc.metadata.name if svc.metadata else "") or ""
+                if name.startswith("sdn-") and name[4:].isdigit():
+                    return int(name[4:])
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+    def _dkms_rust_env_overrides(
         self,
         *,
-        include_quditto_vars: bool,
+        sdn_host: Optional[str],
+        sdn_port: Optional[str],
     ) -> Dict[str, str]:
-        """Construye el env_payload común para los contenedores DKMS.
+        sae_port = self._service_port()
+        peer_addr_port = sae_port + 1
+        if not sdn_host:
+            sdn_host = f"sdn-{self._resolve_sdn_suffix()}"
+        sdn_port_int = _safe_positive_int(sdn_port, 3000)
+        sdn_endpoint = f"http://{sdn_host}:{sdn_port_int}"
+        # common::config::load_config usa Environment::with_prefix("DKMS")
+        # con separator("__"). TODOS los separadores entre tokens deben
+        # ser "__" (incluido el que separa el prefix del primer campo).
+        return {
+            "RUST_LOG": K8S_DKMS_RUST_LOG,
+            "CONFIG_DIR": "/app/config/dkms",
+            "DKMS__node_id": self.name,
+            "DKMS__listen__sae_addr": f"0.0.0.0:{int(sae_port)}",
+            "DKMS__listen__peer_addr": f"0.0.0.0:{int(peer_addr_port)}",
+            "DKMS__listen__grpc_addr": f"0.0.0.0:{K8S_DKMS_RUST_GRPC_PORT}",
+            "DKMS__listen__metrics_addr": f"0.0.0.0:{K8S_DKMS_RUST_METRICS_PORT}",
+            "DKMS__southbound__sdn_endpoint": sdn_endpoint,
+            "DKMS__southbound__qkc_endpoint": f"http://127.0.0.1:{K8S_QKC_GRPC_PORT}",
+            "DKMS__southbound__orr_endpoint": f"http://127.0.0.1:{K8S_ORR_GRPC_PORT}",
+            "DKMS__tls__cert_path": "/app/certs/server.crt",
+            "DKMS__tls__key_path": "/app/certs/server.key",
+            "DKMS__tls__sae_client_ca": "/app/certs/ca.crt",
+            "DKMS__tls__peer_dkms_ca": "/app/certs/ca.crt",
+        }
 
-        Incluye los timeouts de KME/QKC, los parámetros del Generator de
-        buffers, los flags de seguridad y, cuando ``include_quditto_vars``
-        está activo, las variables específicas del sidecar Quditto. Este
-        helper se comparte entre el pod con sidecar (enlaces QKD) y el
-        pod "flaco" con el fallback de ``super().create_pod`` (enlaces
-        PQC-simulados) para que ambos reciban la misma configuración.
+    def _orr_container(self, image: str, image_pull_policy: str) -> client.V1Container:
+        env = [client.V1EnvVar(name=k, value=v) for k, v in self._orr_runtime_env().items()]
+        return client.V1Container(
+            name="orr",
+            image=image,
+            image_pull_policy=image_pull_policy,
+            env=env,
+            ports=[
+                client.V1ContainerPort(container_port=K8S_ORR_GRPC_PORT),
+                client.V1ContainerPort(container_port=K8S_ORR_METRICS_PORT),
+            ],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "128Mi"},
+                limits={"cpu": "1000m", "memory": "512Mi"},
+            ),
+            startup_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_ORR_GRPC_PORT),
+                period_seconds=2, timeout_seconds=2, failure_threshold=60,
+            ),
+            readiness_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_ORR_GRPC_PORT),
+                period_seconds=5, timeout_seconds=2, failure_threshold=6,
+            ),
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name=self._sidecar_volume_name(),
+                    mount_path="/app/config/orr/default.toml",
+                    sub_path="orr.toml",
+                    read_only=True,
+                ),
+            ],
+        )
+
+    def _qkc_container(self, image: str, image_pull_policy: str) -> client.V1Container:
+        return client.V1Container(
+            name="qkc",
+            image=image,
+            image_pull_policy=image_pull_policy,
+            command=["/usr/local/bin/qkc", "--config", "/app/config/qkc/qkc.toml"],
+            env=[client.V1EnvVar(name="RUST_LOG", value=K8S_QKC_RUST_LOG)],
+            ports=[
+                client.V1ContainerPort(container_port=K8S_QKC_TCP_PORT),
+                client.V1ContainerPort(container_port=7100),
+                client.V1ContainerPort(container_port=7200),
+            ],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "128Mi"},
+                limits={"cpu": "1500m", "memory": "1Gi"},
+            ),
+            startup_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_QKC_TCP_PORT),
+                period_seconds=2, timeout_seconds=2, failure_threshold=60,
+            ),
+            readiness_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_QKC_TCP_PORT),
+                period_seconds=5, timeout_seconds=2, failure_threshold=6,
+            ),
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name=self._sidecar_volume_name(),
+                    mount_path="/app/config/qkc/qkc.toml",
+                    sub_path="qkc.toml",
+                    read_only=True,
+                ),
+            ],
+        )
+
+    def _sidecar_volume(self) -> client.V1Volume:
+        return client.V1Volume(
+            name=self._sidecar_volume_name(),
+            config_map=client.V1ConfigMapVolumeSource(
+                name=self._sidecar_config_map_name(),
+            ),
+        )
+
+    def _cert_init_container(self) -> client.V1Container:
+        """Generates self-signed TLS material for the Rust DKMS sidecars.
+
+        v3.4: replaces what the quditto sidecar (now per-link pod) used to
+        generate. Per-pod self-signed — peer DKMS↔DKMS does NOT verify
+        (TODO: extend runtime_ca to mint per-DKMS leafs).
+        """
+        script = (
+            'set -e; '
+            'cd /app/certs; '
+            'openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt '
+            f'-days 365 -nodes -subj "/CN={self.name}" '
+            f'-addext "subjectAltName=DNS:{self.name},DNS:localhost,IP:127.0.0.1"; '
+            'cp server.crt ca.crt; '
+            'chmod 644 server.crt server.key ca.crt'
+        )
+        return client.V1Container(
+            name="cert-init",
+            image="alpine/openssl:latest",
+            image_pull_policy="IfNotPresent",
+            command=["sh", "-c", script],
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name=self._RUST_CERTS_VOLUME_NAME,
+                    mount_path="/app/certs",
+                    read_only=False,
+                ),
+            ],
+        )
+    # ─── end Rust sidecars ────────────────────────────────────────────────
+
+    def _build_runtime_env_payload(self) -> Dict[str, str]:
+        """Construye el env_payload común para el container DKMS.
+
+        v3.3: simplificado tras eliminar el quditto-sidecar (las vars
+        QUDITTO_LOCAL_URL, QUDITTO_CLIENT_CERT_PATH, etc. ya no son
+        necesarias — cada KME tiene su URL per-link en su config JSON).
         """
         env_payload: Dict[str, str] = {
             "CONFIG_FOLDER": "/app/config",
@@ -3318,15 +3294,8 @@ class PodDKMS(Pod):
             "DKMS_MAX_IN_FLIGHT_KEYS_PER_PEER": K8S_DKMS_MAX_IN_FLIGHT_KEYS_PER_PEER,
             "DKMS_ACK_TIMEOUT_SECONDS": K8S_DKMS_ACK_TIMEOUT_SECONDS,
         }
-        if include_quditto_vars:
-            env_payload.update(
-                {
-                    "QUDITTO_LOCAL_URL": K8S_QUDITTO_LOCAL_URL,
-                    "QUDITTO_CLIENT_CERT_PATH": K8S_QUDITTO_CLIENT_CERT_PATH,
-                    "QUDITTO_CLIENT_KEY_PATH": K8S_QUDITTO_CLIENT_KEY_PATH,
-                    "QUDITTO_REQUIRE_CERTS": "true",
-                }
-            )
+        # v3.3: no más QUDITTO_* env vars — quditto es pod independiente
+        # accesible vía la URL per-link en cada KME config.
         # v2.4 async decrypt: el receiver usa un único httpx.AsyncClient
         # compartido con cap de concurrencia por semaphore. Diagnóstico
         # cluster v2.3.x con QKC_DECRYPT_PROCESS_WORKERS=16:
@@ -3345,7 +3314,9 @@ class PodDKMS(Pod):
         # distribuyen ~16/worker via SO_REUSEPORT al startup.
         # Para volver al ProcessPool poner QKC_DECRYPT_ASYNC=0 y
         # QKC_DECRYPT_PROCESS_WORKERS=N.
-        env_payload["QKC_DECRYPT_ASYNC"] = os.getenv("QKC_DECRYPT_ASYNC", "1")
+        # F12+ default OFF: async re-introducía el cuello del event loop
+        # (p50=4.6s bajo carga). Forzar process_pool path.
+        env_payload["QKC_DECRYPT_ASYNC"] = os.getenv("QKC_DECRYPT_ASYNC", "0")
         env_payload["QKC_DECRYPT_ASYNC_CONCURRENCY"] = os.getenv(
             "QKC_DECRYPT_ASYNC_CONCURRENCY", "128",
         )
@@ -3383,10 +3354,12 @@ class PodDKMS(Pod):
         env_payload["SDN_DEBOUNCE_BYPASS_BEST_EFFORT"] = os.getenv(
             "SDN_DEBOUNCE_BYPASS_BEST_EFFORT", "0",
         )
-        # ProcessPool desactivado por defecto en v2.4. Se mantiene como
-        # fallback si el async path falla (env QKC_DECRYPT_PROCESS_WORKERS=N).
+        # F19: subido a 16 (era 4 desde F13). Decrypt path estaba al 10%
+        # de su cap (414/s observed vs 1666/s cap). Subir procs no aumenta
+        # cap si decrypt no está saturado, pero asegura headroom para
+        # cargas mayores tras F19's send_workers=128.
         env_payload["QKC_DECRYPT_PROCESS_WORKERS"] = os.getenv(
-            "QKC_DECRYPT_PROCESS_WORKERS", "0",
+            "QKC_DECRYPT_PROCESS_WORKERS", "16",
         )
         # Generator concurrency. send_workers=16 (validado v2.3.8).
         # MAX_IN_FLIGHT=256 (v2.4.8): el cap=24 antiguo tenía sentido
@@ -3402,27 +3375,86 @@ class PodDKMS(Pod):
         # subió 56→63%). Bottleneck NO es número de workers sino DOWNSTREAM
         # (sidecar quditto). Iter 11 ataca sidecar: QUDITTO_WORKERS 4→8
         # via env separada (línea ~60).
+        # F19: 16→128 send_workers. Cada send es ~6ms (encrypt+post) y los
+        # workers están idle el 99% del tiempo bajo demand actual. Más
+        # workers permite servir bursts del scheduler sin queuear submits.
         env_payload["DKMS_GENERATOR_SEND_WORKERS"] = os.getenv(
-            "DKMS_GENERATOR_SEND_WORKERS", "16",
+            "DKMS_GENERATOR_SEND_WORKERS", "128",
         )
         env_payload["DKMS_GENERATOR_MAX_IN_FLIGHT"] = os.getenv(
             "DKMS_GENERATOR_MAX_IN_FLIGHT", "256",
         )
-        # Iter 9: rollback iter 7+8. KME_LINK_STORE_ENABLED=false (cap LRU
-        # 5000 daba 2815 vs 6113 sin store). MAX_TOKENS_PER_PEER_PER_TICK=32
-        # (default; iter 8 con 4 regresó a 2792).
+        # v2.10.8 final: LINK_STORE off (drain `all_keys=true` cada 100ms
+        # saturó CPU y regresionó throughput). Confiar en
+        # `_enc_prefetch_worker` con KME_ENC_PREFETCH_COUNT=512 y
+        # KME_ENC_KEYS_BATCH_SIZE=64.
         env_payload["KME_LINK_STORE_ENABLED"] = os.getenv(
             "KME_LINK_STORE_ENABLED", "false",
         )
-        env_payload["DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK"] = os.getenv(
-            "DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK", "32",
+        # Patch F12: parallel decrypt activo. Drain on-demand DESACTIVADO
+        # por default tras medición F12: en cluster real saturaba quditto
+        # (latencia 7s/req). Activable manualmente para escenarios de
+        # tráfico bajo o aislamiento.
+        env_payload["KME_LINK_STORE_NO_PERIODIC"] = os.getenv(
+            "KME_LINK_STORE_NO_PERIODIC", "1",
         )
-        # Iter 9: ProcessPool encrypt para sacar el path encrypt del GIL.
-        # Hipótesis: con 16 send_workers, el HTTP GET a sidecar + XOR sufre
-        # contención GIL. 2 procs hijos = true parallelism. Memory: 2×~200MB
-        # extra; baseline DKMS ~1.1GB, limit=2Gi → margen ~500MB.
+        env_payload["QKC_RECV_PARALLEL"] = os.getenv(
+            "QKC_RECV_PARALLEL", "0",
+        )
+        env_payload["QKC_RECV_PARALLELISM"] = os.getenv(
+            "QKC_RECV_PARALLELISM", "64",
+        )
+        env_payload["QKC_DEC_DRAIN_ON_MISS"] = os.getenv(
+            "QKC_DEC_DRAIN_ON_MISS", "0",
+        )
+        env_payload["QKC_DEC_DRAIN_ON_MISS_INTERVAL_MS"] = os.getenv(
+            "QKC_DEC_DRAIN_ON_MISS_INTERVAL_MS", "20",
+        )
+        env_payload["KME_LINK_STORE_DRAIN_INTERVAL_MS"] = os.getenv(
+            "KME_LINK_STORE_DRAIN_INTERVAL_MS", "100",
+        )
+        env_payload["KME_LINK_STORE_DRAIN_TARGET_KEYS"] = os.getenv(
+            "KME_LINK_STORE_DRAIN_TARGET_KEYS", "500",
+        )
+        env_payload["KME_LINK_STORE_DRAIN_MIN_MS"] = os.getenv(
+            "KME_LINK_STORE_DRAIN_MIN_MS", "50",
+        )
+        env_payload["KME_LINK_STORE_DRAIN_MAX_MS"] = os.getenv(
+            "KME_LINK_STORE_DRAIN_MAX_MS", "1000",
+        )
+        env_payload["KME_DEC_PREFETCH_CACHE_MAX"] = os.getenv(
+            "KME_DEC_PREFETCH_CACHE_MAX", "20000",
+        )
+        # F26: max_tokens=512 + batch=64 + cap=10000. Con buffer grande
+        # (F25) no hay oscilación SATURATED, así que el peer hot puede
+        # drenar tokens sin penalizar a los lentos (que reciben más rate
+        # cuando los hot saturan). max_tokens=512 = cap 20480 keys/s/peer
+        # con tick=25ms.
+        env_payload["DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK"] = os.getenv(
+            "DKMS_GEN_MAX_TOKENS_PER_PEER_PER_TICK", "512",
+        )
+        env_payload["DKMS_GENERATOR_BATCH_SIZE"] = os.getenv(
+            "DKMS_GENERATOR_BATCH_SIZE", "64",
+        )
+        # F14: ENCRYPT_PROCESS_WORKERS=0 (deshabilitado de nuevo). El path
+        # subprocess hace HTTP enc_keys directamente al sidecar quditto sin
+        # tocar el _enc_prefetch_queue del parent. Bajo conc=64 + single-key
+        # inflation (size=6936) quditto cae a 72 calls/s/sidecar = 1000
+        # generations/s cluster (10% de O1). Con workers=0 el path in-thread
+        # llama kme_request_enc_key() que SÍ usa prefetch en O(1).
         env_payload["QKC_ENCRYPT_PROCESS_WORKERS"] = os.getenv(
-            "QKC_ENCRYPT_PROCESS_WORKERS", "2",
+            "QKC_ENCRYPT_PROCESS_WORKERS", "0",
+        )
+        # F14: single-key inflation OFF (=0). El default 8192 inflaba 1 key
+        # del tamaño del payload entero (~6936 bits) ahorrando key_ids en
+        # el frame, pero size!=256 desactivaba el prefetch (ver
+        # KME._pop_prefetched_enc_key: returns None si size_bits != 256).
+        # Con SINGLE_KEY_MAX_BITS=0 los chunks van a 256 bits → cada chunk
+        # popea del prefetch. El receiver decrypt agrupa todos los key_IDs
+        # en 1 POST dec_keys (cap _DEC_KEYS_BATCH_CAP=128) → sigue siendo
+        # 1 HTTP por mensaje.
+        env_payload["QKC_ENCRYPT_SINGLE_KEY_MAX_BITS"] = os.getenv(
+            "QKC_ENCRYPT_SINGLE_KEY_MAX_BITS", "0",
         )
         # Cap del buffer DKMS desacoplado del cap del sidecar quditto.
         # Antes el DKMS heredaba quditto_max_buffer_size del KME config
@@ -3430,8 +3462,14 @@ class PodDKMS(Pod):
         # deadlock cuando ambos caps coincidían y el priming inicial los
         # llevaba al 100% — clase SATURATED → solver excluye → rate=0.
         # Quditto sidecar = 10000, DKMS = 3000 (target.buffers.proyect.md §3).
+        # F25: buffer cap 3000→10000. Con 3000 las transiciones SATURATED
+        # (95% del cap) son frecuentes durante warmup, causando oscilación
+        # en el SDN solver — demand_rate observado para flujos lentos
+        # saltaba 287/s → 886/s → 0 → 308/s → 400/s → 0 caóticamente.
+        # Con cap=10000 (== quditto sidecar) la SATURATED solo dispara
+        # cuando el sistema está verdaderamente saturado, no en transitorio.
         env_payload["DKMS_BUFFERS_MAX_KEYS"] = os.getenv(
-            "DKMS_BUFFERS_MAX_KEYS", "3000",
+            "DKMS_BUFFERS_MAX_KEYS", "10000",
         )
         # ACK path speedup. Defaults conservadores (TTL=30s, flush=50ms,
         # batch=32, queues=8192) hacían que bajo carga real los ACKs
@@ -3484,48 +3522,20 @@ class PodDKMS(Pod):
         ports: list | None = None,
         image_pull_secret: str | None = None,
         image_pull_policy: str | None = None,
-        quditto_image: str | None = None,
+        quditto_image: str | None = None,  # ← ignored, kept for backwards-compat signature
         orr_image: str | None = None,
         qkc_image: str | None = None,
     ):
-        if not self._quditto_enabled:
-            # En el camino sin sidecar Quditto (enlaces PQC simulados)
-            # todavía necesitamos inyectar el conjunto completo de vars
-            # de runtime (timeouts KME/QKC, Generator de buffers,
-            # enforcement mTLS, etc.). El parent ``Pod.create_pod`` acepta
-            # un dict ``env_vars`` y lo merges en su env_payload mínimo,
-            # así que construimos aquí el mismo payload que usaríamos con
-            # Quditto (excepto las vars específicas de Quditto) y lo
-            # pasamos como override.
-            runtime_env = self._build_runtime_env_payload(include_quditto_vars=False)
-            if env_vars:
-                runtime_env.update({str(k): str(v) for k, v in env_vars.items()})
-            if K8S_DKMS_RUST_SIDECARS:
-                # En modo Rust sidecars sin Quditto seguimos sin certs
-                # auto-generados — pendiente runtime_ca extension. Aun
-                # así inyectamos las overrides DKMS_* para que la imagen
-                # Rust intente bootear y el operador pueda diagnosticar.
-                rust_overrides = self._dkms_rust_env_overrides(
-                    sdn_host=runtime_env.get("DKMS_SDN_HOST"),
-                    sdn_port=runtime_env.get("DKMS_SDN_PORT"),
-                )
-                runtime_env.update(rust_overrides)
-            return super().create_pod(
-                env_vars=runtime_env,
-                image=image,
-                ports=ports,
-                image_pull_secret=image_pull_secret,
-                image_pull_policy=image_pull_policy,
-            )
-
+        # v3.3: el quditto ya no es sidecar — se despliega en pods
+        # independientes per-link (ver `PodQudittoLink`). El parámetro
+        # `quditto_image` se acepta por compat con callers existentes
+        # pero no se usa en este path.
         existing = self._read_namespaced(self.apps_v1_api.read_namespaced_deployment, self.name)
         if existing:
             return existing
 
         if image is None:
             image = f"{self.__TYPE__}:latest"
-        if quditto_image is None:
-            quditto_image = K8S_QUDITTO_IMAGE
         if not image_pull_policy:
             image_pull_policy = K8S_IMAGE_PULL_POLICY
         if K8S_DKMS_RUST_SIDECARS:
@@ -3539,7 +3549,7 @@ class PodDKMS(Pod):
         if host is not None:
             host_port = getattr(host, "port", None)
 
-        env_payload = self._build_runtime_env_payload(include_quditto_vars=True)
+        env_payload = self._build_runtime_env_payload()
         if env_vars:
             for key, value in env_vars.items():
                 env_payload[str(key)] = str(value)
@@ -3574,13 +3584,14 @@ class PodDKMS(Pod):
                 read_only=False,
             )
         )
-        main_volume_mounts.append(
-            client.V1VolumeMount(
-                name=self._quditto_cert_volume_name,
-                mount_path="/app/certs",
-                read_only=True,
+        if K8S_DKMS_RUST_SIDECARS:
+            main_volume_mounts.append(
+                client.V1VolumeMount(
+                    name=self._RUST_CERTS_VOLUME_NAME,
+                    mount_path="/app/certs",
+                    read_only=True,
+                )
             )
-        )
 
         dkms_container = client.V1Container(
             name="dkms",
@@ -3588,13 +3599,12 @@ class PodDKMS(Pod):
             image_pull_policy=image_pull_policy,
             env=env_defaults,
             resources=client.V1ResourceRequirements(
-                # Pool de 500 workers + state de contextos ACK + métricas
-                # Prometheus con labels (50 peers × ~10 series) → baseline
-                # ~400MB. Bajo carga el pod RSS observado alcanzaba 1073MB
-                # contra limit=1Gi (OOMKilled recurrente). 2Gi da holgura
-                # sin explotar el resource budget del cluster (50 DKMSs × 2Gi
-                # = 100Gi total — ajustar si el cluster tiene menos RAM).
-                requests={"cpu": "200m", "memory": "512Mi"},
+                # CPU request 200m permitía a Karpenter packear DKMS en c5a.large
+                # (2 CPU). Bajo carga real cada pod usa ~1 CPU sostenido (limit
+                # 1500m). Subo request a 750m: Karpenter ya no mete DKMSs en
+                # c5a.large/medium, fuerza nodos ≥xlarge. Memoria: peak RSS
+                # observado 1073MB; subo request 512→1Gi para reflejarlo.
+                requests={"cpu": "750m", "memory": "1Gi"},
                 limits={"cpu": "1500m", "memory": "2Gi"},
             ),
             ports=container_ports,
@@ -3613,105 +3623,36 @@ class PodDKMS(Pod):
             ),
         )
 
-        # Pasamos siempre --cert/--key para que el sidecar genere los
-        # bundles del filesystem (server+client+ca) que el container DKMS
-        # consume del volumen compartido para mTLS con peers externos.
-        # En modo --insecure el sidecar genera los certs pero arranca uvicorn
-        # en HTTP plano (sin TLS).
-        quditto_command = [
-            "python", "-m", "simple_quditto",
-            "--config", "/app/config/config.yaml",
-            "--port", str(K8S_QUDITTO_PORT),
-            "--cert", "/app/certs/server.crt",
-            "--key", "/app/certs/server.key",
-            "--workers", K8S_QUDITTO_WORKERS,
-        ]
-        if K8S_QUDITTO_INSECURE:
-            quditto_command.append("--insecure")
-        quditto_container = client.V1Container(
-            name="quditto",
-            image=quditto_image,
-            image_pull_policy=image_pull_policy,
-            command=quditto_command,
-            env=[
-                client.V1EnvVar(name="VERBOSE", value=K8S_QUDITTO_VERBOSE),
-                client.V1EnvVar(name="QUDITTO_WORKERS", value=K8S_QUDITTO_WORKERS),
-            ],
-            ports=[
-                client.V1ContainerPort(container_port=K8S_QUDITTO_PORT),
-                client.V1ContainerPort(container_port=K8S_QUDITTO_METRICS_PORT),
-            ],
-            resources=client.V1ResourceRequirements(
-                requests={"cpu": "500m", "memory": "384Mi"},
-                limits={"cpu": "3000m", "memory": "2Gi"},
-            ),
-            startup_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_QUDITTO_PORT),
-                period_seconds=2,
-                timeout_seconds=2,
-                failure_threshold=90,
-            ),
-            readiness_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=K8S_QUDITTO_PORT),
-                period_seconds=5,
-                timeout_seconds=2,
-                failure_threshold=6,
-            ),
-            volume_mounts=[
-                client.V1VolumeMount(
-                    name=self._quditto_volume_name,
-                    mount_path="/app/config",
-                    read_only=True,
-                ),
-                client.V1VolumeMount(
-                    name=self._quditto_cert_volume_name,
-                    mount_path="/app/certs",
-                    read_only=False,
-                ),
-                client.V1VolumeMount(
-                    name=self._logs_volume_name(),
-                    mount_path="/app/logs",
-                    read_only=False,
-                ),
-            ],
-        )
+        # v3.3: el sidecar `quditto` ya no se monta dentro del pod DKMS.
+        # Cada link QKD vive en su propio pod `quditto-link-{a}-{b}` y los
+        # KMEs apuntan a él vía DNS K8s (ver `generate_configs.py` y
+        # `PodQudittoLink`). El pod DKMS queda con solo `dkms` (+ promtail
+        # sidecar si observability está activa).
 
         volumes: list[client.V1Volume] = []
         base_volume = self.crear_volume()
         if base_volume is not None:
             volumes.append(base_volume)
-        volumes.extend(
-            [
-                client.V1Volume(
-                    name=self._quditto_volume_name,
-                    config_map=client.V1ConfigMapVolumeSource(name=self._quditto_config_map_name),
-                ),
-                client.V1Volume(
-                    name=self._quditto_cert_volume_name,
-                    empty_dir=client.V1EmptyDirVolumeSource(),
-                ),
-                client.V1Volume(
-                    name=self._logs_volume_name(),
-                    empty_dir=client.V1EmptyDirVolumeSource(),
-                ),
-            ]
+        volumes.append(
+            client.V1Volume(
+                name=self._logs_volume_name(),
+                empty_dir=client.V1EmptyDirVolumeSource(),
+            )
         )
 
-        containers = [dkms_container, quditto_container]
+        containers = [dkms_container]
+        init_containers: list[client.V1Container] = []
         if K8S_DKMS_RUST_SIDECARS:
+            volumes.append(
+                client.V1Volume(
+                    name=self._RUST_CERTS_VOLUME_NAME,
+                    empty_dir=client.V1EmptyDirVolumeSource(),
+                )
+            )
             volumes.append(self._sidecar_volume())
-            containers.append(
-                self._orr_container(
-                    image=orr_image,
-                    image_pull_policy=image_pull_policy,
-                )
-            )
-            containers.append(
-                self._qkc_container(
-                    image=qkc_image,
-                    image_pull_policy=image_pull_policy,
-                )
-            )
+            init_containers.append(self._cert_init_container())
+            containers.append(self._orr_container(image=orr_image, image_pull_policy=image_pull_policy))
+            containers.append(self._qkc_container(image=qkc_image, image_pull_policy=image_pull_policy))
         if self._observability_enabled():
             volumes.append(
                 client.V1Volume(
@@ -3727,6 +3668,7 @@ class PodDKMS(Pod):
             containers=containers,
             volumes=volumes,
             image_pull_secret=image_pull_secret,
+            init_containers=init_containers or None,
         )
         try:
             return self.apps_v1_api.create_namespaced_deployment(
@@ -3738,3 +3680,527 @@ class PodDKMS(Pod):
                 return self._read_namespaced(self.apps_v1_api.read_namespaced_deployment, self.name)
             raise
 
+
+# ─────────────────────────────────────────────────────────────────────
+# PodQudittoLink — v3.3: simulador QKD desacoplado del DKMS, un pod
+# por enlace bidireccional. Cada pod hostea AMBAS vistas (node_a y
+# node_b) en un único proceso `simple_quditto` con config
+# ``nodes:[A,B]``. El handler HTTP enruta por ``sae_id`` (ver
+# ``code_dkms/src/simple_quditto/server.py::_resolve_link``).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _LinkChannelSpec:
+    """Snapshot inmutable de los parámetros de canal de un enlace QKD."""
+
+    __slots__ = ("distance", "rate_r0", "rate_alpha", "max_buffer_size", "ttl")
+
+    def __init__(
+        self,
+        *,
+        distance: int = 0,
+        rate_r0: float = K8S_QUDITTO_DEFAULT_RATE_R0,
+        rate_alpha: float = K8S_QUDITTO_DEFAULT_RATE_ALPHA,
+        max_buffer_size: int = K8S_QUDITTO_DEFAULT_MAX_BUFFER_SIZE,
+        ttl: int = K8S_QUDITTO_DEFAULT_TTL,
+    ) -> None:
+        self.distance = int(distance)
+        self.rate_r0 = float(rate_r0)
+        self.rate_alpha = float(rate_alpha)
+        self.max_buffer_size = int(max_buffer_size)
+        self.ttl = int(ttl)
+
+
+def _link_channel_spec_from_kme_entry(kme_entry: Dict[str, Any]) -> _LinkChannelSpec:
+    """Extrae los parámetros de canal desde un entry de ``kmes`` del QKC.
+
+    Reutiliza el mismo parseo que el sidecar usaba pre-v3.3 (los nombres
+    de los campos no han cambiado; ver ``_extract_quditto_topology`` de
+    `PodDKMS` para el contrato).
+    """
+    channel = kme_entry.get("channel") if isinstance(kme_entry, dict) else None
+    if not isinstance(channel, dict):
+        return _LinkChannelSpec()
+    distance = max(0, _safe_int(channel.get("distance")) or 0)
+    max_buffer_size = _safe_positive_int(
+        channel.get("max_buffer_size") or channel.get("quditto_max_buffer_size"),
+        K8S_QUDITTO_DEFAULT_MAX_BUFFER_SIZE,
+    )
+    raw_rate_r0 = channel.get("rate_r0")
+    if raw_rate_r0 is None:
+        raw_rate_r0 = channel.get("quditto_rate_r0")
+    raw_rate_alpha = channel.get("rate_alpha")
+    if raw_rate_alpha is None:
+        raw_rate_alpha = channel.get("quditto_rate_alpha")
+    rate_r0 = _safe_positive_float(raw_rate_r0, K8S_QUDITTO_DEFAULT_RATE_R0)
+    rate_alpha = _safe_nonnegative_float(raw_rate_alpha, K8S_QUDITTO_DEFAULT_RATE_ALPHA)
+    ttl = K8S_QUDITTO_DEFAULT_TTL
+    try:
+        ttl_candidate = int(channel.get("ttl"))
+        if ttl_candidate > 0:
+            ttl = ttl_candidate
+    except (TypeError, ValueError):
+        pass
+    return _LinkChannelSpec(
+        distance=distance,
+        rate_r0=rate_r0,
+        rate_alpha=rate_alpha,
+        max_buffer_size=max_buffer_size,
+        ttl=ttl,
+    )
+
+
+class PodQudittoLink:
+    """Deployment + Service + ConfigMap para UN enlace QKD bidireccional.
+
+    Naming canónico: `quditto-link-{min(a,b)}-{max(a,b)}`. Ambos extremos
+    del enlace resuelven al mismo DNS:
+        http://quditto-link-{a}-{b}.{ns}.svc.cluster.local:5000
+
+    El pod corre `simple_quditto` con config `nodes:[A,B]`, cada uno
+    declarando como vecino al otro. Los buffers materializados de los 4
+    sentidos (enc_A→B, dec_B←A, enc_B→A, dec_A←B) viven en este mismo
+    proceso y el routing HTTP por `sae_id` los enruta al correcto.
+
+    Resources: 300m/384Mi requests, 1500m/1Gi limits — el trabajo per-link
+    está acotado a 4 buffers × 2000 keys/s = 8 000 keys/s.
+    """
+
+    __TYPE__ = "quditto-link"
+
+    def __init__(
+        self,
+        id_simulation: str,
+        node_a_id: int,
+        node_b_id: int,
+        *,
+        channel: _LinkChannelSpec,
+        node_label_prefix: str = "DKMS",
+    ) -> None:
+        a, b = sorted([int(node_a_id), int(node_b_id)])
+        self.node_a_id = a
+        self.node_b_id = b
+        self.namespace = str(id_simulation)
+        self.name = f"{self.__TYPE__}-{a}-{b}"
+        self._channel = channel
+        self._node_label_prefix = node_label_prefix
+        self._config_map_name = self.name  # config + pod + service comparten name
+
+        try:
+            config.load_incluster_config()
+        except ConfigException:
+            config.load_kube_config()
+        self.core_v1_api = client.CoreV1Api()
+        self.apps_v1_api = client.AppsV1Api()
+
+    # ─── helpers internos ─────────────────────────────────────────────
+    def _node_name(self, node_id: int) -> str:
+        # v3.4: con K8S_DKMS_RUST_SIDECARS, los DKMS Rust+QKC piden las
+        # keys a quditto usando el qkc_id bare ("100001"), no el prefijo
+        # legacy "DKMS-100001". Ajustamos el node_name del config para
+        # que el match sae_id↔node funcione en ambos paths.
+        if K8S_DKMS_RUST_SIDECARS:
+            return str(int(node_id))
+        return f"{self._node_label_prefix}-{int(node_id)}"
+
+    def _labels(self) -> Dict[str, str]:
+        return {
+            "app": self.__TYPE__,
+            "instance": self.name,
+            "link.a": str(self.node_a_id),
+            "link.b": str(self.node_b_id),
+        }
+
+    def _quditto_config_yaml(self) -> str:
+        """Genera el config.yaml con AMBOS extremos del enlace.
+
+        Cada `node` declara al otro como su único vecino. El `role`
+        respeta la convención canónica (`originator_for` en
+        ``simple_quditto/link.py``): el nodo con menor nombre lex es "A"
+        (initiator), el otro "B" (responder). Como `_node_name` usa el
+        mismo prefijo y los ids ya están sorted, el nombre menor lex es
+        siempre `node_a_id`.
+        """
+        name_a = self._node_name(self.node_a_id)
+        name_b = self._node_name(self.node_b_id)
+        common = {
+            "ttl": self._channel.ttl,
+            "max_buffer_size": self._channel.max_buffer_size,
+            "distance": self._channel.distance,
+            "rate_r0": self._channel.rate_r0,
+            "rate_alpha": self._channel.rate_alpha,
+        }
+        payload = {
+            "quditto_version": "3.3",
+            "nodes": [
+                {
+                    "node_name": name_a,
+                    "neighbour_nodes": [{
+                        "name": name_b,
+                        "role": "initiator",
+                        **common,
+                    }],
+                },
+                {
+                    "node_name": name_b,
+                    "neighbour_nodes": [{
+                        "name": name_a,
+                        "role": "responder",
+                        **common,
+                    }],
+                },
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=True, indent=2)
+
+    def _read_namespaced(self, read_fn, name: str):
+        try:
+            return read_fn(name=name, namespace=self.namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    # ─── API pública: configmap, pod, service ─────────────────────────
+    def crear_config_map(self):
+        existing = self._read_namespaced(
+            self.core_v1_api.read_namespaced_config_map, self._config_map_name,
+        )
+        cm = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(
+                name=self._config_map_name,
+                labels=self._labels(),
+            ),
+            data={"config.yaml": self._quditto_config_yaml()},
+        )
+        if existing is not None:
+            if existing.metadata is not None:
+                rv = getattr(existing.metadata, "resource_version", None)
+                if rv:
+                    if cm.metadata is None:
+                        cm.metadata = client.V1ObjectMeta(name=self._config_map_name)
+                    cm.metadata.resource_version = rv
+            return self.core_v1_api.replace_namespaced_config_map(
+                name=self._config_map_name,
+                namespace=self.namespace,
+                body=cm,
+            )
+        try:
+            return self.core_v1_api.create_namespaced_config_map(
+                namespace=self.namespace, body=cm,
+            )
+        except ApiException as e:
+            if e.status == 409:
+                return self._read_namespaced(
+                    self.core_v1_api.read_namespaced_config_map,
+                    self._config_map_name,
+                )
+            raise
+
+    def create_pod(
+        self,
+        env_vars: dict | None = None,
+        image: str | None = None,
+        ports: list | None = None,
+        image_pull_secret: str | None = None,
+        image_pull_policy: str | None = None,
+        **_ignored,
+    ):
+        existing = self._read_namespaced(
+            self.apps_v1_api.read_namespaced_deployment, self.name,
+        )
+        if existing:
+            return existing
+
+        if image is None:
+            image = K8S_QUDITTO_IMAGE
+        if not image_pull_policy:
+            image_pull_policy = K8S_IMAGE_PULL_POLICY
+        if image_pull_secret is None and DOCKER_HUB_TOKEN:
+            image_pull_secret = DOCKER_HUB_SECRET_NAME
+
+        # v3.4: dos paths según el image:
+        #   - `pablopio/quditto:*` (Rust): CLI propia, sin configmap, sin
+        #     certs (HTTP plano dentro del namespace).
+        #   - cualquier otro (Python `simple_quditto`): config.yaml + certs
+        #     auto-generados + uvicorn workers.
+        is_rust_quditto = "/quditto" in image and "/simple-quditto" not in image
+        if is_rust_quditto:
+            command = [
+                "/usr/local/bin/quditto",
+                "--listen", f"0.0.0.0:{K8S_QUDITTO_PORT}",
+                "--r0", str(self._channel.rate_r0),
+                "--alpha", str(self._channel.rate_alpha),
+                "--distance", str(float(self._channel.distance)),
+                "--max-buffer", str(int(self._channel.max_buffer_size)),
+                "--key-size-bits", "256",
+            ]
+            env_list = [client.V1EnvVar(name="RUST_LOG", value="info")]
+        else:
+            command = [
+                "python", "-m", "simple_quditto",
+                "--config", "/app/config/config.yaml",
+                "--port", str(K8S_QUDITTO_PORT),
+                "--cert", "/app/certs/server.crt",
+                "--key", "/app/certs/server.key",
+                "--workers", "1",
+                "--insecure",
+            ]
+            env_list = [
+                client.V1EnvVar(name="VERBOSE", value=K8S_QUDITTO_VERBOSE),
+                client.V1EnvVar(name="QUDITTO_WORKERS", value="1"),
+            ]
+        if env_vars:
+            for k, v in env_vars.items():
+                env_list.append(client.V1EnvVar(name=str(k), value=str(v)))
+
+        container = client.V1Container(
+            name="quditto",
+            image=image,
+            image_pull_policy=image_pull_policy,
+            command=command,
+            env=env_list,
+            ports=[
+                client.V1ContainerPort(container_port=K8S_QUDITTO_PORT),
+                client.V1ContainerPort(container_port=K8S_QUDITTO_METRICS_PORT),
+            ],
+            resources=client.V1ResourceRequirements(
+                # Subido cpu 300m→500m para empujar a Karpenter fuera de
+                # nodos c5a.large (2 CPU). Con 14 quditto-links × 500m +
+                # 10 DKMSs × 750m = 14.5 CPU mínimos: Karpenter elige
+                # ≥c5a.xlarge (4 CPU) o c5a.4xlarge (16 CPU).
+                requests={"cpu": "500m", "memory": "512Mi"},
+                limits={"cpu": "1500m", "memory": "1Gi"},
+            ),
+            startup_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_QUDITTO_PORT),
+                period_seconds=2,
+                timeout_seconds=2,
+                failure_threshold=90,
+            ),
+            readiness_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=K8S_QUDITTO_PORT),
+                period_seconds=5,
+                timeout_seconds=2,
+                failure_threshold=6,
+            ),
+            volume_mounts=(
+                [
+                    client.V1VolumeMount(name="logs", mount_path="/app/logs", read_only=False),
+                ]
+                if is_rust_quditto
+                else [
+                    client.V1VolumeMount(
+                        name="config", mount_path="/app/config", read_only=True,
+                    ),
+                    client.V1VolumeMount(
+                        name="certs", mount_path="/app/certs", read_only=False,
+                    ),
+                    client.V1VolumeMount(
+                        name="logs", mount_path="/app/logs", read_only=False,
+                    ),
+                ]
+            ),
+        )
+
+        if is_rust_quditto:
+            volumes = [
+                client.V1Volume(name="logs", empty_dir=client.V1EmptyDirVolumeSource()),
+            ]
+        else:
+            volumes = [
+                client.V1Volume(
+                    name="config",
+                    config_map=client.V1ConfigMapVolumeSource(name=self._config_map_name),
+                ),
+                client.V1Volume(name="certs", empty_dir=client.V1EmptyDirVolumeSource()),
+                client.V1Volume(name="logs", empty_dir=client.V1EmptyDirVolumeSource()),
+            ]
+
+        labels = self._labels()
+        pod_template = client.V1PodTemplateSpec(
+            metadata=client.V1ObjectMeta(labels=labels),
+            spec=client.V1PodSpec(
+                containers=[container],
+                volumes=volumes,
+                restart_policy="Always",
+                image_pull_secrets=(
+                    [client.V1LocalObjectReference(name=image_pull_secret)]
+                    if image_pull_secret else None
+                ),
+            ),
+        )
+        deployment = client.V1Deployment(
+            metadata=client.V1ObjectMeta(name=self.name, labels=labels),
+            spec=client.V1DeploymentSpec(
+                replicas=1,
+                selector=client.V1LabelSelector(match_labels=labels),
+                template=pod_template,
+                strategy=client.V1DeploymentStrategy(
+                    type="RollingUpdate",
+                    rolling_update=client.V1RollingUpdateDeployment(
+                        max_unavailable=0,
+                        max_surge=1,
+                    ),
+                ),
+            ),
+        )
+        try:
+            return self.apps_v1_api.create_namespaced_deployment(
+                namespace=self.namespace, body=deployment,
+            )
+        except ApiException as e:
+            if e.status == 409:
+                return self._read_namespaced(
+                    self.apps_v1_api.read_namespaced_deployment, self.name,
+                )
+            raise
+
+    def create_service(self):
+        labels = self._labels()
+        existing = self._read_namespaced(
+            self.core_v1_api.read_namespaced_service, self.name,
+        )
+        if existing is not None:
+            return existing
+        svc = client.V1Service(
+            metadata=client.V1ObjectMeta(name=self.name, labels=labels),
+            spec=client.V1ServiceSpec(
+                type="ClusterIP",
+                selector=labels,
+                ports=[
+                    client.V1ServicePort(
+                        name="http",
+                        port=K8S_QUDITTO_PORT,
+                        target_port=K8S_QUDITTO_PORT,
+                        protocol="TCP",
+                    ),
+                    client.V1ServicePort(
+                        name="metrics",
+                        port=K8S_QUDITTO_METRICS_PORT,
+                        target_port=K8S_QUDITTO_METRICS_PORT,
+                        protocol="TCP",
+                    ),
+                ],
+            ),
+        )
+        try:
+            return self.core_v1_api.create_namespaced_service(
+                namespace=self.namespace, body=svc,
+            )
+        except ApiException as e:
+            if e.status == 409:
+                return self._read_namespaced(
+                    self.core_v1_api.read_namespaced_service, self.name,
+                )
+            raise
+
+
+def build_quditto_link_pods_from_dkms_models(
+    id_simulation: str,
+    dkms_models: list,
+    *,
+    node_label_prefix: str = "DKMS",
+) -> list:
+    """Itera los ModelDKMS y construye 1 `PodQudittoLink` por edge único.
+
+    Cada DKMS pod tiene en su `model_dkms.qkc.kmes` la lista de KMEs (1
+    por enlace QKD). Cada KME aparece DOS veces en el cluster (una en
+    cada extremo), por eso dedupe por canonical (min, max).
+
+    Reusa `_link_channel_spec_from_kme_entry` para extraer distance/rate
+    desde cualquiera de los dos extremos (deberían coincidir).
+
+    Devuelve lista de `PodQudittoLink` (uno por enlace QKD).
+    """
+    seen: Dict[tuple, _LinkChannelSpec] = {}
+    for model_dkms in dkms_models:
+        # ModelDKMS → orr → qkc → kmes (mismo path que usa PodDKMS
+        # `_extract_qkc_payload` en pods.py:2766-2773).
+        orr = getattr(model_dkms, "orr", None)
+        qkc = getattr(orr, "qkc", None) if orr is not None else None
+        if qkc is None:
+            continue
+        # `qkc` puede ser objeto pydantic o dict — extraemos kmes.
+        kmes = None
+        if hasattr(qkc, "kmes"):
+            kmes = getattr(qkc, "kmes")
+        elif isinstance(qkc, dict):
+            kmes = qkc.get("kmes")
+        if not kmes:
+            continue
+        for kme in kmes:
+            kme_dict = (
+                kme if isinstance(kme, dict)
+                else kme.model_dump() if hasattr(kme, "model_dump")
+                else None
+            )
+            if not kme_dict:
+                continue
+            if not _is_qkd_link(kme_dict):
+                continue
+            try:
+                local_id = int(kme_dict.get("local_qkc_id"))
+                neighbor_id = int(kme_dict.get("neighbor_qkc_id"))
+            except (TypeError, ValueError):
+                continue
+            key = tuple(sorted([local_id, neighbor_id]))
+            if key in seen:
+                continue
+            spec = _link_channel_spec_from_kme_entry(kme_dict)
+            seen[key] = spec
+
+    return [
+        PodQudittoLink(
+            id_simulation=id_simulation,
+            node_a_id=a,
+            node_b_id=b,
+            channel=spec,
+            node_label_prefix=node_label_prefix,
+        )
+        for (a, b), spec in sorted(seen.items())
+    ]
+
+
+if __name__ == "__main__":
+    import os
+
+    image_sdn = os.getenv("SDN_IMAGE")
+    image_dkms = os.getenv("DKMS_IMAGE")
+
+
+    image_pull_secret = os.getenv("K8S_IMAGE_PULL_SECRET")
+    image_pull_policy = os.getenv("K8S_IMAGE_PULL_POLICY")
+
+
+    path_config = '/home/pablopio/Documentos/trabajo_atlantic/dkms/code_dkms/config_files/DKMS'
+
+    list_configs = os.listdir(path_config)
+    list_configs.sort()
+
+    dkms_pods = []
+    for dkms_config in list_configs:
+        
+        model_dkms = ModelDKMS.model_from_json_file(os.path.join(path_config,dkms_config))
+        pod_dkms = PodDKMS(id_simulation=1,model_dkms=model_dkms)
+        pod_dkms.create_namespace()
+        pod_dkms.create_pod(
+            image=image_dkms,
+            image_pull_secret=image_pull_secret,
+            image_pull_policy=image_pull_policy,
+        )
+        pod_dkms.create_service()
+        dkms_pods.append(pod_dkms)
+
+
+    model_sdn = ModelSDN.model_from_json_file('/home/pablopio/Documentos/trabajo_atlantic/dkms/code_dkms/config_files/SDN/1.json')
+    pod_sdn = PodSDN(id_simulation=1,model_sdn=model_sdn)
+    pod_sdn.create_namespace()
+    pod_sdn.create_pod(
+        image=image_sdn,
+        image_pull_secret=image_pull_secret,
+        image_pull_policy=image_pull_policy,
+    )
+    pod_sdn.create_service()
+    pod_sdn.create_simulation_ingress(dkms_pods=dkms_pods, sdn_pod=pod_sdn)
+    
