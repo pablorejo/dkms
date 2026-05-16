@@ -116,11 +116,17 @@ spec:
             - name: ORCHESTATOR_PORT
               value: "8080"
             - name: SDN_IMAGE
-              value: "pablopio/sdn:v1"
+              value: "pablopio/sdn:v2"
             - name: DKMS_IMAGE
-              value: "pablopio/dkms:v1"
+              value: "pablopio/dkms:v2"
+            - name: ORR_IMAGE
+              value: "pablopio/orr:v2"
+            - name: QKC_IMAGE
+              value: "pablopio/qkc:v2"
             - name: QUDITTO_IMAGE
-              value: "docker.io/pablopio/simple-quditto:v1"
+              value: "pablopio/quditto:v2"
+            - name: K8S_DKMS_RUST_SIDECARS
+              value: "true"
             - name: K8S_IMAGE_PULL_SECRET
               value: "dockerhub-pull"
             - name: K8S_IMAGE_PULL_POLICY

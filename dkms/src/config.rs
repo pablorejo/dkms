@@ -281,6 +281,14 @@ pub struct GeneratorCfg {
     /// DKMS-BUFFER. Si no se configura, el Generator usa `listen.peer_addr`
     /// con un puerto offset definido por `ack_socket_port_offset`.
     pub ack_socket_addr: Option<SocketAddr>,
+    /// Override del valor textual que se ANUNCIA a peers en el header
+    /// ``ack_endpoint``. Cuando ``ack_socket_addr`` binda en ``0.0.0.0``
+    /// (despliegues K8s), su ``to_string()`` produce ``0.0.0.0:PORT`` que
+    /// los peers no pueden enrutar. Aquí se puede meter el DNS Service del
+    /// pod, p.ej. ``"dkms-42:5002"``. Si está ``None``, el comportamiento
+    /// es el legacy (stringificar ``ack_socket_addr``).
+    #[serde(default)]
+    pub ack_advertised_endpoint: Option<String>,
     /// Cap de tokens consumibles por un peer por tick. Evita que un peer
     /// hot monopolice el dispatch.
     pub max_tokens_per_peer_per_tick: u32,
@@ -299,6 +307,7 @@ impl Default for GeneratorCfg {
             ack_timeout_ms: 30_000,
             ack_reaper_ms: 1_000,
             ack_socket_addr: None,
+            ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
             bucket_cap_seconds: 2.0,
         }

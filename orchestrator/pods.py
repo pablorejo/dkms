@@ -42,7 +42,7 @@ K8S_RUNTIME_SSL_CIPHERS = os.getenv(
     "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256",
 )
 K8S_INGRESS_TEMPLATES_DIR = os.getenv("K8S_INGRESS_TEMPLATES_DIR")
-K8S_QUDITTO_IMAGE = os.getenv("QUDITTO_IMAGE", "docker.io/pablopio/simple-quditto:v1")
+K8S_QUDITTO_IMAGE = os.getenv("QUDITTO_IMAGE", "docker.io/pablopio/quditto:v2")
 K8S_QUDITTO_PORT = int(os.getenv("QUDITTO_PORT", "5000"))
 K8S_QUDITTO_METRICS_PORT = int(os.getenv("QUDITTO_METRICS_PORT", "8000"))
 K8S_LOADTEST_METRICS_PORT = int(os.getenv("K8S_LOADTEST_METRICS_PORT", "9095"))
@@ -640,7 +640,19 @@ class Pod:
     def _config_files_dir(self) -> Path:
         if K8S_CONFIG_FILES_DIR:
             return Path(K8S_CONFIG_FILES_DIR)
-        return Path(__file__).resolve().parents[2] / "config_files"
+        # Layout-agnostic: the v4 image had this file at
+        # /app/code_dkms/src/k8s/pods.py with config_files at
+        # /app/code_dkms/config_files (parents[2]). The local Dockerfile
+        # COPYs orchestrator/ to /app directly, so pods.py is /app/pods.py
+        # and parents[2] doesn't exist. Walk up looking for "config_files".
+        here = Path(__file__).resolve()
+        for parent in [here.parent, *here.parents]:
+            candidate = parent / "config_files"
+            if candidate.is_dir():
+                return candidate
+        # Fallback to a path under /app — _config_json_exists handles
+        # missing directories gracefully via is_file().
+        return Path("/app/config_files")
 
     def _config_json_exists(self, section: str, identifier: int | None) -> bool:
         if identifier is None or identifier <= 0:
@@ -2682,6 +2694,29 @@ class PodSDN(Pod):
             )
         self._rust_topology_files = list(files.keys())
 
+    def expose_rust_http_port(self) -> None:
+        """Patches the SDN Service to also expose the Rust HTTP admin port.
+
+        The Service starts with one port (``self._service_port()`` =
+        ``host.port`` = e.g. 3000, used as the SDN gRPC). The Rust DKMS
+        derives the SDN HTTP URL as ``grpc + 2`` (5005 -> 5007), so we
+        must additionally expose ``http_port`` on the same Service.
+        Idempotent.
+        """
+        http_port = int(self._service_port()) + 2
+        patch_body = {
+            "spec": {
+                "ports": [
+                    {"name": "app", "port": int(self._service_port()), "targetPort": int(self._service_port())},
+                    {"name": "http-admin", "port": http_port, "targetPort": http_port},
+                    {"name": "metrics", "port": 9102, "targetPort": 9102},
+                ],
+            }
+        }
+        self.core_v1_api.patch_namespaced_service(
+            name=self.name, namespace=self.namespace, body=patch_body,
+        )
+
     def patch_with_rust_topology_volume(self) -> None:
         """Patches the SDN Deployment to mount the topology ConfigMap.
 
@@ -3203,9 +3238,15 @@ class PodDKMS(Pod):
                 key_size = max(8, (key_size // 8) * 8)
             # neighbor_peer_addr: el QKC vecino vive dentro del DKMS pod
             # vecino. El Service del DKMS vecino se llama por su host_id
-            # (no por qkc_id). Sacamos el host del kme.neighbor_qkc_ip
-            # que ya lo trae `_canonicalize_runtime_dkms_payload`.
-            neighbor_host = str(kme.get("neighbor_qkc_ip") or f"dkms-{neighbor_id}")
+            # (no por qkc_id). El orchestator pasa el mapeo
+            # ``_k8s_dns_by_qkc_id`` (qkc_id → ``dkms-{host_id}``) al
+            # construir la sim; fallback al valor heredado del modelo
+            # solo si el mapeo no está disponible.
+            dns_map = getattr(self, "_k8s_dns_by_qkc_id", None) or {}
+            neighbor_host = (
+                dns_map.get(int(neighbor_id))
+                or str(kme.get("neighbor_qkc_ip") or f"dkms-{neighbor_id}")
+            )
             # quditto_url: pod per-link con qkc_ids canónicos
             local_for_link = sorted([int(qkc_id_int), int(neighbor_id)])
             quditto_svc = f"quditto-link-{local_for_link[0]}-{local_for_link[1]}"
@@ -3295,6 +3336,13 @@ class PodDKMS(Pod):
         # common::config::load_config usa Environment::with_prefix("DKMS")
         # con separator("__"). TODOS los separadores entre tokens deben
         # ser "__" (incluido el que separa el prefix del primer campo).
+        # ACK socket: the Generator binds on peer_addr.port + 1000 (=5002
+        # by default) and tells peers to send their ACKs back to this
+        # address. Without ``ack_advertised_endpoint`` the binary would
+        # advertise ``0.0.0.0:5002`` (not DNS-routable). We override with
+        # the pod's Service DNS so peers can actually reach us.
+        ack_port = int(peer_addr_port) + 1000
+        ack_advertised = f"{self.name}:{ack_port}"
         return {
             "RUST_LOG": K8S_DKMS_RUST_LOG,
             "CONFIG_DIR": "/app/config/dkms",
@@ -3310,10 +3358,14 @@ class PodDKMS(Pod):
             "DKMS__tls__key_path": "/app/certs/server.key",
             "DKMS__tls__sae_client_ca": "/app/certs/ca.crt",
             "DKMS__tls__peer_dkms_ca": "/app/certs/ca.crt",
+            "DKMS__generator__ack_advertised_endpoint": ack_advertised,
         }
 
-    def _orr_container(self, image: str, image_pull_policy: str) -> client.V1Container:
-        env = [client.V1EnvVar(name=k, value=v) for k, v in self._orr_runtime_env().items()]
+    def _orr_container(self, image: str, image_pull_policy: str, extra_env: Optional[Dict[str, str]] = None) -> client.V1Container:
+        env_dict = self._orr_runtime_env()
+        if extra_env:
+            env_dict.update(extra_env)
+        env = [client.V1EnvVar(name=k, value=v) for k, v in env_dict.items()]
         return client.V1Container(
             name="orr",
             image=image,
@@ -3805,9 +3857,16 @@ class PodDKMS(Pod):
             host_port = getattr(host, "port", None)
 
         env_payload = self._build_runtime_env_payload()
+        orr_extra_env: Dict[str, str] = {}
         if env_vars:
             for key, value in env_vars.items():
-                env_payload[str(key)] = str(value)
+                # Route ORR-prefixed env vars to the orr sidecar instead of
+                # leaking them into the DKMS container env.
+                key_str = str(key)
+                if key_str.startswith("ORR_") or key_str.startswith("ORR__"):
+                    orr_extra_env[key_str] = str(value)
+                else:
+                    env_payload[key_str] = str(value)
         if K8S_DKMS_RUST_SIDECARS:
             rust_overrides = self._dkms_rust_env_overrides(
                 sdn_host=env_payload.get("DKMS_SDN_HOST"),
@@ -3916,7 +3975,7 @@ class PodDKMS(Pod):
             )
             volumes.append(self._sidecar_volume())
             init_containers.append(self._cert_init_container())
-            containers.append(self._orr_container(image=orr_image, image_pull_policy=image_pull_policy))
+            containers.append(self._orr_container(image=orr_image, image_pull_policy=image_pull_policy, extra_env=orr_extra_env or None))
             containers.append(self._qkc_container(image=qkc_image, image_pull_policy=image_pull_policy))
         if self._observability_enabled():
             volumes.append(
@@ -4128,39 +4187,9 @@ class PodQudittoLink:
 
     # ─── API pública: configmap, pod, service ─────────────────────────
     def crear_config_map(self):
-        existing = self._read_namespaced(
-            self.core_v1_api.read_namespaced_config_map, self._config_map_name,
-        )
-        cm = client.V1ConfigMap(
-            metadata=client.V1ObjectMeta(
-                name=self._config_map_name,
-                labels=self._labels(),
-            ),
-            data={"config.yaml": self._quditto_config_yaml()},
-        )
-        if existing is not None:
-            if existing.metadata is not None:
-                rv = getattr(existing.metadata, "resource_version", None)
-                if rv:
-                    if cm.metadata is None:
-                        cm.metadata = client.V1ObjectMeta(name=self._config_map_name)
-                    cm.metadata.resource_version = rv
-            return self.core_v1_api.replace_namespaced_config_map(
-                name=self._config_map_name,
-                namespace=self.namespace,
-                body=cm,
-            )
-        try:
-            return self.core_v1_api.create_namespaced_config_map(
-                namespace=self.namespace, body=cm,
-            )
-        except ApiException as e:
-            if e.status == 409:
-                return self._read_namespaced(
-                    self.core_v1_api.read_namespaced_config_map,
-                    self._config_map_name,
-                )
-            raise
+        # v3.5: el binario Rust ``quditto`` se configura por CLI args,
+        # no necesita config.yaml. No creamos ConfigMap.
+        return None
 
     def create_pod(
         self,
@@ -4184,37 +4213,20 @@ class PodQudittoLink:
         if image_pull_secret is None and DOCKER_HUB_TOKEN:
             image_pull_secret = DOCKER_HUB_SECRET_NAME
 
-        # v3.4: dos paths según el image:
-        #   - `pablopio/quditto:*` (Rust): CLI propia, sin configmap, sin
-        #     certs (HTTP plano dentro del namespace).
-        #   - cualquier otro (Python `simple_quditto`): config.yaml + certs
-        #     auto-generados + uvicorn workers.
-        is_rust_quditto = "/quditto" in image and "/simple-quditto" not in image
-        if is_rust_quditto:
-            command = [
-                "/usr/local/bin/quditto",
-                "--listen", f"0.0.0.0:{K8S_QUDITTO_PORT}",
-                "--r0", str(self._channel.rate_r0),
-                "--alpha", str(self._channel.rate_alpha),
-                "--distance", str(float(self._channel.distance)),
-                "--max-buffer", str(int(self._channel.max_buffer_size)),
-                "--key-size-bits", "256",
-            ]
-            env_list = [client.V1EnvVar(name="RUST_LOG", value="info")]
-        else:
-            command = [
-                "python", "-m", "simple_quditto",
-                "--config", "/app/config/config.yaml",
-                "--port", str(K8S_QUDITTO_PORT),
-                "--cert", "/app/certs/server.crt",
-                "--key", "/app/certs/server.key",
-                "--workers", "1",
-                "--insecure",
-            ]
-            env_list = [
-                client.V1EnvVar(name="VERBOSE", value=K8S_QUDITTO_VERBOSE),
-                client.V1EnvVar(name="QUDITTO_WORKERS", value="1"),
-            ]
+        # v3.5: Rust-only. El proceso ``quditto`` Rust mantiene UNA
+        # entrada por par (DKMS-A↔DKMS-B) y sirve ambos extremos por
+        # ``key_id`` (link.take_for_dec). HTTP plano dentro del
+        # namespace; el tráfico no sale de la VPC.
+        command = [
+            "/usr/local/bin/quditto",
+            "--listen", f"0.0.0.0:{K8S_QUDITTO_PORT}",
+            "--r0", str(self._channel.rate_r0),
+            "--alpha", str(self._channel.rate_alpha),
+            "--distance", str(float(self._channel.distance)),
+            "--max-buffer", str(int(self._channel.max_buffer_size)),
+            "--key-size-bits", "256",
+        ]
+        env_list = [client.V1EnvVar(name="RUST_LOG", value="info")]
         if env_vars:
             for k, v in env_vars.items():
                 env_list.append(client.V1EnvVar(name=str(k), value=str(v)))
@@ -4249,38 +4261,14 @@ class PodQudittoLink:
                 timeout_seconds=2,
                 failure_threshold=6,
             ),
-            volume_mounts=(
-                [
-                    client.V1VolumeMount(name="logs", mount_path="/app/logs", read_only=False),
-                ]
-                if is_rust_quditto
-                else [
-                    client.V1VolumeMount(
-                        name="config", mount_path="/app/config", read_only=True,
-                    ),
-                    client.V1VolumeMount(
-                        name="certs", mount_path="/app/certs", read_only=False,
-                    ),
-                    client.V1VolumeMount(
-                        name="logs", mount_path="/app/logs", read_only=False,
-                    ),
-                ]
-            ),
+            volume_mounts=[
+                client.V1VolumeMount(name="logs", mount_path="/app/logs", read_only=False),
+            ],
         )
 
-        if is_rust_quditto:
-            volumes = [
-                client.V1Volume(name="logs", empty_dir=client.V1EmptyDirVolumeSource()),
-            ]
-        else:
-            volumes = [
-                client.V1Volume(
-                    name="config",
-                    config_map=client.V1ConfigMapVolumeSource(name=self._config_map_name),
-                ),
-                client.V1Volume(name="certs", empty_dir=client.V1EmptyDirVolumeSource()),
-                client.V1Volume(name="logs", empty_dir=client.V1EmptyDirVolumeSource()),
-            ]
+        volumes = [
+            client.V1Volume(name="logs", empty_dir=client.V1EmptyDirVolumeSource()),
+        ]
 
         labels = self._labels()
         pod_template = client.V1PodTemplateSpec(

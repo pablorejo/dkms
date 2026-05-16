@@ -247,12 +247,17 @@ class Orchestator:
             except (TypeError, ValueError):
                 sdn_port_int = 3000
             sim_id = simulation.id if simulation.id is not None else 0
+            # DKMS Rust derives the SDN HTTP URL as ``grpc_port + 2`` (see
+            # ``dkms/src/main.rs::derive_sdn_http_url``). To match that
+            # convention the SDN HTTP must bind on ``sdn_port_int + 2`` and
+            # the Service must expose both ports — see
+            # ``PodSDN.expose_rust_http_port``.
             env_payload.update({
                 "RUST_LOG": "info",
                 "CONFIG_DIR": "/app/config/sdn",
                 "SDN__node_id": f"sdn-sim-{int(sim_id)}",
                 "SDN__grpc_addr": f"0.0.0.0:{sdn_port_int}",
-                "SDN__http_addr": "0.0.0.0:8081",
+                "SDN__http_addr": f"0.0.0.0:{sdn_port_int + 2}",
                 "SDN__metrics_addr": "0.0.0.0:9102",
                 "SDN__topology_dir": "/app/topology",
             })
@@ -855,19 +860,94 @@ class Orchestator:
                     raise ValueError(
                         f"No se pudo patchear el SDN con la topología: {exc}"
                     ) from exc
+                # Expose the SDN Rust HTTP admin port (grpc+2) so
+                # ``DKMS::generator`` can poll ``/rate/{dkms_id}``.
+                try:
+                    pod_sdn.expose_rust_http_port()
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"No se pudo exponer el puerto HTTP del SDN Rust: {exc}"
+                    ) from exc
             self.pods_sdn[simulation_key] = pod_sdn
 
             # Pasar la topología completa a los DKMS para que cada nodo
             # conozca a todos sus vecinos (misma lógica que SDN_TOPOLOGY_JSON_B64).
             dkms_topology_b64 = sdn_env_vars.get("SDN_TOPOLOGY_JSON_B64", "")
 
+            # Rust DKMS: build peer config map so the Generator can pick
+            # peers with transport=orr and start filling buffer_enc.
+            # Layout: dkms_id_by_qkc_id maps the qkc_id of a DKMS (which
+            # is what shows up as `neighbor_qkc_id` in kmes) to the K8s
+            # Service DNS of the owning DKMS pod and to its ORR id.
+            dkms_meta_by_qkc_id: dict[int, dict[str, Any]] = {}
+            for d in sim.list_dkms or []:
+                orr_o = getattr(d, "orr", None)
+                qkc_o = getattr(orr_o, "qkc", None) if orr_o else None
+                dh = getattr(d, "host", None)
+                if not (qkc_o and dh):
+                    continue
+                try:
+                    qid = int(getattr(qkc_o, "id", 0))
+                    hid = int(getattr(dh, "id", 0))
+                    sae_port = int(getattr(dh, "port", 0) or 4001)
+                except (TypeError, ValueError):
+                    continue
+                orr_id_int = int(getattr(orr_o, "id", 0) or qid)
+                dkms_meta_by_qkc_id[qid] = {
+                    "dns": f"dkms-{hid}",
+                    "sae_port": sae_port,
+                    "orr_id": f"orr-{orr_id_int}",
+                }
+
+            # Make the qkc.toml builder aware of the K8s DNS-name of each
+            # neighbor DKMS pod (its Service is ``dkms-<host_id>``).
+            # ``_qkc_runtime_toml`` reads this map to populate
+            # ``neighbor_peer_addr`` properly instead of using the
+            # legacy 127.0.0.x IP that lives in the model.
+            k8s_dns_by_qkc_id = {qid: meta["dns"] for qid, meta in dkms_meta_by_qkc_id.items()}
+
             for dkms_pod in dkms_pods:
+                # Plumb the qkc_id → DNS map into the pod object so its
+                # `_qkc_runtime_toml` can resolve neighbor service hosts.
+                setattr(dkms_pod, "_k8s_dns_by_qkc_id", k8s_dns_by_qkc_id)
                 dkms_env = {
                     "DKMS_SDN_HOST": sdn_service_host,
                     "DKMS_SDN_PORT": str(sdn_service_port),
                 }
                 if dkms_topology_b64:
                     dkms_env["DKMS_TOPOLOGY_JSON_B64"] = dkms_topology_b64
+                if getattr(pods, "K8S_DKMS_RUST_SIDECARS", False):
+                    # For this DKMS, enumerate its peers from the kmes
+                    # and produce DKMS__peers__<peer>__{endpoint,transport,orr_id}.
+                    my_model = dkms_pod.model
+                    my_qkc = getattr(getattr(my_model, "orr", None), "qkc", None)
+                    seen_peer_qkc_ids: set[int] = set()
+                    for kme in (getattr(my_qkc, "kmes", []) or []):
+                        n_qkc_id = getattr(kme, "neighbor_qkc_id", None)
+                        try:
+                            n_qkc_id = int(n_qkc_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if n_qkc_id in seen_peer_qkc_ids:
+                            continue
+                        meta = dkms_meta_by_qkc_id.get(n_qkc_id)
+                        if not meta:
+                            continue
+                        seen_peer_qkc_ids.add(n_qkc_id)
+                        peer_key = meta["dns"]  # e.g. "dkms-15"
+                        dkms_env[f"DKMS__peers__{peer_key}__endpoint"] = (
+                            f"https://{meta['dns']}:{meta['sae_port']}"
+                        )
+                        dkms_env[f"DKMS__peers__{peer_key}__transport"] = "orr"
+                        dkms_env[f"DKMS__peers__{peer_key}__orr_id"] = meta["orr_id"]
+                        # The sidecar ORR needs to know how to reach the
+                        # peer ORR (gRPC for pubkey bootstrap + onion) and
+                        # map orr_id → qkc_id so ``send_passthrough`` can
+                        # set ``dest_final``. Both maps live in ORR config.
+                        dkms_env[f"ORR__peers__{meta['orr_id']}"] = str(n_qkc_id)
+                        dkms_env[f"ORR__peer_grpc_addrs__{meta['orr_id']}"] = (
+                            f"http://{meta['dns']}:50052"
+                        )
                 self._deploy_pod(
                     dkms_pod,
                     image=self.image_dkms,

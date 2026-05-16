@@ -194,31 +194,61 @@ async fn main() -> Result<()> {
             }
         });
     }
-    let qkc = match QkcClient::connect(&cfg.southbound, None).await {
-        Ok(c) => {
-            info!(endpoint = %cfg.southbound.qkc_endpoint, "qkc client connected");
-            Some(std::sync::Arc::new(c))
+    // Same K8s parallel-startup race as ORR below: QKC sidecar may not
+    // be ready when DKMS hits this. Retry up to 20×1s.
+    let qkc = {
+        let mut last_err: Option<String> = None;
+        let mut connected: Option<std::sync::Arc<QkcClient>> = None;
+        for attempt in 0..20 {
+            match QkcClient::connect(&cfg.southbound, None).await {
+                Ok(c) => {
+                    info!(endpoint = %cfg.southbound.qkc_endpoint, attempt = attempt + 1, "qkc client connected");
+                    connected = Some(std::sync::Arc::new(c));
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+            }
         }
-        Err(e) => {
-            warn!(error = %e, endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable at boot; continuing without it");
-            None
+        if connected.is_none() && last_err.is_some() {
+            warn!(error = %last_err.unwrap(), endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable after 20 retries; continuing without it");
         }
+        connected
     };
     // ORR es opcional por config: si `southbound.orr_endpoint` está
     // vacío/ausente, `connect_opt` devuelve `Ok(None)` sin loguear.
-    let orr = match OrrClient::connect_opt(&cfg.southbound, None).await {
-        Ok(Some(c)) => {
-            info!(
-                endpoint = %cfg.southbound.orr_endpoint.as_deref().unwrap_or(""),
-                "orr client connected",
-            );
-            Some(std::sync::Arc::new(c))
+    // En despliegues K8s con sidecars ORR/QKC en el mismo Pod, los
+    // 3 containers arrancan en paralelo y el DKMS puede llegar a
+    // `connect_opt` antes de que el ORR haya bindado :50052. Hacemos
+    // hasta 20 retries × 1s para absorber la race; si pasada esta
+    // ventana sigue down, lo damos por permanentemente caído.
+    let orr = {
+        let mut last_err: Option<String> = None;
+        let mut connected: Option<std::sync::Arc<OrrClient>> = None;
+        for attempt in 0..20 {
+            match OrrClient::connect_opt(&cfg.southbound, None).await {
+                Ok(Some(c)) => {
+                    info!(
+                        endpoint = %cfg.southbound.orr_endpoint.as_deref().unwrap_or(""),
+                        attempt = attempt + 1,
+                        "orr client connected",
+                    );
+                    connected = Some(std::sync::Arc::new(c));
+                    break;
+                }
+                Ok(None) => break, // not configured
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+            }
         }
-        Ok(None) => None,
-        Err(e) => {
-            warn!(error = %e, "orr unreachable at boot; continuing without it");
-            None
+        if connected.is_none() && last_err.is_some() {
+            warn!(error = %last_err.unwrap(), "orr unreachable after 20 retries; continuing without it");
         }
+        connected
     };
 
     let mut svc = DkmsService::new(

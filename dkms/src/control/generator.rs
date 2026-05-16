@@ -129,7 +129,10 @@ impl Generator {
                 }
             }
         }
-        let ack_endpoint = cfg.generator.ack_socket_addr.map(|a| a.to_string());
+        // Prefer the explicit advertised endpoint (DNS-routable in K8s)
+        // over the bind SocketAddr (which would stringify as 0.0.0.0:PORT).
+        let ack_endpoint = cfg.generator.ack_advertised_endpoint.clone()
+            .or_else(|| cfg.generator.ack_socket_addr.map(|a| a.to_string()));
         Self {
             cfg: Arc::new(cfg.generator.clone()),
             my_dkms_id: cfg.node_id.clone(),
