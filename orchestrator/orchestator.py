@@ -5,9 +5,7 @@ import json
 import os
 import socket
 import sys
-import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Tuple
 from urllib import error as urllib_error
@@ -68,8 +66,6 @@ class Orchestator:
         image_sdn: str | None = None,
         image_dkms: str | None = None,
         image_quditto: str | None = None,
-        image_orr: str | None = None,
-        image_qkc: str | None = None,
         image_pull_secret: str | None = None,
         image_pull_policy: str | None = None,
     ) -> None:
@@ -81,13 +77,6 @@ class Orchestator:
         self.image_sdn = image_sdn or os.getenv("SDN_IMAGE")
         self.image_dkms = image_dkms or os.getenv("DKMS_IMAGE")
         self.image_quditto = image_quditto or os.getenv("QUDITTO_IMAGE")
-        # Rust split (opt-in vía K8S_DKMS_RUST_SIDECARS en pods.py). Si no
-        # se pasan, los defaults vienen del módulo ``pods`` con sus env
-        # vars correspondientes — esto es seguro tener siempre seteado
-        # porque ``PodDKMS.create_pod`` ignora ``orr_image``/``qkc_image``
-        # cuando el flag de sidecars está desactivado.
-        self.image_orr = image_orr or os.getenv("ORR_IMAGE")
-        self.image_qkc = image_qkc or os.getenv("QKC_IMAGE")
         self.image_pull_secret = image_pull_secret or os.getenv("K8S_IMAGE_PULL_SECRET")
         self.image_pull_policy = image_pull_policy or os.getenv("K8S_IMAGE_PULL_POLICY")
         self.namespace_delete_timeout_seconds = max(
@@ -98,29 +87,6 @@ class Orchestator:
             0.2,
             float(os.getenv("K8S_NAMESPACE_DELETE_POLL_INTERVAL_SECONDS", "2")),
         )
-        # Per-simulation locks. FastAPI dispatches sync routes to a
-        # threadpool, so concurrent run/stop/delete on the same simulation
-        # could race the shared pods_* state dicts and the DB writes. The
-        # master lock protects the dict itself; the inner locks serialize
-        # mutations of one simulation without blocking unrelated ones.
-        self._sim_locks_master_lock = threading.Lock()
-        # RLock so delete_simulation -> stop_simulation re-entries don't deadlock.
-        self._sim_locks: Dict[int, threading.RLock] = {}
-
-    def _lock_for_simulation(self, simulation_id: int) -> threading.RLock:
-        with self._sim_locks_master_lock:
-            lock = self._sim_locks.get(simulation_id)
-            if lock is None:
-                lock = threading.RLock()
-                self._sim_locks[simulation_id] = lock
-            return lock
-
-    @contextmanager
-    def _simulation_lock(self, id_simulation: int | str):
-        simulation_id, _ = self._normalize_simulation_id(id_simulation)
-        lock = self._lock_for_simulation(simulation_id)
-        with lock:
-            yield
 
     @staticmethod
     def _normalize_simulation_id(id_simulation: int | str) -> tuple[int, str]:
@@ -269,6 +235,27 @@ class Orchestator:
             # Heartbeat/sweep intervals: irrelevantes con sweeper off,
             # pero los mantenemos para compat si se reactiva.
         }
+        # Rust SDN: bind the gRPC listener to the Service port (legacy
+        # model.host.port, e.g. 3000), seed required SDN__* env vars, and
+        # point the topology_dir to the ConfigMap mount path created by
+        # ``pods.PodSDN.ensure_rust_topology_configmap``.
+        if getattr(pods_module, "K8S_DKMS_RUST_SIDECARS", False):
+            sdn_host = getattr(simulation.sdn, "host", None) if simulation.sdn else None
+            sdn_port = getattr(sdn_host, "port", None) if sdn_host else None
+            try:
+                sdn_port_int = int(sdn_port) if sdn_port is not None else 3000
+            except (TypeError, ValueError):
+                sdn_port_int = 3000
+            sim_id = simulation.id if simulation.id is not None else 0
+            env_payload.update({
+                "RUST_LOG": "info",
+                "CONFIG_DIR": "/app/config/sdn",
+                "SDN__node_id": f"sdn-sim-{int(sim_id)}",
+                "SDN__grpc_addr": f"0.0.0.0:{sdn_port_int}",
+                "SDN__http_addr": "0.0.0.0:8081",
+                "SDN__metrics_addr": "0.0.0.0:9102",
+                "SDN__topology_dir": "/app/topology",
+            })
         canonicalize = getattr(pods_module, "_canonicalize_runtime_dkms_payload", None)
         if not callable(canonicalize):
             return env_payload
@@ -749,10 +736,6 @@ class Orchestator:
             return sim
 
     def run_simulation(self, user_id: int | str, id_simulation: int | str) -> None:
-        with self._simulation_lock(id_simulation):
-            self._run_simulation_locked(user_id, id_simulation)
-
-    def _run_simulation_locked(self, user_id: int | str, id_simulation: int | str) -> None:
         pods = self._load_pods_module()
         normalized_user_id = self._normalize_user_id(user_id)
         simulation_id, simulation_key = self._normalize_simulation_id(id_simulation)
@@ -815,6 +798,26 @@ class Orchestator:
                 dkms_pods.append(dkms_pod)
                 self.pods_dkms[(simulation_key, dkms.id)] = dkms_pod
 
+            # v3.3: desplegar 1 pod quditto por enlace QKD (no por nodo).
+            # Cada `PodQudittoLink` hostea AMBAS vistas (A y B) del enlace
+            # en un único proceso simple_quditto; DKMS-A y DKMS-B hablan
+            # con el mismo pod via DNS K8s. Deploy ANTES que los DKMS para
+            # que las URLs ya resuelvan en el config del primer fetch
+            # (aunque el prefetch worker tiene retry, así evitamos warnings
+            # de transiente al arrancar).
+            link_pods: list[pods.PodQudittoLink] = (
+                pods.build_quditto_link_pods_from_dkms_models(
+                    id_simulation=simulation_key,
+                    dkms_models=sim.list_dkms,
+                )
+            )
+            for link_pod in link_pods:
+                self._deploy_pod(
+                    link_pod,
+                    image=self.image_quditto,
+                    image_pull_secret=self.image_pull_secret,
+                )
+
             if getattr(pods, "K8S_OBSERVABILITY_ENABLED", False):
                 pod_observability = pods.PodObservability(id_simulation=simulation_key)
                 pod_observability.deploy(
@@ -822,6 +825,7 @@ class Orchestator:
                     sdn_pod=pod_sdn,
                     image_pull_secret=self.image_pull_secret,
                     image_pull_policy=self.image_pull_policy,
+                    link_pods=link_pods,
                 )
                 self.pods_observability[simulation_key] = pod_observability
 
@@ -829,12 +833,28 @@ class Orchestator:
                 sim,
                 pods_module=pods,
             )
+            # Rust SDN: generate per-entity topology JSONs into a
+            # ConfigMap that the SDN Pod mounts at /app/topology.
+            if getattr(pods, "K8S_DKMS_RUST_SIDECARS", False):
+                try:
+                    pod_sdn.ensure_rust_topology_configmap(sim.list_dkms or [])
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"No se pudo generar el ConfigMap de topología para SDN: {exc}"
+                    ) from exc
             self._deploy_pod(
                 pod_sdn,
                 image=self.image_sdn,
                 image_pull_secret=self.image_pull_secret,
                 env_vars=sdn_env_vars or None,
             )
+            if getattr(pods, "K8S_DKMS_RUST_SIDECARS", False):
+                try:
+                    pod_sdn.patch_with_rust_topology_volume()
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"No se pudo patchear el SDN con la topología: {exc}"
+                    ) from exc
             self.pods_sdn[simulation_key] = pod_sdn
 
             # Pasar la topología completa a los DKMS para que cada nodo
@@ -854,8 +874,6 @@ class Orchestator:
                     image_pull_secret=self.image_pull_secret,
                     env_vars=dkms_env,
                     quditto_image=self.image_quditto,
-                    orr_image=self.image_orr,
-                    qkc_image=self.image_qkc,
                 )
 
             pod_sdn.create_simulation_ingress(dkms_pods=dkms_pods, sdn_pod=pod_sdn)
@@ -876,10 +894,6 @@ class Orchestator:
             self.uow.commit()
 
     def stop_simulation(self, user_id: int | str, id_simulation: int | str) -> None:
-        with self._simulation_lock(id_simulation):
-            self._stop_simulation_locked(user_id, id_simulation)
-
-    def _stop_simulation_locked(self, user_id: int | str, id_simulation: int | str) -> None:
         pods = self._load_pods_module()
         normalized_user_id = self._normalize_user_id(user_id)
         simulation_id, simulation_key = self._normalize_simulation_id(id_simulation)
@@ -912,15 +926,6 @@ class Orchestator:
             self.uow.commit()
 
     def stop_dkms(
-        self,
-        user_id: int | str,
-        id_simulation: int | str,
-        id_dkms: int | str,
-    ) -> None:
-        with self._simulation_lock(id_simulation):
-            self._stop_dkms_locked(user_id, id_simulation, id_dkms)
-
-    def _stop_dkms_locked(
         self,
         user_id: int | str,
         id_simulation: int | str,
@@ -966,15 +971,6 @@ class Orchestator:
             self.pods_dkms.pop((simulation_key, dkms_id), None)
 
     def start_dkms(
-        self,
-        user_id: int | str,
-        id_simulation: int | str,
-        id_dkms: int | str,
-    ) -> None:
-        with self._simulation_lock(id_simulation):
-            self._start_dkms_locked(user_id, id_simulation, id_dkms)
-
-    def _start_dkms_locked(
         self,
         user_id: int | str,
         id_simulation: int | str,
@@ -1027,48 +1023,21 @@ class Orchestator:
                     "DKMS_SDN_PORT": str(sdn_service_port),
                 },
                 quditto_image=self.image_quditto,
-                orr_image=self.image_orr,
-                qkc_image=self.image_qkc,
             )
             self.pods_dkms[(simulation_key, dkms_id)] = pod_dkms
 
     def delete_simulation(self, user_id: int | str, id_simulation: int | str) -> None:
-        with self._simulation_lock(id_simulation):
-            self._delete_simulation_locked(user_id, id_simulation)
-
-    def _delete_simulation_locked(self, user_id: int | str, id_simulation: int | str) -> None:
         normalized_user_id = self._normalize_user_id(user_id)
         simulation_id, _ = self._normalize_simulation_id(id_simulation)
 
-        # 1. Validate ownership up front; refuse early if the user does not own it.
+        self.stop_simulation(normalized_user_id, simulation_id)
+
         with self.uow:
             sim = self._get_simulation(simulation_id)
             self._ensure_simulation_owner(sim, normalized_user_id)
-
-        # 2. Best-effort k8s teardown. If the namespace was already gone (idempotent
-        # retry, or the user previously cleaned k8s out of band), accept it and
-        # continue to the DB delete instead of leaving the row orphaned.
-        try:
-            self.stop_simulation(normalized_user_id, simulation_id)
-        except ValueError as exc:
-            detail = str(exc).lower()
-            if "no encontrada" in detail or "not found" in detail:
-                # Simulation row vanished between the ownership check and stop;
-                # nothing left to delete.
-                return
-            if "sigue deteniendose" in detail:
-                # k8s reported the namespace is still terminating. Surface the
-                # error so the caller retries; do NOT delete the DB row while
-                # k8s resources may still exist.
-                raise
-
-        # 3. Delete the DB row last. If this fails, the cluster is already clean
-        # so a retry from the user is safe.
-        with self.uow:
             deleted = self.uow.repos.simulations.delete(simulation_id)
             if not deleted:
-                # Treat as idempotent success: nothing to delete.
-                return
+                raise ValueError(f"Simulacion {simulation_id} no encontrada")
             self.uow.commit()
 
 

@@ -2585,9 +2585,154 @@ class PodLoadtest:
 class PodSDN(Pod):
 
     __TYPE__ = "sdn"
+    _RUST_TOPOLOGY_CONFIGMAP_NAME = "sdn-topology"
+    _RUST_TOPOLOGY_VOLUME_NAME = "sdn-topology"
 
     def __init__(self, id_simulation: str, model_sdn: ModelSDN):
         super().__init__(id_simulation, model_sdn)
+
+    def ensure_rust_topology_configmap(self, dkms_models: list[Any]) -> None:
+        """Generates the topology folder the Rust SDN loads at boot.
+
+        Produces flat files ``QKC/<id>.json``, ``ORR/<id>.json``,
+        ``DKMS/<id>.json`` (and ``SAE/<id>.json`` if SAEs are known
+        upfront — currently SAEs register via the orchestator HTTP API
+        post-deploy so we skip them here). The files match the schemas
+        in ``sdn/src/topology.rs::load_from_folder``.
+
+        ConfigMap keys flatten the subfolder (K8s configmap doesn't allow
+        slashes in keys), so we use ``QKC_<id>.json`` and rely on the
+        configmap-to-folder projection done by Kubernetes when mounted
+        with ``items`` paths.
+        """
+        files: dict[str, str] = {}
+        for model_dkms in dkms_models or []:
+            orr = getattr(model_dkms, "orr", None)
+            qkc = getattr(orr, "qkc", None) if orr is not None else None
+            dkms_host = getattr(model_dkms, "host", None)
+            orr_host = getattr(orr, "host", None) if orr else None
+            qkc_host = getattr(qkc, "host", None) if qkc else None
+            if not (qkc and orr and dkms_host and orr_host and qkc_host):
+                continue
+            qkc_id = str(int(getattr(qkc, "id", 0)))
+            orr_id = str(int(getattr(orr, "id", 0)))
+            dkms_id = f"dkms-{int(getattr(dkms_host, 'id', 0))}"
+            qkc_kmes = []
+            for kme in getattr(qkc, "kmes", []) or []:
+                n_id = getattr(kme, "neighbor_qkc_id", None)
+                ch = getattr(kme, "channel", None)
+                channel_payload = {
+                    "distance": _safe_int(getattr(ch, "distance", 0)) or 0,
+                    "quditto_rate_r0": float(getattr(ch, "quditto_rate_r0", 2000.0) or 2000.0),
+                    "quditto_rate_alpha": float(getattr(ch, "quditto_rate_alpha", 0.2) or 0.2),
+                    "quditto_max_buffer_size": _safe_positive_int(getattr(ch, "quditto_max_buffer_size", 500), 500),
+                } if ch else {"distance": 0, "quditto_rate_r0": 2000.0, "quditto_rate_alpha": 0.2, "quditto_max_buffer_size": 500}
+                if n_id is not None:
+                    qkc_kmes.append({"neighbor_qkc_id": str(int(n_id)), "channel": channel_payload})
+            # In K8s the QKC/ORR live INSIDE the DKMS pod (sidecars). The
+            # SDN reaches them via the DKMS Service DNS name + the Rust
+            # binary's listen ports (admin_http=7200 for QKC; gRPC=50052
+            # for ORR). The legacy ``host.ip`` from the model is a
+            # ``127.0.0.x`` IP from the Python era — useless in K8s.
+            dkms_host_id = int(getattr(dkms_host, "id", 0))
+            dkms_service_dns = f"dkms-{dkms_host_id}"
+            files[f"QKC_{qkc_id}.json"] = json.dumps({
+                "id": qkc_id,
+                "host": {
+                    "id": int(getattr(qkc_host, "id", 0)),
+                    "ip": dkms_service_dns,
+                    "port": 7200,
+                },
+                "kmes": qkc_kmes,
+            })
+            files[f"ORR_{orr_id}.json"] = json.dumps({
+                "id": f"orr-{orr_id}",
+                "qkc_id": qkc_id,
+                "host": {
+                    "id": int(getattr(orr_host, "id", 0)),
+                    "ip": dkms_service_dns,
+                    "port": 50052,
+                },
+            })
+            files[f"DKMS_{dkms_id}.json"] = json.dumps({
+                "id": dkms_id,
+                "orr_id": f"orr-{orr_id}",
+                "host": {
+                    "id": dkms_host_id,
+                    "ip": dkms_service_dns,
+                    "port": int(getattr(dkms_host, "port", 0)) or 4001,
+                },
+            })
+        body = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(name=self._RUST_TOPOLOGY_CONFIGMAP_NAME),
+            data=files,
+        )
+        try:
+            self.core_v1_api.create_namespaced_config_map(namespace=self.namespace, body=body)
+        except ApiException as e:
+            if e.status != 409:
+                raise
+            # Update existing.
+            existing = self.core_v1_api.read_namespaced_config_map(
+                name=self._RUST_TOPOLOGY_CONFIGMAP_NAME, namespace=self.namespace,
+            )
+            body.metadata.resource_version = existing.metadata.resource_version
+            self.core_v1_api.replace_namespaced_config_map(
+                name=self._RUST_TOPOLOGY_CONFIGMAP_NAME, namespace=self.namespace, body=body,
+            )
+        self._rust_topology_files = list(files.keys())
+
+    def patch_with_rust_topology_volume(self) -> None:
+        """Patches the SDN Deployment to mount the topology ConfigMap.
+
+        ConfigMap keys can't have slashes, so we use ``items`` to project
+        each ``<TYPE>_<id>.json`` key into ``<TYPE>/<id>.json`` inside the
+        mount. Idempotent: called after ``create_pod`` and re-applies.
+        """
+        keys = getattr(self, "_rust_topology_files", None) or []
+        if not keys:
+            return
+        items = []
+        for k in keys:
+            # k = "QKC_100001.json" → path = "QKC/100001.json"
+            try:
+                prefix, rest = k.split("_", 1)
+            except ValueError:
+                continue
+            items.append({"key": k, "path": f"{prefix}/{rest}"})
+
+        patch_body = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "volumes": [
+                            {
+                                "name": self._RUST_TOPOLOGY_VOLUME_NAME,
+                                "configMap": {
+                                    "name": self._RUST_TOPOLOGY_CONFIGMAP_NAME,
+                                    "items": items,
+                                },
+                            }
+                        ],
+                        "containers": [
+                            {
+                                "name": "sdn",
+                                "volumeMounts": [
+                                    {
+                                        "name": self._RUST_TOPOLOGY_VOLUME_NAME,
+                                        "mountPath": "/app/topology",
+                                        "readOnly": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+        self.apps_v1_api.patch_namespaced_deployment(
+            name=self.name, namespace=self.namespace, body=patch_body,
+        )
 
 
 class PodDKMS(Pod):
@@ -2708,6 +2853,26 @@ class PodDKMS(Pod):
                         continue
                     ports.append((f"pqc-{pqc_port}", pqc_port))
                     seen_ports.add(pqc_port)
+
+        # Rust sidecars: expose the actual ports the Rust binaries bind to
+        # (orr gRPC, qkc TCP/admin/socket, dkms Rust gRPC + metrics). The
+        # SDN reaches the QKC admin HTTP via these, the DKMS Rust gRPC is
+        # used for orchestation, and the QKC peer port for cross-pod hot
+        # path. Idempotent w.r.t. legacy ports above.
+        if K8S_DKMS_RUST_SIDECARS:
+            rust_ports = [
+                ("orr-rust-grpc", K8S_ORR_GRPC_PORT),
+                ("orr-rust-metrics", K8S_ORR_METRICS_PORT),
+                ("qkc-rust-tcp", K8S_QKC_TCP_PORT),
+                ("qkc-rust-local", 7100),
+                ("qkc-rust-admin", 7200),
+                ("dkms-rust-grpc", K8S_DKMS_RUST_GRPC_PORT),
+                ("dkms-rust-metrics", K8S_DKMS_RUST_METRICS_PORT),
+            ]
+            for name, p in rust_ports:
+                if p and p not in seen_ports:
+                    ports.append((name, p))
+                    seen_ports.add(p)
 
         return [
             client.V1ServicePort(name=name, port=port, target_port=port)
