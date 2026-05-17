@@ -53,6 +53,9 @@ node_modules/
 # Personal roadmap / scratch notes (local only)
 tareas.md
 
+# Plots and raw metrics from local test runs (regeneradas en cada sesión)
+tests/plots/
+
 agent-orr-fs-rotation/
 simulation-3.topology.json
 audit_2026_05.md
