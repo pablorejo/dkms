@@ -883,6 +883,111 @@ class Pod:
             and 'service "ingress-nginx-controller-admission" not found' in message
         )
 
+    _RUNTIME_PROXY_SECRET_NAME = "ingress-proxy-tls"
+    _RUNTIME_PROXY_CA_SECRET_NAME = "dkms-rust-sim-ca"
+
+    def _ensure_runtime_proxy_secret(self) -> None:
+        """Idempotent: mints a client cert for nginx-ingress to present at
+        the DKMS backend (mTLS), signed by ``dkms-rust-sim-ca`` so the DKMS
+        trusts it. Skips if the secret already exists.
+
+        Pre-condition: ``dkms-rust-sim-ca`` Secret has been created in this
+        namespace (PodDKMS._ensure_dkms_ca_secret does this on first DKMS
+        deploy). The CA secret holds keys ``ca.crt`` and ``ca.key``.
+        """
+        existing = self._read_namespaced(
+            self.core_v1_api.read_namespaced_secret, self._RUNTIME_PROXY_SECRET_NAME
+        )
+        if existing is not None:
+            return
+
+        ca_secret = self._read_namespaced(
+            self.core_v1_api.read_namespaced_secret, self._RUNTIME_PROXY_CA_SECRET_NAME
+        )
+        if ca_secret is None:
+            raise RuntimeError(
+                f"runtime proxy cert: CA secret {self._RUNTIME_PROXY_CA_SECRET_NAME} "
+                "missing in namespace; PodDKMS must run first"
+            )
+        ca_data = getattr(ca_secret, "data", None) or {}
+        ca_crt_b64 = ca_data.get("ca.crt")
+        ca_key_b64 = ca_data.get("ca.key")
+        if not ca_crt_b64 or not ca_key_b64:
+            raise RuntimeError(
+                f"runtime proxy cert: CA secret {self._RUNTIME_PROXY_CA_SECRET_NAME} "
+                "missing ca.crt or ca.key"
+            )
+        ca_crt_pem = base64.b64decode(ca_crt_b64).decode("utf-8")
+        ca_key_pem = base64.b64decode(ca_key_b64).decode("utf-8")
+
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+        ca_cert = x509.load_pem_x509_certificate(ca_crt_pem.encode())
+        ca_key = serialization.load_pem_private_key(ca_key_pem.encode(), password=None)
+        now = datetime.now(timezone.utc)
+        proxy_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "ingress-proxy"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "DKMS runtime ingress"),
+        ])
+        proxy_cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert.subject)
+            .public_key(proxy_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True, content_commitment=False,
+                    key_encipherment=True, data_encipherment=False,
+                    key_agreement=False, key_cert_sign=False, crl_sign=False,
+                    encipher_only=False, decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.UniformResourceIdentifier("sae://internal/ingress-proxy")]
+                ),
+                critical=False,
+            )
+            .sign(private_key=ca_key, algorithm=hashes.SHA256())
+        )
+        tls_crt_pem = proxy_cert.public_bytes(serialization.Encoding.PEM).decode()
+        tls_key_pem = proxy_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=self._RUNTIME_PROXY_SECRET_NAME),
+            type="Opaque",
+            string_data={
+                "tls.crt": tls_crt_pem,
+                "tls.key": tls_key_pem,
+                "ca.crt": ca_crt_pem,
+            },
+        )
+        try:
+            self.core_v1_api.create_namespaced_secret(
+                namespace=self.namespace, body=body
+            )
+        except ApiException as exc:
+            if exc.status != 409:
+                raise
+
     def _ensure_image_pull_secret(self) -> Optional[client.V1Secret]:
         if not DOCKER_HUB_TOKEN:
             return None
@@ -1522,7 +1627,43 @@ class Pod:
             runtime_annotations: Dict[str, str] = {
                 "nginx.ingress.kubernetes.io/use-regex": "true",
                 "nginx.ingress.kubernetes.io/rewrite-target": "/$2",
+                # El DKMS Rust escucha la API ETSI 014 en HTTPS (TLS server)
+                # — sin esta anotación nginx-ingress envía HTTP plano al
+                # upstream y el handshake TLS falla con
+                # "received corrupt message of type InvalidContentType".
+                "nginx.ingress.kubernetes.io/backend-protocol": "HTTPS",
             }
+            # El DKMS:4001 exige cert cliente (mTLS) en la capa TLS.
+            # Como nginx-ingress termina el mTLS del SAE en el borde,
+            # tiene que volver a presentar UN cert al backend. Le damos
+            # un "ingress-proxy" cert firmado por la misma CA interna
+            # del sim (`dkms-rust-sim-ca`) que el DKMS ya trusta como
+            # `sae_client_ca`. La identidad real del SAE viaja en el
+            # header `ssl-client-cert` (auth-tls-pass-cert-to-upstream),
+            # que el DKMS Rust lee desde dkms:v3+. proxy-ssl-verify=off
+            # porque el cert del backend está firmado por la misma CA
+            # interna y nginx no la tiene en su trust store.
+            try:
+                self._ensure_runtime_proxy_secret()
+                runtime_annotations.update(
+                    {
+                        "nginx.ingress.kubernetes.io/proxy-ssl-secret": (
+                            f"{self.namespace}/{self._RUNTIME_PROXY_SECRET_NAME}"
+                        ),
+                        "nginx.ingress.kubernetes.io/proxy-ssl-verify": "off",
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Sin proxy cert, los enc_keys remotos pegarán 502 en
+                # nginx ("tlsv13 alert certificate required"). Mejor
+                # avisar fuerte y dejar que el operador lo arregle a
+                # mano que romper el deploy entero.
+                from logging import getLogger
+                getLogger(__name__).warning(
+                    "runtime ingress proxy cert mint failed; SAE→DKMS will "
+                    "return 502 until /tmp/patch_sim_ingress.sh %s is run: %s",
+                    self.namespace, exc,
+                )
             read_namespaced = getattr(self, "_read_namespaced", None)
             core_v1_api = getattr(self, "core_v1_api", None)
             can_validate_runtime_mtls = (
@@ -1546,14 +1687,24 @@ class Pod:
                         "Runtime mTLS habilitado pero el secret de CA "
                         f"{self.namespace}/{K8S_RUNTIME_MTLS_CA_SECRET} no contiene ca.crt."
                     )
+                # auth-tls-verify-client: optional → ssl_verify_client optional
+                # a nivel server. No rompe los demás paths del host (UI, /orch,
+                # /login…) porque acepta conexiones sin cert. La obligatoriedad
+                # se aplica per-location vía configuration-snippet, que rechaza
+                # con 401 si $ssl_client_verify != SUCCESS.
                 runtime_annotations.update(
                     {
-                        "nginx.ingress.kubernetes.io/auth-tls-verify-client": "on",
+                        "nginx.ingress.kubernetes.io/auth-tls-verify-client": "optional",
                         "nginx.ingress.kubernetes.io/auth-tls-secret": f"{self.namespace}/{K8S_RUNTIME_MTLS_CA_SECRET}",
                         "nginx.ingress.kubernetes.io/auth-tls-verify-depth": str(
                             K8S_RUNTIME_MTLS_VERIFY_DEPTH
                         ),
                         "nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream": "true",
+                        "nginx.ingress.kubernetes.io/configuration-snippet": (
+                            'if ($ssl_client_verify != "SUCCESS") {\n'
+                            '  return 401 "client certificate required";\n'
+                            "}\n"
+                        ),
                     }
                 )
             elif K8S_RUNTIME_MTLS_ENABLED:

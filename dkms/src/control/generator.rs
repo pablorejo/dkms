@@ -85,23 +85,23 @@ impl BucketState {
 
 #[derive(Clone)]
 pub struct Generator {
-    cfg:          Arc<GeneratorCfg>,
-    my_dkms_id:   String,
+    cfg: Arc<GeneratorCfg>,
+    my_dkms_id: String,
     /// Mapa peer_dkms_id → orr_id, derivado de cfg.peers en el constructor.
     /// Solo se incluyen peers con `transport = "orr"`.
-    peers_orr:    Arc<HashMap<String, String>>,
+    peers_orr: Arc<HashMap<String, String>>,
     /// Rate cacheada por (peer, role). Solo usamos role=Enc para refill.
-    rates_enc:    Arc<Mutex<HashMap<String, f64>>>,
-    buckets:      Arc<Mutex<HashMap<String, BucketState>>>,
+    rates_enc: Arc<Mutex<HashMap<String, f64>>>,
+    buckets: Arc<Mutex<HashMap<String, BucketState>>>,
     /// Contador acumulativo de claves que llegaron a `buffer_enc[peer]`
     /// vía ACK. Permite calcular la **rate efectiva de fill** comparando
     /// dos snapshots — clave para validar la rate asignada por el SDN.
     /// `peer_dkms_id → contador`. Se accede sin lock porque AtomicU64.
     emit_counters: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
-    pool:         Arc<BufferPool>,
+    pool: Arc<BufferPool>,
     pub ack_pending: Arc<AckPendingStore>,
-    orr:          Arc<OrrClient>,
-    sdn_http:     Arc<SdnHttpClient>,
+    orr: Arc<OrrClient>,
+    sdn_http: Arc<SdnHttpClient>,
     ack_endpoint: Option<String>,
     default_max_hops: i32,
 }
@@ -131,7 +131,10 @@ impl Generator {
         }
         // Prefer the explicit advertised endpoint (DNS-routable in K8s)
         // over the bind SocketAddr (which would stringify as 0.0.0.0:PORT).
-        let ack_endpoint = cfg.generator.ack_advertised_endpoint.clone()
+        let ack_endpoint = cfg
+            .generator
+            .ack_advertised_endpoint
+            .clone()
             .or_else(|| cfg.generator.ack_socket_addr.map(|a| a.to_string()));
         Self {
             cfg: Arc::new(cfg.generator.clone()),
@@ -222,11 +225,8 @@ impl Generator {
             tick.tick().await;
             let now = Instant::now();
             let pool_snap = self.pool.snapshot();
-            let ack_snap: HashMap<String, usize> = self
-                .ack_pending
-                .snapshot()
-                .into_iter()
-                .collect();
+            let ack_snap: HashMap<String, usize> =
+                self.ack_pending.snapshot().into_iter().collect();
             let rates_snap = self.rates_enc.lock().clone();
             let counters_snap: HashMap<String, u64> = {
                 let g = self.emit_counters.lock();
@@ -284,7 +284,7 @@ impl Generator {
         };
         let buf = self.pool.for_peer(peer_dkms_id);
         let key = TransportKey {
-            id:    key_id.clone(),
+            id: key_id.clone(),
             bytes: entry.bytes,
         };
         if let Err(rejected) = buf.enc.try_push(key) {
@@ -296,7 +296,8 @@ impl Generator {
             );
             return false;
         }
-        self.counter_for(peer_dkms_id).fetch_add(1, Ordering::Relaxed);
+        self.counter_for(peer_dkms_id)
+            .fetch_add(1, Ordering::Relaxed);
         debug!(peer = peer_dkms_id, key_id = %key_id, "generator.ack ok → buffer_enc");
         true
     }
@@ -375,7 +376,9 @@ impl Generator {
             let cap = (self.cfg.bucket_cap_seconds * rate).max(2.0);
             let tokens = {
                 let mut b = self.buckets.lock();
-                let st = b.entry(peer.clone()).or_insert_with(|| BucketState::new(now));
+                let st = b
+                    .entry(peer.clone())
+                    .or_insert_with(|| BucketState::new(now));
                 st.refill_and_take(now, rate, cap, self.cfg.max_tokens_per_peer_per_tick)
             };
             if tokens == 0 {
@@ -462,11 +465,17 @@ impl Generator {
     }
 
     /// Cada `priority_refresh_ms` recalcula el `BufferQos` de cada peer
-    /// a partir del fill_ratio de `buffer_enc[peer]` (incluyendo el
-    /// `ack_pending` como "en vuelo"). Si la clase cambió respecto a la
-    /// última reportada, POSTea al SDN. El SDN re-computa MCF y la
-    /// siguiente consulta de `get_rates` ya devuelve las nuevas rates
-    /// para que el token bucket per-peer se ajuste.
+    /// a partir del fill_ratio de `buffer_enc[peer]`. Si la clase cambió
+    /// respecto a la última reportada, POSTea al SDN. El SDN re-computa
+    /// MCF y la siguiente consulta de `get_rates` ya devuelve las nuevas
+    /// rates para que el token bucket per-peer se ajuste.
+    ///
+    /// **NB sobre `ack_pending`**: NO lo metemos en el fill_ratio
+    /// porque las keys en-vuelo pueden expirar (acks perdidos cuando el
+    /// `buffer_dec[source]` del receptor está full) y dejar al buffer
+    /// "atascado" en Saturated por culpa de la histéresis. La
+    /// contra-presión ya la da el `max_in_flight` del propio loop de
+    /// emisión.
     async fn run_priority_loop(self: Arc<Self>) {
         // Refresh a la misma cadencia que rates (default 5 s) — basta
         // para reaccionar sin spamear.
@@ -477,7 +486,7 @@ impl Generator {
             let mut updates: Vec<PriorityUpdate> = Vec::new();
             for peer in self.peers_orr.keys() {
                 let buf = self.pool.for_peer(peer);
-                let occupancy = buf.enc.len() + self.ack_pending.pending_count(peer);
+                let occupancy = buf.enc.len();
                 let cap = buf.enc.capacity().max(1);
                 let fill = (occupancy as f64 / cap as f64).clamp(0.0, 1.0);
                 let prev = last_reported.get(peer).copied();
@@ -492,9 +501,9 @@ impl Generator {
                     );
                     updates.push(PriorityUpdate {
                         dkms_id: self.my_dkms_id.clone(),
-                        peer:    peer.clone(),
-                        role:    "enc_keys".into(),
-                        class:   new_class.as_str().into(),
+                        peer: peer.clone(),
+                        role: "enc_keys".into(),
+                        class: new_class.as_str().into(),
                     });
                     last_reported.insert(peer.clone(), new_class);
                 }

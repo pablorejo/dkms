@@ -126,6 +126,57 @@ class Orchestator:
                 f"Simulacion {simulation.id} no pertenece al usuario {user_id}"
             )
 
+    @staticmethod
+    def _resolve_dkms_id(simulation: ModelSimulation, requested_id: int) -> int:
+        """Devuelve el `dkms.id` real (BD) a partir del id que envía el
+        cliente. La UI del editor usa el `node_id` del editor_topology_json
+        (1..N), mientras que la BD asigna IDs autoincrementales (e.g.
+        151..160). Como `_build_model_simulation_from_web` crea los DKMS
+        ordenados por `node_id`, podemos recuperar la correspondencia
+        emparejando `sorted(list_dkms, key=id)` con `sorted(nodes, key=node_id)`.
+
+        Resolución:
+        1. Si `requested_id` matchea directamente un `dkms.id` real → devuelve.
+        2. Si matchea un `node_id` del editor → traduce vía el orden.
+        3. Si no, devuelve `requested_id` (el llamador genera el ValueError).
+        """
+        list_dkms = list(getattr(simulation, "list_dkms", []) or [])
+        if any(int(getattr(d, "id", 0) or 0) == requested_id for d in list_dkms):
+            return requested_id
+        topology_raw = getattr(simulation, "editor_topology_json", None)
+        if not topology_raw:
+            return requested_id
+        try:
+            topology = json.loads(topology_raw)
+        except (TypeError, ValueError):
+            return requested_id
+        # editor_topology_json puede venir en dos formatos:
+        # - BD interna (WebSimulationUpsertRequest): {"nodes": [...], ...}
+        # - JSON exportado/importado: {"extensions": {"editor": {"nodes": [...]}}}
+        # Y los nodos pueden o no tener `node_type` (la BD no lo guarda;
+        # todos los nodos web son DKMS por ahora).
+        nodes = topology.get("nodes") or (
+            topology.get("extensions", {}).get("editor", {}).get("nodes", [])
+        )
+        if not isinstance(nodes, list):
+            return requested_id
+        dkms_nodes = [
+            n for n in nodes
+            if isinstance(n, dict) and n.get("node_type", "DKMS") == "DKMS"
+        ]
+        try:
+            sorted_nodes = sorted(dkms_nodes, key=lambda n: int(n.get("node_id", 0)))
+        except (TypeError, ValueError):
+            return requested_id
+        sorted_dkms = sorted(list_dkms, key=lambda d: int(getattr(d, "id", 0) or 0))
+        for node, dkms in zip(sorted_nodes, sorted_dkms):
+            try:
+                if int(node.get("node_id", 0)) == requested_id:
+                    return int(getattr(dkms, "id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return requested_id
+
     def _purge_loadtest_sae_residue(self, simulation_id: int) -> int:
         """Borra de la DB SAEs loadtest (prefijo ``lt-``) huérfanas.
 
@@ -896,6 +947,11 @@ class Orchestator:
                 dkms_meta_by_qkc_id[qid] = {
                     "dns": f"dkms-{hid}",
                     "sae_port": sae_port,
+                    # peer_port = sae_port + 1 (mismo convenio que
+                    # `_dkms_rust_env_overrides` en pods.py). El
+                    # endpoint DKMS↔DKMS para `POST /kmapi/v1/ext_keys`
+                    # va a esta puerta (router v020.rs, no v014.rs).
+                    "peer_port": sae_port + 1,
                     "orr_id": f"orr-{orr_id_int}",
                 }
 
@@ -963,8 +1019,11 @@ class Orchestator:
                         if n_qkc_id == my_qkc_id:
                             continue
                         peer_key = meta["dns"]  # e.g. "dkms-15"
+                        # peer-plane port (sae_port+1) — `POST /kmapi/v1/ext_keys`
+                        # vive en el router ETSI 020 del peer_addr, no en el
+                        # sae_addr (que es para SAE-facing ETSI 014).
                         dkms_env[f"DKMS__peers__{peer_key}__endpoint"] = (
-                            f"https://{meta['dns']}:{meta['sae_port']}"
+                            f"https://{meta['dns']}:{meta['peer_port']}"
                         )
                         dkms_env[f"DKMS__peers__{peer_key}__transport"] = "orr"
                         dkms_env[f"DKMS__peers__{peer_key}__orr_id"] = meta["orr_id"]
@@ -1049,6 +1108,7 @@ class Orchestator:
                     "Solo se pueden parar DKMS en simulaciones RUNNING."
                 )
 
+            dkms_id = self._resolve_dkms_id(sim, dkms_id)
             model_dkms = next(
                 (dkms for dkms in sim.list_dkms if int(getattr(dkms, "id", 0) or 0) == dkms_id),
                 None,
@@ -1094,6 +1154,7 @@ class Orchestator:
                     "Solo se pueden arrancar DKMS en simulaciones RUNNING."
                 )
 
+            dkms_id = self._resolve_dkms_id(sim, dkms_id)
             model_dkms = next(
                 (dkms for dkms in sim.list_dkms if int(getattr(dkms, "id", 0) or 0) == dkms_id),
                 None,

@@ -89,14 +89,17 @@ impl SecureKeyBuffer {
         self.len() < watermark
     }
 
-    /// Inserta una clave de transporte. Si el buffer está lleno devuelve la
-    /// propia clave al *caller* (no se descarta silenciosamente).
+    /// Inserta una clave de transporte. El `capacity` es **soft-hint**
+    /// para el classify de QoS (fill_ratio); el push real nunca rechaza
+    /// ni descarta. El consumo de RAM se acota porque tanto el generator
+    /// (productor de `enc`) como el receptor ORR (productor de `dec`)
+    /// están limitados por la rate del SDN y el `max_in_flight`, y los
+    /// SAEs van drenando vía `pop_oldest` / `take_by_id`.
+    ///
+    /// El tipo de retorno sigue siendo `Result<…, TransportKey>` para no
+    /// romper callers existentes; ahora siempre devuelve `Ok(())`.
     pub fn try_push(&self, key: TransportKey) -> std::result::Result<(), TransportKey> {
-        let mut q = self.inner.lock();
-        if q.len() >= self.capacity {
-            return Err(key);
-        }
-        q.push_back(key);
+        self.inner.lock().push_back(key);
         Ok(())
     }
 

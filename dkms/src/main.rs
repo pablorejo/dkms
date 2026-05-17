@@ -51,7 +51,12 @@ fn derive_sdn_http_url(grpc_url: &str) -> String {
         .trim_start_matches("https://")
         .trim_start_matches("http://");
     let (host, port_str) = trimmed.rsplit_once(':').unwrap_or((trimmed, "50053"));
-    let port: u16 = port_str.split('/').next().unwrap_or("50053").parse().unwrap_or(50053);
+    let port: u16 = port_str
+        .split('/')
+        .next()
+        .unwrap_or("50053")
+        .parse()
+        .unwrap_or(50053);
     let http_port = if port == 50053 { 50055 } else { port + 2 };
     format!("http://{host}:{http_port}")
 }
@@ -92,39 +97,60 @@ async fn main() -> Result<()> {
     // Construido sólo si algún peer usa `transport = "http"`. En modo
     // ORR-only el PeerHttpClient no se invoca, así que evitamos pagar
     // el coste (y los problemas de TLS backend) cuando nadie lo necesita.
-    use dkms::config::PeerTransport;
-    let needs_http_peer_client = cfg
-        .peers
-        .values()
-        .any(|p| p.transport == PeerTransport::Http);
-    let peer_client = if needs_http_peer_client {
-        Some(Arc::new(
-            PeerHttpClient::build(
-                &cfg.tls.cert_path,
-                &cfg.tls.key_path,
-                &cfg.tls.peer_dkms_ca,
-                cfg.request.clone(),
-            )
-            .context("peer http client")?,
-        ))
-    } else {
-        info!("no http transport peers configured; skipping peer http client");
-        None
-    };
+    // SAE-key delivery DKMS↔DKMS siempre va por HTTP/2 ETSI 020 con
+    // session_key cifrada OTP usando `buffer_enc[peer]`. El ORR queda
+    // dedicado al llenado de los buffers (generator), no al servicio
+    // de SAEs. Por eso el peer_client SIEMPRE se construye —
+    // independientemente de `cfg.peers[*].transport`.
+    let peer_client = Some(Arc::new(
+        PeerHttpClient::build(
+            &cfg.tls.cert_path,
+            &cfg.tls.key_path,
+            &cfg.tls.peer_dkms_ca,
+            cfg.request.clone(),
+        )
+        .context("peer http client")?,
+    ));
 
     // ─── Clientes sur (SDN / QKC / ORR) ──────────────────────────────
     // Cada uno intenta conectar; si falla, se loguea y se sigue con
     // `None`. El DKMS arranca aunque sus vecinos no estén listos —
     // útil en bring-up donde los pods se inician en cualquier orden.
-    let sdn = match SdnClient::connect(&cfg.southbound, None).await {
-        Ok(c) => {
-            info!(endpoint = %cfg.southbound.sdn_endpoint, "sdn client connected");
-            Some(std::sync::Arc::new(c))
+    //
+    // Para SDN aplicamos el mismo patrón de "retry con backoff" que
+    // QKC/ORR (ver abajo). En despliegues K8s donde DKMS y SDN arrancan
+    // en paralelo, un fallo transitorio en el primer intento hace que
+    // `sdn = None` permanentemente: ni `SdnSaeResolver` ni el bucle de
+    // `stream_topology` se cablean, y el DKMS responde 404 para todo
+    // `enc_keys` con peer SAE remoto hasta que lo reinicies.
+    let sdn = {
+        let mut last_err: Option<String> = None;
+        let mut connected: Option<std::sync::Arc<SdnClient>> = None;
+        for attempt in 0..30 {
+            match SdnClient::connect(&cfg.southbound, None).await {
+                Ok(c) => {
+                    info!(
+                        endpoint = %cfg.southbound.sdn_endpoint,
+                        attempt = attempt + 1,
+                        "sdn client connected"
+                    );
+                    connected = Some(std::sync::Arc::new(c));
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+            }
         }
-        Err(e) => {
-            warn!(error = %e, endpoint = %cfg.southbound.sdn_endpoint, "sdn unreachable at boot; continuing without it");
-            None
+        if connected.is_none() {
+            warn!(
+                error = %last_err.unwrap_or_else(|| "unknown".into()),
+                endpoint = %cfg.southbound.sdn_endpoint,
+                "sdn unreachable after 30 retries; continuing without it (404s expected on remote SAE lookups)"
+            );
         }
+        connected
     };
 
     // ─── SAE binding resolver ─────────────────────────────────────────
@@ -270,68 +296,69 @@ async fn main() -> Result<()> {
     // (http_admin del SDN expone GET /rate/{dkms_id}) y rellenará los
     // buffers ENC compartidos contra cada peer.
     let mut ack_socket_addr: Option<std::net::SocketAddr> = cfg.generator.ack_socket_addr;
-    let (generator_arc, ack_client_arc, sae_buf_buckets_arc) = if orr.is_some() && cfg.generator.enabled {
-        // Derivar dirección de ACK socket: si no está explícita, usar
-        // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
-        if ack_socket_addr.is_none() {
-            let mut a = cfg.listen.peer_addr;
-            a.set_port(a.port().wrapping_add(1000));
-            ack_socket_addr = Some(a);
-        }
-        let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
-        let sdn_http = Arc::new(
-            SdnHttpClient::new(
-                sdn_http_url,
-                std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
-            )
-            .context("sdn http client")?,
-        );
-        let mut cfg_with_addr = (*cfg).clone();
-        cfg_with_addr.generator.ack_socket_addr = ack_socket_addr;
-        let ack_pending = Arc::new(AckPendingStore::new());
-        let gen = Generator::new(
-            &cfg_with_addr,
-            orr.as_ref().unwrap().clone(),
-            sdn_http,
-            pool.clone(),
-            ack_pending.clone(),
-        );
-        let gen_arc = gen.spawn_background();
+    let (generator_arc, ack_client_arc, sae_buf_buckets_arc) =
+        if orr.is_some() && cfg.generator.enabled {
+            // Derivar dirección de ACK socket: si no está explícita, usar
+            // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
+            if ack_socket_addr.is_none() {
+                let mut a = cfg.listen.peer_addr;
+                a.set_port(a.port().wrapping_add(1000));
+                ack_socket_addr = Some(a);
+            }
+            let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
+            let sdn_http = Arc::new(
+                SdnHttpClient::new(
+                    sdn_http_url,
+                    std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
+                )
+                .context("sdn http client")?,
+            );
+            let mut cfg_with_addr = (*cfg).clone();
+            cfg_with_addr.generator.ack_socket_addr = ack_socket_addr;
+            let ack_pending = Arc::new(AckPendingStore::new());
+            let gen = Generator::new(
+                &cfg_with_addr,
+                orr.as_ref().unwrap().clone(),
+                sdn_http,
+                pool.clone(),
+                ack_pending.clone(),
+            );
+            let gen_arc = gen.spawn_background();
 
-        // ACK client batched (envía ACKs hacia los `ack_endpoint` que
-        // viajan en el header de los DKMS_BUFFER entrantes).
-        let ack_client = AckClient::new(cfg.node_id.clone());
-        let batched = Arc::new(BatchedAckClient::new(
-            ack_client,
-            32,
-            std::time::Duration::from_millis(50),
-        ));
+            // ACK client batched (envía ACKs hacia los `ack_endpoint` que
+            // viajan en el header de los DKMS_BUFFER entrantes).
+            let ack_client = AckClient::new(cfg.node_id.clone());
+            let batched = Arc::new(BatchedAckClient::new(
+                ack_client,
+                32,
+                std::time::Duration::from_millis(50),
+            ));
 
-        // Servidor TCP de ACKs entrantes.
-        if let Some(addr) = ack_socket_addr {
-            let gen_for_socket = gen_arc.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
-                    warn!(error = %e, "ack_socket server exited");
-                }
-            });
-            info!(%addr, "dkms.ack_socket configured");
-        }
+            // Servidor TCP de ACKs entrantes.
+            if let Some(addr) = ack_socket_addr {
+                let gen_for_socket = gen_arc.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
+                        warn!(error = %e, "ack_socket server exited");
+                    }
+                });
+                info!(%addr, "dkms.ack_socket configured");
+            }
 
-        // SAE buffer buckets dinámicos: comparten el handle de rates SDN
-        // con el Generator para calcular refill = link_capacity / N_SAEs.
-        let sae_buf_buckets = Arc::new(SaeBufferBuckets::new(
-            pool.clone(),
-            gen_arc.rates_handle(),
-            cfg.sae.observation_window_secs,
-            cfg.sae.min_capacity_tokens,
-        ));
+            // SAE buffer buckets dinámicos: comparten el handle de rates SDN
+            // con el Generator para calcular refill = link_capacity / N_SAEs.
+            let sae_buf_buckets = Arc::new(SaeBufferBuckets::new(
+                pool.clone(),
+                gen_arc.rates_handle(),
+                cfg.sae.observation_window_secs,
+                cfg.sae.min_capacity_tokens,
+            ));
 
-        (Some(gen_arc), Some(batched), Some(sae_buf_buckets))
-    } else {
-        info!("generator disabled (no ORR or generator.enabled=false)");
-        (None, None, None)
-    };
+            (Some(gen_arc), Some(batched), Some(sae_buf_buckets))
+        } else {
+            info!("generator disabled (no ORR or generator.enabled=false)");
+            (None, None, None)
+        };
     svc.set_control(generator_arc, ack_client_arc, sae_buf_buckets_arc);
     let _ = ack_socket_addr; // silencia warning si no se usa
 
@@ -362,7 +389,11 @@ async fn main() -> Result<()> {
     });
     let bg_task = tokio::spawn({
         let svc = svc.clone();
-        async move { svc.run_background_tasks().await.map_err(anyhow::Error::from) }
+        async move {
+            svc.run_background_tasks()
+                .await
+                .map_err(anyhow::Error::from)
+        }
     });
 
     let _ = cli; // (silencia warning si no se usa)

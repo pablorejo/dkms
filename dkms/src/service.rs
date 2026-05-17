@@ -17,8 +17,10 @@
 //! 4. Por cada `K` (`number` veces) generamos bytes aleatorios + `key_id`.
 //!    Los SAEs locales autorizados quedan registrados en el `PendingStore`.
 //! 5. Para cada DKMS remoto se envía **una** ETSI 020 (`/kmapi/v1/ext_keys`)
-//!    con sus `target_sae_ids`, envolviendo cada `K` con **una** clave de
-//!    transporte fresca de `buffer_enc[peer]` (AEAD `ChaCha20Poly1305`).
+//!    con sus `target_sae_ids`, cifrando cada `K` con **una** clave de
+//!    transporte fresca de `buffer_enc[peer]` por **OTP puro** (XOR).
+//!    El buffer se rellena en background por el generator vía ORR — el
+//!    transporte SAE-key NO usa ORR.
 //! 6. Política de fallo "a": si cualquier destino DKMS no ACK-ea →
 //!    reembolso de tokens, retracción de las entradas locales y 502.
 //! 7. Si todo OK, se responde al master con un `Etsi014KeyContainer`.
@@ -45,10 +47,6 @@ use std::{
     time::Duration,
 };
 
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
-};
 use futures::future::join_all;
 use rand::{rngs::OsRng, RngCore};
 use serde_json::Value;
@@ -71,15 +69,14 @@ use etsi::{
 
 use crate::{
     admission::Admission,
-    config::{DkmsConfig, PeerTransport},
+    config::DkmsConfig,
     control::{BatchedAckClient, Generator, SaeBufferBuckets},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_FLOW_ID, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
-            HDR_REQUEST_ID, HDR_SAE_DESTINATION, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS,
+            HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_SAE_ORIGIN,
             MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, QkcClient, SdnClient,
@@ -88,10 +85,11 @@ use crate::{
     token_bucket::{compute_cost, SaeBuckets},
 };
 
-/// Tamaño en bytes de la clave de transporte AEAD (ChaCha20-Poly1305).
+/// Tamaño mínimo en bytes de la clave de transporte (la salida QKD por
+/// defecto, alineada con `generator.key_size_bytes = 32`). Se usa para
+/// validar que la clave OTP cubre al menos los tamaños de session_key
+/// que un SAE puede pedir típicamente (256 bits).
 const TRANSPORT_KEY_BYTES: usize = 32;
-/// Tamaño del nonce ChaCha20-Poly1305.
-const NONCE_BYTES: usize = 12;
 
 #[derive(Clone)]
 pub struct DkmsService {
@@ -220,7 +218,8 @@ impl DkmsService {
         body: Etsi014KeyRequest,
         extra_saes_header: Option<&Value>,
     ) -> Result<Etsi014KeyContainer> {
-        body.validate().map_err(|e| DkmsError::BadRequest(e.to_string()))?;
+        body.validate()
+            .map_err(|e| DkmsError::BadRequest(e.to_string()))?;
 
         // 1) Lista efectiva de SAEs destino (slave + additionals).
         let mut authorized: Vec<SaeId> = std::iter::once(slave.clone())
@@ -278,15 +277,13 @@ impl DkmsService {
             1,
             self.cfg.sae.token_unit_bytes,
         ) as f64;
-        let remote_peer_ids: Vec<String> = remote_groups
-            .iter()
-            .map(|(n, _)| n.to_string())
-            .collect();
+        let remote_peer_ids: Vec<String> =
+            remote_groups.iter().map(|(n, _)| n.to_string()).collect();
         if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
             if !remote_peer_ids.is_empty() {
                 if let Err(fail) = sbb.try_admit_many(&remote_peer_ids, master, cost_per_peer) {
                     return Err(DkmsError::RateLimited {
-                        sae:       master.clone(),
+                        sae: master.clone(),
                         requested: fail.requested as u64,
                         available: fail.available as u64,
                     });
@@ -326,48 +323,43 @@ impl DkmsService {
             }
         }
 
-        // 6) Distribuir cada (K, peer DKMS) por el transporte elegido en
-        //    config (ETSI 020 HTTP/2 o ORR gRPC). Particionamos primero
-        //    para no consumir transport keys del pool QKC en el caso ORR
-        //    (donde la cripto la dan onion + OTP por enlace QKC↔QKC).
-        let (http_peers, orr_peers): (Vec<_>, Vec<_>) = remote_groups
-            .iter()
-            .partition(|(node, _)| {
-                self.cfg
-                    .peers
-                    .get(node.as_str())
-                    .map(|p| p.transport == PeerTransport::Http)
-                    .unwrap_or(true) // default = http si no hay entry
-            });
-
-        // 6a) Construcción de envelopes ETSI 020 (síncrono — el pop del
-        //     buffer_enc no debe quedar a medias por un error tardío).
+        // 6) Distribuir cada (K, peer DKMS) **únicamente** por HTTP ETSI
+        //    020 DKMS↔DKMS. La session_key viaja cifrada por OTP con una
+        //    clave fresca del `buffer_enc[peer]`. Ese buffer se rellena
+        //    en background por el generator vía ORR — pero para la SAE
+        //    key-delivery NO se usa ORR como transporte. Esta separación
+        //    deja al ORR como dispositivo de bombeo de material QKD y a
+        //    HTTP+OTP como capa de servicio a SAEs (información-
+        //    teóricamente segura porque OTP con clave QKD).
         let mut envelopes: Vec<(NodeId, Etsi020ExtKeyContainer)> =
-            Vec::with_capacity(http_peers.len());
+            Vec::with_capacity(remote_groups.len());
         let mut transport_keys_consumed = 0usize;
-        for (peer_node, peer_saes) in http_peers.iter() {
+        for (peer_node, peer_saes) in remote_groups.iter() {
             let envelope =
                 self.build_ext_keys_envelope(master, peer_node, peer_saes, &session_keys)?;
             transport_keys_consumed += envelope.keys.len();
-            envelopes.push(((*peer_node).clone(), envelope));
+            envelopes.push((peer_node.clone(), envelope));
         }
 
-        // 6b) Futuros de envío. Un Vec mixto: cada futuro devuelve
-        //     `Result<NodeId, DkmsError>` para que el join_all sea
-        //     uniforme. Las dos ramas comparten política de error.
         type SendFuture =
             std::pin::Pin<Box<dyn std::future::Future<Output = Result<NodeId>> + Send>>;
-        let mut futures: Vec<SendFuture> = Vec::with_capacity(http_peers.len() + orr_peers.len());
+        let mut futures: Vec<SendFuture> = Vec::with_capacity(envelopes.len());
 
         for (peer_node, envelope) in envelopes.into_iter() {
             let pc = self.peer_client.clone().ok_or_else(|| {
                 DkmsError::BadRequest(format!(
-                    "peer dkms {peer_node} requires http transport but peer_client is disabled"
+                    "peer dkms {peer_node} ETSI020 HTTP peer_client missing — \
+                     orchestator misconfig (tls.cert_path/peer_dkms_ca required)"
                 ))
             })?;
-            let peer_cfg = self.cfg.peers.get(peer_node.as_str()).cloned().ok_or_else(|| {
-                DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
-            })?;
+            let peer_cfg = self
+                .cfg
+                .peers
+                .get(peer_node.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
+                })?;
             let peer_id_str = peer_node.to_string();
             let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
             futures.push(Box::pin(async move {
@@ -384,90 +376,8 @@ impl DkmsService {
             }));
         }
 
-        for (peer_node, peer_saes) in orr_peers.into_iter() {
-            let orr = self.orr.clone().ok_or_else(|| DkmsError::PeerOrrMisconfig {
-                peer: peer_node.to_string(),
-                missing: "southbound.orr_endpoint",
-            })?;
-            let peer_cfg = self.cfg.peers.get(peer_node.as_str()).cloned().ok_or_else(|| {
-                DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
-            })?;
-            let dest_orr_id = peer_cfg.orr_id.clone().ok_or_else(|| {
-                DkmsError::PeerOrrMisconfig {
-                    peer: peer_node.to_string(),
-                    missing: "peer.orr_id",
-                }
-            })?;
-            let max_hops = peer_cfg
-                .max_hops
-                .unwrap_or(self.cfg.southbound.default_max_hops);
-            let orr_path_hint = peer_cfg.orr_path.clone();
-            let initiator = master.to_string();
-            let key_bits = body.size;
-            let request_id = Uuid::new_v4().to_string();
-            // Una send_key por (K × target_sae): el receptor maneja
-            // (key_id, sae_destination) → PendingStore.
-            let pairs: Vec<(KeyId, Vec<u8>, SaeId)> = session_keys
-                .iter()
-                .flat_map(|(_uuid, kid, k_bytes)| {
-                    peer_saes
-                        .iter()
-                        .map(move |sae| (kid.clone(), k_bytes.to_vec(), sae.clone()))
-                })
-                .collect();
-            let peer_node_owned = peer_node.clone();
-            let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
-            futures.push(Box::pin(async move {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let mut subfutures = Vec::with_capacity(pairs.len());
-                for (kid, k_bytes, sae) in pairs {
-                    let mut header: BTreeMap<String, String> = BTreeMap::new();
-                    header.insert(HDR_KEY_ID.into(), kid.to_string());
-                    header.insert(HDR_SAE_ORIGIN.into(), initiator.clone());
-                    header.insert(HDR_SAE_DESTINATION.into(), sae.to_string());
-                    header.insert(HDR_KEY_SIZE_BITS.into(), key_bits.to_string());
-                    header.insert(HDR_REQUEST_ID.into(), request_id.clone());
-                    header.insert(HDR_TIMESTAMP_MS.into(), now_ms.to_string());
-                    if let Some(path) = &orr_path_hint {
-                        // Hint para modos onion >=2 / -1: el ORR lee
-                        // app_header["orr_path"] para armar la cebolla.
-                        // Cuando la SDN exista, se calculará allí en
-                        // vez de venir hardcoded en config.
-                        header.insert("orr_path".into(), path.clone());
-                    }
-                    let _ = HDR_FLOW_ID; // reservado para routing por flujo; no se setea hoy.
-                    let orr_cloned = orr.clone();
-                    let dest = dest_orr_id.clone();
-                    subfutures.push(async move {
-                        tokio::time::timeout(send_timeout, orr_cloned.send_key(&dest, k_bytes, header, max_hops)).await
-                    });
-                }
-                for r in join_all(subfutures).await {
-                    match r {
-                        Ok(Ok(_resp)) => {}
-                        Ok(Err(e)) => {
-                            return Err(DkmsError::OrrSendFailed {
-                                peer: peer_node_owned.to_string(),
-                                source: anyhow::anyhow!(e.to_string()),
-                            });
-                        }
-                        Err(_) => {
-                            return Err(DkmsError::PeerAckTimeout {
-                                peer: peer_node_owned.to_string(),
-                            });
-                        }
-                    }
-                }
-                Ok(peer_node_owned)
-            }));
-        }
-
         let results = join_all(futures).await;
-        let failures: Vec<&DkmsError> =
-            results.iter().filter_map(|r| r.as_ref().err()).collect();
+        let failures: Vec<&DkmsError> = results.iter().filter_map(|r| r.as_ref().err()).collect();
         if !failures.is_empty() {
             for e in &failures {
                 error!(error = %e, "key distribution failure");
@@ -547,7 +457,8 @@ impl DkmsService {
         peer: &NodeId,
         body: Etsi020ExtKeyContainer,
     ) -> Result<Etsi020ExtKeyAckContainer> {
-        body.validate().map_err(|e| DkmsError::BadRequest(e.to_string()))?;
+        body.validate()
+            .map_err(|e| DkmsError::BadRequest(e.to_string()))?;
 
         let initiator = SaeId::new(body.initiator_sae_id.clone());
         let authorized: HashSet<SaeId> = body
@@ -573,19 +484,16 @@ impl DkmsService {
                 .and_then(|m| m.get("transport_key_id"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    DkmsError::BadRequest(
-                        "Etsi020Key.extension.transport_key_id missing".into(),
-                    )
+                    DkmsError::BadRequest("Etsi020Key.extension.transport_key_id missing".into())
                 })?
                 .to_owned();
             let tk_id = KeyId::new(transport_key_id.clone());
-            let tk = peer_buffers
-                .dec
-                .take_by_id(&tk_id)
-                .ok_or_else(|| DkmsError::TransportKeyMissing {
+            let tk = peer_buffers.dec.take_by_id(&tk_id).ok_or_else(|| {
+                DkmsError::TransportKeyMissing {
                     peer: peer.to_string(),
                     key_id: transport_key_id,
-                })?;
+                }
+            })?;
 
             let plaintext = unwrap_session_key(tk.bytes.as_slice(), k.value.as_ref())
                 .map_err(DkmsError::Crypto)?;
@@ -624,12 +532,13 @@ impl DkmsService {
         let peer_buffers = self.pool.for_peer(peer_node.as_str());
         let mut etsi_keys = Vec::with_capacity(session_keys.len());
         for (uuid, _kid, k_bytes) in session_keys {
-            let tk = peer_buffers
-                .enc
-                .pop_oldest()
-                .ok_or_else(|| DkmsError::TransportBufferEmpty {
-                    peer: peer_node.to_string(),
-                })?;
+            let tk =
+                peer_buffers
+                    .enc
+                    .pop_oldest()
+                    .ok_or_else(|| DkmsError::TransportBufferEmpty {
+                        peer: peer_node.to_string(),
+                    })?;
             if tk.bytes.len() < TRANSPORT_KEY_BYTES {
                 return Err(DkmsError::Crypto(format!(
                     "transport key too short ({} bytes, need {})",
@@ -637,8 +546,8 @@ impl DkmsService {
                     TRANSPORT_KEY_BYTES
                 )));
             }
-            let ciphertext =
-                wrap_session_key(tk.bytes.as_slice(), k_bytes.as_slice()).map_err(DkmsError::Crypto)?;
+            let ciphertext = wrap_session_key(tk.bytes.as_slice(), k_bytes.as_slice())
+                .map_err(DkmsError::Crypto)?;
             let mut ext = serde_json::Map::new();
             ext.insert(
                 "transport_key_id".to_owned(),
@@ -734,16 +643,23 @@ impl DkmsService {
         msg: common::proto::orr::v1::DeliveredMessage,
     ) -> Result<()> {
         let app = &msg.app_header;
-        let msg_type = app
-            .get(HDR_MSG_TYPE)
-            .map(String::as_str)
-            .unwrap_or(""); // legacy / ETSI020 = vacío
+        let msg_type = app.get(HDR_MSG_TYPE).map(String::as_str).unwrap_or("");
 
         if msg_type == MSG_TYPE_DKMS_BUFFER {
             return self.handle_orr_delivery_buffer(msg).await;
         }
-        // Default: flujo ETSI 020 sobre transporte ORR (existente).
-        self.handle_orr_delivery_etsi020(msg).await
+        // Cualquier otra cosa: el ORR no debe transportar SAE-keys; ese
+        // path va siempre por HTTP ETSI 020 DKMS↔DKMS (OTP con
+        // buffer_enc). Si llega algo legacy con msg_type vacío,
+        // lo descartamos con un WARN para no ensuciar la pending store.
+        let key_id = app.get(HDR_KEY_ID).cloned().unwrap_or_default();
+        warn!(
+            msg_type,
+            key_id,
+            "orr delivery con msg_type no reconocido — descartado; \
+             SAE-keys ya no viajan por ORR (van por HTTP ETSI 020)"
+        );
+        Ok(())
     }
 
     /// Maneja un `DKMS_BUFFER` entrante: el peer DKMS_A está rellenando
@@ -756,7 +672,9 @@ impl DkmsService {
         let app = &msg.app_header;
         let key_id_str = app
             .get(HDR_KEY_ID)
-            .ok_or_else(|| DkmsError::BadRequest(format!("orr buffer delivery missing {HDR_KEY_ID}")))?
+            .ok_or_else(|| {
+                DkmsError::BadRequest(format!("orr buffer delivery missing {HDR_KEY_ID}"))
+            })?
             .clone();
         let source_dkms = app
             .get(HDR_SAE_ORIGIN)
@@ -766,7 +684,9 @@ impl DkmsService {
             .clone();
         let ack_endpoint = app.get(HDR_ACK_ENDPOINT).cloned();
 
-        let bits = app.get(HDR_KEY_SIZE_BITS).and_then(|v| v.parse::<u32>().ok());
+        let bits = app
+            .get(HDR_KEY_SIZE_BITS)
+            .and_then(|v| v.parse::<u32>().ok());
         if let Some(bits) = bits {
             let expected = (bits as usize).div_ceil(8);
             if msg.payload.len() != expected {
@@ -783,20 +703,18 @@ impl DkmsService {
             id: key_id.clone(),
             bytes: zeroize::Zeroizing::new(msg.payload),
         };
-        if let Err(rejected) = buf.dec.try_push(key) {
-            warn!(
-                source = %source_dkms,
-                key_id = %rejected.id,
-                "dkms_buffer delivery: buffer_dec full, dropping key",
-            );
-            // Aún así mandamos ACK; el peer asumiría ack_timeout y
-            // regeneraría — pero como queremos el feedback explícito
-            // de drop, lo dejamos pendiente y dejamos que su reaper
-            // expire (más coherente con la semántica del Python).
-            return Ok(());
-        }
+        // `try_push` ahora es soft-hint en capacidad (nunca rechaza).
+        // El cap antiguo provocaba un deadlock cuando el dec se llenaba:
+        // se dropeaba la key, no se enviaba ACK, el `ack_pending` del
+        // source expiraba, y como su métrica de fill incluía
+        // `enc + ack_pending` quedaba atascado en `Saturated` con
+        // SDN-rate=0. Ahora siempre push + siempre ACK; el RAM se
+        // acota por la rate del SDN y los SAEs drenan vía pop.
+        let _ = buf.dec.try_push(key);
 
-        // ACK best-effort vía socket TCP plano.
+        // ACK siempre (TCP plano, no ORR), batched por
+        // `BatchedAckClient` para amortizar el coste de open/close
+        // bajo carga sostenida.
         if let Some(ep) = ack_endpoint {
             if let Some(client) = self.ack_client.clone() {
                 client.enqueue(ep, key_id_str.clone()).await;
@@ -824,60 +742,6 @@ impl DkmsService {
         Ok(())
     }
 
-    /// Flujo ETSI 020 clásico sobre ORR (existente). Inserta en
-    /// `PendingStore` para que un SAE haga `dec_keys` después.
-    async fn handle_orr_delivery_etsi020(
-        &self,
-        msg: common::proto::orr::v1::DeliveredMessage,
-    ) -> Result<()> {
-        let app = &msg.app_header;
-        let key_id_str = app
-            .get(HDR_KEY_ID)
-            .ok_or_else(|| DkmsError::BadRequest(format!("orr delivery missing {HDR_KEY_ID}")))?;
-        let initiator = app
-            .get(HDR_SAE_ORIGIN)
-            .ok_or_else(|| DkmsError::BadRequest(format!("orr delivery missing {HDR_SAE_ORIGIN}")))?
-            .clone();
-        let dest_sae = app
-            .get(HDR_SAE_DESTINATION)
-            .ok_or_else(|| {
-                DkmsError::BadRequest(format!("orr delivery missing {HDR_SAE_DESTINATION}"))
-            })?
-            .clone();
-        let key_size = app.get(HDR_KEY_SIZE_BITS).and_then(|v| v.parse::<u32>().ok());
-        let request_id = app.get(HDR_REQUEST_ID).cloned();
-        let _flow_id = app.get(HDR_FLOW_ID).cloned();
-        let _ts_ms = app.get(HDR_TIMESTAMP_MS).cloned();
-
-        if let Some(bits) = key_size {
-            let expected = (bits as usize).div_ceil(8);
-            if msg.payload.len() != expected {
-                return Err(DkmsError::BadRequest(format!(
-                    "orr delivery {key_id_str}: payload {} bytes, header says {bits} bits ({expected} bytes)",
-                    msg.payload.len()
-                )));
-            }
-        }
-
-        let key_id = KeyId::new(key_id_str.clone());
-        let initiator_sae = SaeId::new(initiator);
-        let mut authorized: HashSet<SaeId> = HashSet::new();
-        authorized.insert(SaeId::new(dest_sae));
-
-        self.pending.insert(
-            key_id,
-            initiator_sae,
-            authorized,
-            msg.payload,
-            None,
-        );
-        debug!(
-            key_id = %key_id_str,
-            request_id = ?request_id,
-            "orr delivery (ETSI020) → pending store",
-        );
-        Ok(())
-    }
 }
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────
@@ -895,36 +759,41 @@ fn generate_session_keys(n: u32, size_bytes: usize) -> Vec<(Uuid, KeyId, Zeroizi
     out
 }
 
-/// Envuelve `k` con AEAD usando los primeros 32 bytes de `transport`.
-/// El nonce (12 bytes) se prepende al ciphertext: `nonce || ct || tag`.
+/// Cifra `k` con **OTP puro** (XOR) usando los primeros `k.len()` bytes
+/// de `transport`. La clave QKD-distribuida actúa como one-time-pad:
+/// se usa una sola vez y se quema (el llamador es responsable de
+/// `take_by_id` / `pop_oldest` en el buffer).
+///
+/// La integridad la garantiza la capa TLS (mTLS DKMS↔DKMS); por eso
+/// OTP-only es suficiente — no añadimos MAC.
 fn wrap_session_key(transport: &[u8], k: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    if transport.len() < TRANSPORT_KEY_BYTES {
-        return Err(format!("transport key too short ({} bytes)", transport.len()));
+    if transport.len() < k.len() {
+        return Err(format!(
+            "transport key too short for OTP ({} bytes, session key {} bytes)",
+            transport.len(),
+            k.len()
+        ));
     }
-    let cipher = ChaCha20Poly1305::new_from_slice(&transport[..TRANSPORT_KEY_BYTES])
-        .map_err(|e| e.to_string())?;
-    let mut nonce_bytes = [0u8; NONCE_BYTES];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ct = cipher.encrypt(nonce, k).map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(NONCE_BYTES + ct.len());
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ct);
+    let mut out = Vec::with_capacity(k.len());
+    for (kb, tb) in k.iter().zip(transport.iter()) {
+        out.push(kb ^ tb);
+    }
     Ok(out)
 }
 
 fn unwrap_session_key(transport: &[u8], wire: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    if wire.len() < NONCE_BYTES + 16 {
-        return Err("ciphertext too short".into());
+    if transport.len() < wire.len() {
+        return Err(format!(
+            "transport key too short for OTP ({} bytes, ciphertext {} bytes)",
+            transport.len(),
+            wire.len()
+        ));
     }
-    if transport.len() < TRANSPORT_KEY_BYTES {
-        return Err(format!("transport key too short ({} bytes)", transport.len()));
+    let mut out = Vec::with_capacity(wire.len());
+    for (wb, tb) in wire.iter().zip(transport.iter()) {
+        out.push(wb ^ tb);
     }
-    let cipher = ChaCha20Poly1305::new_from_slice(&transport[..TRANSPORT_KEY_BYTES])
-        .map_err(|e| e.to_string())?;
-    let (nonce_bytes, ct) = wire.split_at(NONCE_BYTES);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ct).map_err(|e| e.to_string())
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -932,12 +801,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrap_unwrap_roundtrip() {
+    fn otp_wrap_unwrap_roundtrip() {
         let mut transport = vec![0u8; TRANSPORT_KEY_BYTES];
         OsRng.fill_bytes(&mut transport);
         let k = b"this is a session key K".to_vec();
         let wire = wrap_session_key(&transport, &k).unwrap();
+        assert_eq!(wire.len(), k.len(), "OTP ciphertext has same length as plaintext");
         let pt = unwrap_session_key(&transport, &wire).unwrap();
         assert_eq!(pt, k);
+    }
+
+    #[test]
+    fn otp_rejects_short_transport_key() {
+        let transport = vec![0u8; 8];
+        let k = vec![0u8; 32];
+        assert!(wrap_session_key(&transport, &k).is_err());
     }
 }

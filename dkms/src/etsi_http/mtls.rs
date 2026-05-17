@@ -21,7 +21,7 @@ use anyhow::Result;
 use axum::{body::Body, Router};
 use hyper::{body::Incoming, service::service_fn, Request};
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto,
 };
 use tokio::net::TcpListener;
@@ -82,7 +82,17 @@ pub async fn serve_mtls(
 
             let io = TokioIo::new(tls_stream);
             let mut builder = auto::Builder::new(TokioExecutor::new());
-            builder.http2().keep_alive_interval(std::time::Duration::from_secs(20));
+            // `keep_alive_interval` requiere un timer global; sin él
+            // hyper 1.x panickea `"You must supply a timer."` la primera
+            // vez que el conexión llega al programador del keep-alive.
+            // El cliente DKMS↔DKMS (reqwest) viene con HTTP/2
+            // prior-knowledge, así que en la práctica el server entra por
+            // la rama `http2()`; conectamos el timer Tokio para que el
+            // keep-alive ping no rompa la conexión a mitad de request.
+            builder
+                .http2()
+                .timer(TokioTimer::new())
+                .keep_alive_interval(std::time::Duration::from_secs(20));
 
             if let Err(e) = builder.serve_connection(io, svc).await {
                 debug!(%peer_addr, error = %e, "conn closed");
