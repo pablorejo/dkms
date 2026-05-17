@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::topology::{edge_key, EdgeKey, Topology};
 
@@ -302,117 +302,118 @@ impl McfSolver {
     /// Run the solver. `weights` maps `flow_id → w_f`; missing flows
     /// default to `1.0`. Flows with weight `≤ 0` are excluded entirely
     /// (the caller is expected to override their rate to 0 outside).
+    ///
+    /// Strategy: **hybrid two-tier weighted max-min**.
+    ///
+    /// * **HIGH tier** (`w ≥ TIER_THRESHOLD`): the upper QoS classes
+    ///   (Priority, Important, Quickly) compete for the full edge
+    ///   capacity via weighted max-min — decade-spaced weights give
+    ///   them a 10×/100× ratio without starving each other.
+    /// * **LOW tier** (`0 < w < TIER_THRESHOLD`): the lower classes
+    ///   (Relax, BestEffort) see only the **residual** capacity left
+    ///   by the HIGH tier. Strict between tiers, max-min within.
+    ///
+    /// With the default class weights (Pri=10000, Imp=1000, Qkly=100,
+    /// Relax=10, BE=1), `TIER_THRESHOLD = 100.0` puts the natural
+    /// boundary between Quickly and Relax.
     pub fn solve(
         &self,
         commodities: &[Commodity],
         capacities: &HashMap<EdgeKey, f64>,
         weights: &HashMap<String, f64>,
     ) -> McfSnapshot {
-        self.strict_priority_within_class(commodities, capacities, weights)
-    }
+        const TIER_THRESHOLD: f64 = 100.0;
 
-    // -------------------------------------------------------- SP + RR
+        let weight_of = |c: &Commodity| weights.get(&c.flow_id()).copied().unwrap_or(1.0);
+        let high: Vec<&Commodity> = commodities
+            .iter()
+            .filter(|c| weight_of(c) >= TIER_THRESHOLD)
+            .collect();
+        let low: Vec<&Commodity> = commodities
+            .iter()
+            .filter(|c| {
+                let w = weight_of(c);
+                w > 0.0 && w < TIER_THRESHOLD
+            })
+            .collect();
 
-    fn strict_priority_within_class(
-        &self,
-        commodities: &[Commodity],
-        capacities: &HashMap<EdgeKey, f64>,
-        weights: &HashMap<String, f64>,
-    ) -> McfSnapshot {
-        if commodities.is_empty() {
-            return McfSnapshot::default();
-        }
-
-        // Bucket commodities by their declared weight, descending.
-        let mut by_weight: BTreeMap<OrderedF64, Vec<&Commodity>> = BTreeMap::new();
-        for c in commodities {
-            let w = weights.get(&c.flow_id()).copied().unwrap_or(1.0);
-            by_weight.entry(OrderedF64(w)).or_default().push(c);
-        }
-
-        let mut remaining_caps: HashMap<EdgeKey, f64> = capacities.clone();
+        // First pass: HIGH tier on the full capacity.
         let mut snap = McfSnapshot::default();
-
-        info!(
-            classes = by_weight.len(),
-            total_flows = commodities.len(),
-            edges = remaining_caps.len(),
-            "strict_priority start"
-        );
-
-        // Iterate descending — BTreeMap is ascending, so reverse.
-        for (OrderedF64(cls_w), class_flows) in by_weight.iter().rev() {
-            if class_flows.is_empty() {
-                continue;
-            }
-            if remaining_caps.values().all(|c| *c <= 1e-9) {
-                info!(
-                    weight = cls_w,
-                    flows = class_flows.len(),
-                    "class skipped (capacity exhausted)"
-                );
-                continue;
-            }
-
-            // Within a class everybody has equal share (the priority is
-            // expressed by the class, not by weight magnitude).
-            let equal_weights: HashMap<String, f64> =
-                class_flows.iter().map(|c| (c.flow_id(), 1.0)).collect();
-
-            let sub = self.proportional_fair(class_flows, &remaining_caps, &equal_weights);
-
-            // Merge sub-snapshot into the global one.
-            for (fid, r) in &sub.rates {
-                snap.rates.insert(fid.clone(), *r);
-            }
-            for (dkms, m) in &sub.rates_by_dkms {
-                snap.rates_by_dkms
-                    .entry(dkms.clone())
-                    .or_default()
-                    .extend(m.clone());
-            }
-            for (u, ft) in &sub.forwarding {
-                let merged = snap.forwarding.entry(u.clone()).or_default();
-                for (fid, entries) in ft {
-                    merged.insert(fid.clone(), entries.clone());
-                }
-            }
-
-            // Subtract usage along each flow's shortest path.
-            for c in class_flows {
-                let r = sub.rates.get(&c.flow_id()).copied().unwrap_or(0.0);
-                if r <= 0.0 {
-                    continue;
-                }
-                let Some(p) = c.paths.first() else { continue };
-                for (u, v) in p.iter().zip(p.iter().skip(1)) {
-                    let k = edge_key(u, v);
-                    if let Some(cap) = remaining_caps.get_mut(&k) {
-                        *cap = (*cap - r).max(0.0);
-                    }
-                }
-            }
-
-            debug!(
-                weight = cls_w,
-                flows = class_flows.len(),
-                cap_min = remaining_caps
-                    .values()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min),
-                "class done"
-            );
+        let mut remaining = capacities.clone();
+        if !high.is_empty() {
+            let sub = self.weighted_maxmin(&high, &remaining, weights);
+            self.subtract_usage(&mut remaining, &high, &sub);
+            self.merge_into(&mut snap, sub);
         }
-
+        // Second pass: LOW tier on what's left.
+        if !low.is_empty() && remaining.values().any(|c| *c > 1e-9) {
+            let sub = self.weighted_maxmin(&low, &remaining, weights);
+            self.merge_into(&mut snap, sub);
+        }
+        debug!(
+            high = high.len(),
+            low = low.len(),
+            flows_with_rate = snap.rates.len(),
+            "hybrid solve done"
+        );
         snap
     }
 
-    // -------------------------------------------------------- Water-filling
-    //
-    // Proportional-fair single-path solver. Pure-Rust port of the
-    // Python `_solve_proportional_fair`.
+    /// Subtract flow rates from `remaining` along each commodity's
+    /// first path. Defensive bound at 0 to guard against fp noise.
+    fn subtract_usage(
+        &self,
+        remaining: &mut HashMap<EdgeKey, f64>,
+        commodities: &[&Commodity],
+        snap: &McfSnapshot,
+    ) {
+        for c in commodities {
+            let r = snap.rates.get(&c.flow_id()).copied().unwrap_or(0.0);
+            if r <= 0.0 {
+                continue;
+            }
+            let Some(p) = c.paths.first() else { continue };
+            for (u, v) in p.iter().zip(p.iter().skip(1)) {
+                let k = edge_key(u, v);
+                if let Some(cap) = remaining.get_mut(&k) {
+                    *cap = (*cap - r).max(0.0);
+                }
+            }
+        }
+    }
 
-    fn proportional_fair(
+    fn merge_into(&self, dst: &mut McfSnapshot, src: McfSnapshot) {
+        for (fid, r) in src.rates {
+            dst.rates.insert(fid, r);
+        }
+        for (dkms, m) in src.rates_by_dkms {
+            dst.rates_by_dkms.entry(dkms).or_default().extend(m);
+        }
+        for (qkc, ft) in src.forwarding {
+            let merged = dst.forwarding.entry(qkc).or_default();
+            for (fid, entries) in ft {
+                merged.insert(fid, entries);
+            }
+        }
+    }
+
+    // -------------------------------------------------------- Weighted max-min
+    //
+    // Progressive-filling algorithm — at each iteration grow every
+    // active flow by `w_i × Δ` where Δ is the largest increment any
+    // edge can absorb. The first edge to saturate freezes the flows
+    // passing through it; the remaining flows keep growing on the
+    // remaining capacity. Repeat until no flow is active.
+    //
+    // Properties (with decade-spaced class weights):
+    // * Within a tier, Priority gets ≈10× Important's rate on a shared
+    //   edge; no class is pinned to 0.
+    // * Caller (`solve`) supplies the per-tier commodity subset; this
+    //   routine doesn't know about tiers.
+    // * O(F × E) per iteration, at most E iterations → O(F × E²).
+    //   For the typical sim (12 flows × 6 edges) this is trivial.
+
+    fn weighted_maxmin(
         &self,
         commodities: &[&Commodity],
         capacities: &HashMap<EdgeKey, f64>,
@@ -423,8 +424,7 @@ impl McfSolver {
             return snap;
         }
 
-        // Stable edge ordering — required so the solver is reproducible
-        // even when the capacity HashMap iterates in arbitrary order.
+        // Stable edge ordering.
         let edge_list: Vec<EdgeKey> = {
             let mut v: Vec<_> = capacities.keys().cloned().collect();
             v.sort();
@@ -435,93 +435,94 @@ impl McfSolver {
         let n_edges = edge_list.len();
         let n_flows = commodities.len();
 
-        // Per-flow: list of edge indices traversed by its first path.
-        // Per-edge: list of flow indices passing through it.
+        // Per-flow edges. Flows without a path are excluded.
         let mut flow_edges: Vec<Vec<usize>> = vec![vec![]; n_flows];
-        let mut edge_flows: Vec<Vec<usize>> = vec![vec![]; n_edges];
         for (i, c) in commodities.iter().enumerate() {
             let Some(p) = c.paths.first() else { continue };
             for ek in path_edges(p) {
                 if let Some(&e) = edge_idx.get(&ek) {
                     flow_edges[i].push(e);
-                    edge_flows[e].push(i);
                 }
             }
         }
 
-        let weights_arr: Vec<f64> = commodities
+        let flow_weights: Vec<f64> = commodities
             .iter()
-            .map(|c| weights.get(&c.flow_id()).copied().unwrap_or(1.0).max(1e-9))
+            .map(|c| weights.get(&c.flow_id()).copied().unwrap_or(1.0))
             .collect();
         let caps: Vec<f64> = edge_list.iter().map(|k| capacities[k]).collect();
 
-        // Heuristic init: λ_e starts at the count of flows that touch
-        // edge e (at least 1.0). Same shape as the Python init —
-        // `np.maximum(total_demand_per_edge, 1.0)`.
-        let mut lam: Vec<f64> = edge_flows
-            .iter()
-            .map(|fs| (fs.len() as f64).max(1.0))
+        let mut rates = vec![0.0_f64; n_flows];
+        let mut remaining = caps.clone();
+        // Active iff weight > 0 AND has at least one edge in the graph.
+        let mut active: Vec<bool> = (0..n_flows)
+            .map(|i| flow_weights[i] > 0.0 && !flow_edges[i].is_empty())
             .collect();
 
-        // Hyper-parameters — same defaults as the Python (no env-var
-        // override; we'll add a config knob if it turns out to matter).
-        let max_iter = 200usize;
-        let tol = 1e-3_f64;
-        let eta = 0.5_f64;
         const EPS: f64 = 1e-9;
-        const LAM_LO: f64 = 1e-12;
-        const LAM_HI: f64 = 1e12;
-
-        let mut rates = vec![0.0_f64; n_flows];
-        let mut viol = f64::INFINITY;
-        let mut iter_count = 0;
-
-        for it in 0..max_iter {
-            iter_count = it + 1;
-
-            // denom[i] = Σ λ_e for e in flow i's path.
-            for i in 0..n_flows {
-                let mut s = 0.0;
-                for &e in &flow_edges[i] {
-                    s += lam[e];
-                }
-                rates[i] = weights_arr[i] / s.max(EPS);
-            }
-
-            // usage[e] = Σ rates[i] for i flowing through e.
-            // rel_excess = (usage − cap) / cap.
-            // λ ← λ · exp(η · rel_excess), clipped.
-            viol = 0.0;
-            for e in 0..n_edges {
-                let mut usage = 0.0;
-                for &i in &edge_flows[e] {
-                    usage += rates[i];
-                }
-                let cap = caps[e].max(EPS);
-                let rel = (usage - caps[e]) / cap;
-                viol = viol.max(rel.abs());
-                lam[e] = (lam[e] * (eta * rel).exp()).clamp(LAM_LO, LAM_HI);
-            }
-
-            if viol < tol {
+        let mut guard = 0usize; // hard cap, in case of pathological input
+        loop {
+            guard += 1;
+            if guard > n_edges + 2 {
+                debug!("weighted_maxmin: guard tripped at iter {guard}");
                 break;
             }
-        }
-
-        // Defensive projection: if an edge is still over cap by more
-        // than `tol`, scale down the flows that share it.
-        for e in 0..n_edges {
-            let usage: f64 = edge_flows[e].iter().map(|&i| rates[i]).sum();
-            if usage > caps[e] * (1.0 + tol) && usage > EPS {
-                let scale = caps[e] / usage;
-                for &i in &edge_flows[e] {
-                    rates[i] *= scale;
+            // Sum of active flow weights traversing each edge.
+            let mut edge_w: Vec<f64> = vec![0.0; n_edges];
+            for i in 0..n_flows {
+                if !active[i] {
+                    continue;
+                }
+                for &e in &flow_edges[i] {
+                    edge_w[e] += flow_weights[i];
                 }
             }
-        }
-        for r in &mut rates {
-            if *r < 0.0 {
-                *r = 0.0;
+            // Largest Δ that fits in every edge.
+            let mut delta = f64::INFINITY;
+            for e in 0..n_edges {
+                if edge_w[e] > EPS && remaining[e] > EPS {
+                    let d = remaining[e] / edge_w[e];
+                    if d < delta {
+                        delta = d;
+                    }
+                }
+            }
+            if !delta.is_finite() || delta <= EPS {
+                break;
+            }
+            // Grow active flows.
+            for i in 0..n_flows {
+                if active[i] {
+                    rates[i] += flow_weights[i] * delta;
+                }
+            }
+            // Subtract consumed capacity.
+            for e in 0..n_edges {
+                if edge_w[e] > EPS {
+                    remaining[e] -= edge_w[e] * delta;
+                    if remaining[e] < EPS {
+                        remaining[e] = 0.0;
+                    }
+                }
+            }
+            // Freeze flows through any saturated edge.
+            let saturated: Vec<usize> = (0..n_edges)
+                .filter(|&e| remaining[e] <= EPS)
+                .collect();
+            if saturated.is_empty() {
+                // No edge tightened — defensively bail to avoid spinning.
+                break;
+            }
+            for i in 0..n_flows {
+                if !active[i] {
+                    continue;
+                }
+                if flow_edges[i].iter().any(|e| saturated.contains(e)) {
+                    active[i] = false;
+                }
+            }
+            if !active.iter().any(|&a| a) {
+                break;
             }
         }
 
@@ -533,8 +534,6 @@ impl McfSolver {
             }
             let fid = c.flow_id();
             snap.rates.insert(fid.clone(), total);
-
-            // Single-path: omega = 1.0 along the first path.
             if let Some(p) = c.paths.first() {
                 for w in p.windows(2) {
                     let u = &w[0];
@@ -548,7 +547,6 @@ impl McfSolver {
                     }
                 }
             }
-
             snap.rates_by_dkms
                 .entry(c.src_dkms.clone())
                 .or_default()
@@ -562,35 +560,10 @@ impl McfSolver {
         debug!(
             flows = n_flows,
             edges = n_edges,
-            iters = iter_count,
-            viol = viol,
-            "proportional_fair done"
+            iters = guard,
+            "weighted_maxmin done"
         );
         snap
-    }
-}
-
-// f64 wrapper with total ordering, for use as BTreeMap key in
-// strict_priority_within_class. NaN is sorted as the smallest value.
-#[derive(Debug, Clone, Copy)]
-struct OrderedF64(f64);
-
-impl PartialEq for OrderedF64 {
-    fn eq(&self, o: &Self) -> bool {
-        self.0.to_bits() == o.0.to_bits()
-    }
-}
-impl Eq for OrderedF64 {}
-impl PartialOrd for OrderedF64 {
-    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(o))
-    }
-}
-impl Ord for OrderedF64 {
-    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&o.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -749,11 +722,11 @@ mod tests {
     }
 
     #[test]
-    fn strict_priority_starves_lower_class_when_higher_saturates() {
-        // 1 - 2, single shared edge with very small capacity.
-        // Two DKMSs at each end: dA, dB. Build a separate priority pair
-        // by adding a 4th DKMS dC@1 → dD@3 with weight 1.0, while dA→dB
-        // gets weight 100.0.
+    fn hybrid_solver_starves_low_tier_when_high_tier_uses_full_capacity() {
+        // Two pairs share a 1 kps edge. dA↔dB weight 10000 (HIGH tier,
+        // Priority), dC↔dD weight 1 (LOW tier, BestEffort). The hybrid
+        // solver runs HIGH first on the full capacity; LOW only sees
+        // whatever HIGH leaves over — which here is zero.
         let mut t = Topology::default();
         for q in ["1", "2"] {
             t.upsert_qkc(Qkc {
@@ -811,19 +784,84 @@ mod tests {
         let coms = s.build_commodities(&t);
         let caps = s.capacities(&t);
         let mut weights = HashMap::new();
-        // dA→dB and dB→dA are class 100; dC→dD and dD→dC are class 1.
         for c in &coms {
             let w = if c.src_dkms == "dA" || c.src_dkms == "dB" {
-                100.0
+                10_000.0 // Priority (HIGH tier)
             } else {
-                1.0
+                1.0 // BestEffort (LOW tier)
             };
             weights.insert(c.flow_id(), w);
         }
         let snap = s.solve(&coms, &caps, &weights);
 
-        // Higher-priority flows get rate; lower-priority flows are starved.
-        assert!(snap.rate_for_flow("dA", "dB") > 0.0);
-        assert!(snap.rate_for_flow("dC", "dD") <= 1e-6);
+        let r_high = snap.rate_for_flow("dA", "dB");
+        let r_low = snap.rate_for_flow("dC", "dD");
+        assert!(r_high > 0.0, "HIGH tier got 0 — it should consume the edge");
+        assert!(
+            r_low <= 1e-6,
+            "LOW tier should be starved when HIGH saturates the edge; got {r_low}",
+        );
+    }
+
+    #[test]
+    fn hybrid_solver_splits_intra_tier_by_weight_ratio() {
+        // Same single edge, but both pairs are in the HIGH tier.
+        // dA↔dB at Priority (10000), dC↔dD at Quickly (100). Same tier,
+        // so weighted max-min applies: dA gets ≈100× the rate of dC,
+        // and neither is starved.
+        let mut t = Topology::default();
+        for q in ["1", "2"] {
+            t.upsert_qkc(Qkc {
+                id: q.into(),
+                host: host(q.parse().unwrap()),
+                kme_host: None,
+            });
+        }
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 1.0,
+                alpha: 0.0,
+                max_buffer_size: 1,
+            },
+        );
+        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
+        t.upsert_orr(Orr { id: "o2".into(), host: host(12), qkc_id: "2".into() });
+        for (i, q) in [("dA", "1"), ("dB", "2"), ("dC", "1"), ("dD", "2")]
+            .iter()
+            .enumerate()
+        {
+            let orr = if q.1 == "1" { "o1" } else { "o2" };
+            t.upsert_dkms(Dkms {
+                id: q.0.into(),
+                host: host(21 + i as i64),
+                tls_id: None,
+                orr_id: orr.into(),
+            });
+        }
+        let s = McfSolver::new(1);
+        let coms = s.build_commodities(&t);
+        let caps = s.capacities(&t);
+        let mut weights = HashMap::new();
+        for c in &coms {
+            let w = if c.src_dkms == "dA" || c.src_dkms == "dB" {
+                10_000.0 // Priority
+            } else {
+                100.0 // Quickly — same HIGH tier
+            };
+            weights.insert(c.flow_id(), w);
+        }
+        let snap = s.solve(&coms, &caps, &weights);
+
+        let r_pri = snap.rate_for_flow("dA", "dB");
+        let r_qly = snap.rate_for_flow("dC", "dD");
+        assert!(r_pri > 0.0 && r_qly > 0.0, "neither should be starved within HIGH tier");
+        let ratio = r_pri / r_qly;
+        assert!(
+            (90.0..=110.0).contains(&ratio),
+            "expected ratio ≈100 within tier, got {ratio}",
+        );
     }
 }

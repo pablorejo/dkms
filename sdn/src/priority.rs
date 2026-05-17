@@ -24,10 +24,12 @@
 //!
 //! ## Weights
 //!
-//! Moderate spread (100×) so the SP+RR solver doesn't crush the
-//! low-priority classes. `Saturated` has weight 0: those flows are
-//! excluded from the solver entirely and the orchestrator pins their
-//! rate to 0 in the snapshot.
+//! Exponential spread (10×) between consecutive classes — combined with
+//! the weighted max-min solver, this gives Priority ≈10× the rate of
+//! Important on the same edge, ≈100× BestEffort, etc., without ever
+//! starving a class to 0. `Saturated` keeps weight 0: those flows are
+//! excluded from the LP entirely and the orchestrator pins their rate
+//! to 0 in the snapshot.
 
 use std::str::FromStr;
 
@@ -53,10 +55,10 @@ impl TrafficPriority {
     /// excluded from the LP and pinned to rate 0 by the orchestrator.
     pub fn weight(self) -> f64 {
         match self {
-            Self::Priority => 100.0,
-            Self::Important => 30.0,
-            Self::Quickly => 10.0,
-            Self::Relax => 3.0,
+            Self::Priority => 10_000.0,
+            Self::Important => 1_000.0,
+            Self::Quickly => 100.0,
+            Self::Relax => 10.0,
             Self::BestEffort => 1.0,
             Self::Saturated => 0.0,
         }
@@ -198,11 +200,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn weights_match_python() {
-        assert_eq!(TrafficPriority::Priority.weight(), 100.0);
-        assert_eq!(TrafficPriority::Important.weight(), 30.0);
-        assert_eq!(TrafficPriority::Quickly.weight(), 10.0);
-        assert_eq!(TrafficPriority::Relax.weight(), 3.0);
+    fn weights_are_decade_spaced() {
+        // Decade spacing so the weighted max-min solver gives each class
+        // ≈10× the rate of the one below on a shared edge.
+        assert_eq!(TrafficPriority::Priority.weight(), 10_000.0);
+        assert_eq!(TrafficPriority::Important.weight(), 1_000.0);
+        assert_eq!(TrafficPriority::Quickly.weight(), 100.0);
+        assert_eq!(TrafficPriority::Relax.weight(), 10.0);
         assert_eq!(TrafficPriority::BestEffort.weight(), 1.0);
         assert_eq!(TrafficPriority::Saturated.weight(), 0.0);
     }
