@@ -477,9 +477,13 @@ impl Generator {
     /// contra-presión ya la da el `max_in_flight` del propio loop de
     /// emisión.
     async fn run_priority_loop(self: Arc<Self>) {
-        // Refresh a la misma cadencia que rates (default 5 s) — basta
-        // para reaccionar sin spamear.
-        let period = Duration::from_millis(self.cfg.rate_refresh_ms);
+        // Cadencia propia (default 200ms) — INDEPENDIENTE del rate loop.
+        // Detectar cruces de umbral con baja latencia es crítico: el
+        // strict-priority del SDN penaliza los huecos en los que un peer
+        // sigue marcado como `priority` aunque su buffer ya esté en
+        // `important`. Solo se POSTea cuando la clase cambia, no hay
+        // spam.
+        let period = Duration::from_millis(self.cfg.priority_refresh_ms);
         let mut last_reported: HashMap<String, BufferQos> = HashMap::new();
         loop {
             tokio::time::sleep(period).await;
