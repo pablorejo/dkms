@@ -57,5 +57,9 @@ tareas.md
 tests/plots/
 
 agent-orr-fs-rotation/
+agent-dkms-topo-cli/
 simulation-3.topology.json
 audit_2026_05.md
+
+# Results dir (raw logs + JSON + plots de cada corrida CLI)
+tests/results/
