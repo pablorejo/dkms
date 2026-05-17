@@ -142,7 +142,14 @@ async fn bootstrap_peer(
                 Ok(secret) => {
                     // OBJ-011: guardar como bootstrap_secret (HMAC key),
                     // NO como master_secret.
+                    //
+                    // Workaround: cableamos también como master_secret
+                    // de epoch 0 en este lado. Sin esto la rotación
+                    // Option-B se desincroniza entre initiator/responder
+                    // y los frames se dropean con "missing epoch".
+                    // Ver comentario gemelo en `grpc_server.rs`.
                     peers.set_bootstrap(peer_id.clone(), secret);
+                    peers.set_master_for_epoch(peer_id.clone(), 0, secret);
                     info!(
                         local = %local_orr_id,
                         peer  = %peer_id,
@@ -168,38 +175,21 @@ async fn bootstrap_peer(
         debug!(peer = %peer_id, "orr.bootstrap bootstrap_secret already present");
     }
 
-    // Fase 3: primera rotación inmediata (epoch 1). Sin ella, las
-    // callsites de `service.rs` que esperan `master_secrets[peer][*]`
-    // (envío de onion frames) no tendrían entrada disponible. Si
-    // falla (p.ej. responder aún booteando), la task periódica de
-    // abajo reintentará en el siguiente tick.
-    match crate::rotation::run_one_rotation(&suite, &local_orr_id, &peer_id, &addr, &peers).await {
-        Ok(epoch) => info!(
-            local = %local_orr_id,
-            peer  = %peer_id,
-            epoch,
-            "orr.bootstrap first rotation complete",
-        ),
-        Err(e) => warn!(
-            local = %local_orr_id,
-            peer  = %peer_id,
-            error = %e,
-            "orr.bootstrap first rotation failed; periodic task will retry",
-        ),
-    }
-
-    // Fase 4: arrancar el task periódico que renueva master_secret
-    // cada `rotation_period_ms`. Backoff + lex-smaller guard se
-    // hacen dentro de `spawn_rotation_task`.
-    crate::rotation::spawn_rotation_task(
-        suite,
-        local_orr_id,
-        peer_id,
-        addr,
-        peers,
-        rotation_period_ms,
-        epoch_history_keep,
-    );
+    // Phase 3 + Phase 4 (rotación OBJ-011) deshabilitadas. La rotación
+    // actual (run_one_rotation + spawn_rotation_task) sólo actualiza el
+    // lado initiator (lex-smaller) y deja al passive con epoch=0,
+    // causando frames con `epoch=0` que el receiver dropea con
+    // `latest=Some(1)`. Hasta que el sub-protocolo propague la nueva
+    // época al passive side antes de que el initiator suba el contador
+    // local, mantenemos epoch=0 estable en ambos lados (master_secret
+    // sembrado desde el bootstrap_secret arriba).
+    let _ = rotation_period_ms;
+    let _ = epoch_history_keep;
+    let _ = suite;
+    let _ = local_orr_id;
+    let _ = peer_id;
+    let _ = addr;
+    let _ = peers;
 }
 
 async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, addr: &str) {

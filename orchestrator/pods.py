@@ -3452,6 +3452,16 @@ class PodDKMS(Pod):
             "ORR__metrics_addr": f"0.0.0.0:{K8S_ORR_METRICS_PORT}",
             "ORR__sdn_url": sdn_endpoint_url,
             "ORR__default_max_hops": "0",
+            # Rotación de master_secret por peer. Default 30s hace que
+            # las épocas se desincronicen rápido entre initiator/responder
+            # — el sender se queda con `epoch_id=0` y el receiver, tras
+            # 3 rotaciones (90s), borra epoch=0 de su history → drop con
+            # WARN "master_secret missing for epoch". Subimos a 24h para
+            # que el flujo no se rompa en sims de medio plazo. El fix
+            # correcto es propagar la rotación al peer antes de drop;
+            # mientras eso no esté, desactivamos rotación de facto.
+            "ORR__rotation_period_ms": "86400000",
+            "ORR__epoch_history_keep": "16",
         }
 
     def _resolve_sdn_suffix(self) -> int:

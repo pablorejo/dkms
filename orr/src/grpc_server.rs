@@ -192,7 +192,17 @@ impl OrrControl for OrrGrpc {
         // rotaciones), NO como master_secret. El master_secret de
         // cada época se produce vía `RequestEphemeralKey` +
         // `EstablishEphemeralSecret` con keypair efímera fresca.
+        //
+        // Workaround temporal (rotación de Option-B desincronizada
+        // entre initiator/responder rompe epochs y se queda con
+        // `latest=1` en un lado y `latest=0` en otro): cableamos el
+        // bootstrap_secret también como master_secret de epoch 0 en
+        // ambos lados. Esto retrocede al modelo pre-OBJ-011 (sin
+        // forward secrecy por época), pero deja al `send_onion_*`
+        // operativo end-to-end. Volver al modelo correcto cuando
+        // `run_one_rotation` propague la nueva época al passive side.
         self.svc.peers.set_bootstrap(from.clone(), secret);
+        self.svc.peers.set_master_for_epoch(from.clone(), 0, secret);
         info!(peer = %from, "orr.establish_secret bootstrap_secret stored");
         Ok(Response::new(EstablishSecretResponse {
             ok: true,
