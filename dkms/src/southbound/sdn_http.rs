@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct SdnHttpClient {
-    base_url:    String,
-    http:        reqwest::Client,
+    base_url: String,
+    http: reqwest::Client,
     rpc_timeout: Duration,
 }
 
@@ -27,9 +27,9 @@ pub struct PeerRate {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DkmsRatesResponse {
-    pub dkms_id:          String,
+    pub dkms_id: String,
     pub topology_version: i64,
-    pub peers:            HashMap<String, PeerRate>,
+    pub peers: HashMap<String, PeerRate>,
 }
 
 impl SdnHttpClient {
@@ -41,7 +41,7 @@ impl SdnHttpClient {
             .build()
             .map_err(|e| anyhow!("reqwest builder: {e}"))?;
         Ok(Self {
-            base_url:    base_url.into().trim_end_matches('/').to_string(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
             rpc_timeout,
         })
@@ -80,7 +80,10 @@ impl SdnHttpClient {
     /// rates.
     pub async fn post_priority(&self, updates: &[PriorityUpdate]) -> Result<PriorityApplied> {
         if updates.is_empty() {
-            return Ok(PriorityApplied { applied: 0, errors: vec![] });
+            return Ok(PriorityApplied {
+                applied: 0,
+                errors: vec![],
+            });
         }
         let url = format!("{}/priority", self.base_url);
         let body = serde_json::json!({"updates": updates});
@@ -107,14 +110,14 @@ impl SdnHttpClient {
 #[derive(Debug, Clone, Serialize)]
 pub struct PriorityUpdate {
     pub dkms_id: String,
-    pub peer:    String,
-    pub role:    String,  // "enc_keys" | "dec_keys"
-    pub class:   String,  // "priority" | "important" | "quickly" | "relax" | "best_effort" | "saturated"
+    pub peer: String,
+    pub role: String,  // "enc_keys" | "dec_keys"
+    pub class: String, // "priority" | "important" | "quickly" | "relax" | "best_effort" | "saturated"
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PriorityApplied {
     pub applied: u32,
     #[serde(default)]
-    pub errors:  Vec<String>,
+    pub errors: Vec<String>,
 }

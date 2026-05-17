@@ -63,7 +63,10 @@ impl Etsi014GetKeyWithKeyIDs {
             });
         }
 
-        let data = msg.data.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+        let data = msg
+            .data
+            .clone()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
         let key_ids: Etsi014KeyIDs = serde_json::from_value(data).ok()?;
 
         Some(Self {

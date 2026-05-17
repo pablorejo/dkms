@@ -12,13 +12,7 @@
 
 use std::{collections::HashMap, sync::atomic::Ordering};
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -28,10 +22,7 @@ use crate::service::QkcService;
 pub fn router(svc: QkcService) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route(
-            "/forwarding-table",
-            get(get_table).post(post_table),
-        )
+        .route("/forwarding-table", get(get_table).post(post_table))
         .route("/stats", get(get_stats))
         .with_state(svc)
 }

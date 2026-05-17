@@ -200,7 +200,8 @@ impl KeyStore {
             }
         }
         if !out.is_empty() {
-            self.n_enc_taken.fetch_add(out.len() as u64, Ordering::Relaxed);
+            self.n_enc_taken
+                .fetch_add(out.len() as u64, Ordering::Relaxed);
         }
         // Avisa al worker SIEMPRE que el buffer esté bajo, incluso si
         // no logramos sacar nada (caller con buffer vacío).
@@ -317,11 +318,7 @@ impl KeyStore {
     /// clave todavía no está en el `DashMap`. El antiguo fallback HTTP
     /// `dec_keys` era inviable porque el quditto ya entregó la clave
     /// al worker (responde 404). Devolvemos `Err` si el deadline expira.
-    pub async fn wait_dec(
-        &self,
-        id: &Uuid,
-        timeout: Duration,
-    ) -> Result<Vec<u8>, KeyWaitTimeout> {
+    pub async fn wait_dec(&self, id: &Uuid, timeout: Duration) -> Result<Vec<u8>, KeyWaitTimeout> {
         self.n_wait_dec_called.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + timeout;
         loop {

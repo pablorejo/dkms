@@ -16,9 +16,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use wire::{
-    decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_RECV, FRAME_RELAY,
-};
+use wire::{decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_RECV, FRAME_RELAY};
 
 use crate::{relay, service::QkcService};
 

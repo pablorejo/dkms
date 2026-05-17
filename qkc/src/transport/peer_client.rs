@@ -44,7 +44,9 @@ pub struct PeerOut {
 
 impl PeerOut {
     pub fn new() -> Self {
-        Self { peers: DashMap::new() }
+        Self {
+            peers: DashMap::new(),
+        }
     }
 
     /// Encola un frame para `peer_id`. `false` si la cola está llena
@@ -94,9 +96,12 @@ impl PeerOut {
     }
 
     pub fn stats(&self, peer_id: u32) -> Option<(u64, u64)> {
-        self.peers
-            .get(&peer_id)
-            .map(|s| (s.sent.load(Ordering::Relaxed), s.dropped.load(Ordering::Relaxed)))
+        self.peers.get(&peer_id).map(|s| {
+            (
+                s.sent.load(Ordering::Relaxed),
+                s.dropped.load(Ordering::Relaxed),
+            )
+        })
     }
 }
 

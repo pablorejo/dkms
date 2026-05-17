@@ -95,16 +95,26 @@ impl Etsi014GetKey {
 
             if let Some(h) = &header_additional {
                 let merged = r.resolved_additional_slave_sae_ids(Some(h));
-                r.additional_saes = if merged.is_empty() { None } else { Some(merged) };
+                r.additional_saes = if merged.is_empty() {
+                    None
+                } else {
+                    Some(merged)
+                };
             }
             r
         } else {
-            let data = msg.data.clone().unwrap_or(Value::Object(Default::default()));
-            let mut r: Etsi014KeyRequest =
-                serde_json::from_value(data).unwrap_or_default();
+            let data = msg
+                .data
+                .clone()
+                .unwrap_or(Value::Object(Default::default()));
+            let mut r: Etsi014KeyRequest = serde_json::from_value(data).unwrap_or_default();
             if let Some(h) = &header_additional {
                 let merged = r.resolved_additional_slave_sae_ids(Some(h));
-                r.additional_saes = if merged.is_empty() { None } else { Some(merged) };
+                r.additional_saes = if merged.is_empty() {
+                    None
+                } else {
+                    Some(merged)
+                };
             }
             r
         };

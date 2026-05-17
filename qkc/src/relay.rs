@@ -174,7 +174,11 @@ fn send_frame_to_peer(
     let out_link = svc
         .link_to(next_hop)
         .ok_or(QkcError::UnknownNeighbor(next_hop))?;
-    let kind = if next_hop == dest_final { FRAME_RECV } else { FRAME_RELAY };
+    let kind = if next_hop == dest_final {
+        FRAME_RECV
+    } else {
+        FRAME_RELAY
+    };
     let mut out = Frame::empty(kind);
     out.sender_id = svc.qkc_id();
     out.receiver_id = next_hop;
@@ -192,7 +196,9 @@ fn send_frame_to_peer(
         .ok_or(QkcError::UnknownNeighbor(next_hop))?;
     let ok = svc.peer_out.send(next_hop, &addr, out);
     if !ok {
-        return Err(QkcError::Quditto(format!("peer_out queue full for {next_hop}")));
+        return Err(QkcError::Quditto(format!(
+            "peer_out queue full for {next_hop}"
+        )));
     }
     Ok(())
 }
@@ -241,7 +247,10 @@ async fn lookup_or_fetch_dec(link: &LinkRuntime, ids: &[Uuid]) -> Result<Vec<Otp
                     ms: DEC_WAIT_TIMEOUT.as_millis() as u64,
                 })?,
         };
-        out.push(OtpKey { key_id: *id, material: mat });
+        out.push(OtpKey {
+            key_id: *id,
+            material: mat,
+        });
     }
     Ok(out)
 }

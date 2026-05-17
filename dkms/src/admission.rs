@@ -58,7 +58,9 @@ impl Admission {
     /// con el guard hasta que termine; al hacer drop se decrementa.
     pub fn acquire(self: &Arc<Self>) -> InflightGuard {
         self.inflight.fetch_add(1, Ordering::AcqRel);
-        InflightGuard { inner: self.clone() }
+        InflightGuard {
+            inner: self.clone(),
+        }
     }
 
     pub fn inflight(&self) -> u64 {

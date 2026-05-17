@@ -37,7 +37,10 @@ impl DkmsControl for DkmsGrpc {
         req: Request<RegisterSaeRequest>,
     ) -> std::result::Result<Response<RegisterSaeResponse>, Status> {
         let m = req.into_inner();
-        let sae_id = m.sae_id.map(|s| SaeId::new(s.value)).unwrap_or_else(|| SaeId::new(""));
+        let sae_id = m
+            .sae_id
+            .map(|s| SaeId::new(s.value))
+            .unwrap_or_else(|| SaeId::new(""));
         if sae_id.as_str().is_empty() {
             return Err(Status::invalid_argument("sae_id required"));
         }
@@ -74,9 +77,10 @@ impl DkmsControl for DkmsGrpc {
         &self,
         _req: Request<ListSaesRequest>,
     ) -> std::result::Result<Response<Self::ListSaesStream>, Status> {
-        let (_tx, rx) =
-            tokio::sync::mpsc::channel::<std::result::Result<SaeInfo, Status>>(16);
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        let (_tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<SaeInfo, Status>>(16);
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     #[instrument(skip_all, fields(grace_secs = field::Empty))]
@@ -137,12 +141,7 @@ impl DkmsControl for DkmsGrpc {
         // Devolvemos el snapshot del DKMS dueño del SAE remoto, si lo
         // tenemos. Si no hay binding cacheado, devolvemos ceros (el
         // orquestador puede pedirle a la SDN el binding).
-        let peer_node = self
-            .svc
-            .sae_binding
-            .resolve(&SaeId::new(remote))
-            .await
-            .ok();
+        let peer_node = self.svc.sae_binding.resolve(&SaeId::new(remote)).await.ok();
         let snapshot = peer_node
             .map(|n| self.svc.pool.for_peer(n.as_str()))
             .map(|pb| (pb.enc.len(), pb.dec.len()))

@@ -31,7 +31,9 @@ pub struct Etsi020ExtKeyContainer {
 impl Etsi020ExtKeyContainer {
     pub fn validate(&self) -> Result<(), EtsiError> {
         if self.keys.is_empty() {
-            return Err(EtsiError::Validation("keys must contain at least 1 entry".into()));
+            return Err(EtsiError::Validation(
+                "keys must contain at least 1 entry".into(),
+            ));
         }
         if self.target_sae_ids.is_empty() {
             return Err(EtsiError::Validation(

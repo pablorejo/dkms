@@ -39,7 +39,10 @@ mod tests {
     #[test]
     fn round_trip_typical() {
         let mut m = BTreeMap::new();
-        m.insert("key_id".into(), "ddd5d8a1-7a73-4dc6-9d9c-d5b8b8e9ffaa".into());
+        m.insert(
+            "key_id".into(),
+            "ddd5d8a1-7a73-4dc6-9d9c-d5b8b8e9ffaa".into(),
+        );
         m.insert("sae_origin".into(), "sae-1".into());
         m.insert("sae_destination".into(), "sae-2".into());
         m.insert("key_size_bits".into(), "256".into());

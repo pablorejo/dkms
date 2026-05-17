@@ -23,22 +23,13 @@ use tracing::instrument;
 use common::ids::SaeId;
 use etsi::v014::{Etsi014KeyIDs, Etsi014KeyRequest};
 
-use crate::{service::DkmsService, etsi_http::auth::SaePeer};
+use crate::{etsi_http::auth::SaePeer, service::DkmsService};
 
 pub fn router(svc: DkmsService) -> Router {
     Router::new()
-        .route(
-            "/api/v1/keys/:slave_sae/status",
-            get(handle_status),
-        )
-        .route(
-            "/api/v1/keys/:slave_sae/enc_keys",
-            post(handle_enc_keys),
-        )
-        .route(
-            "/api/v1/keys/:master_sae/dec_keys",
-            post(handle_dec_keys),
-        )
+        .route("/api/v1/keys/:slave_sae/status", get(handle_status))
+        .route("/api/v1/keys/:slave_sae/enc_keys", post(handle_enc_keys))
+        .route("/api/v1/keys/:master_sae/dec_keys", post(handle_dec_keys))
         .with_state(svc)
 }
 

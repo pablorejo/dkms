@@ -11,13 +11,20 @@ pub struct Etsi014KeyID {
     #[serde(rename = "key_ID")]
     pub key_id: Uuid,
 
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "key_ID_extension")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "key_ID_extension"
+    )]
     pub key_id_extension: Option<serde_json::Map<String, Value>>,
 }
 
 impl Etsi014KeyID {
     pub fn new(key_id: Uuid) -> Self {
-        Self { key_id, key_id_extension: None }
+        Self {
+            key_id,
+            key_id_extension: None,
+        }
     }
 }
 

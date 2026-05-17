@@ -17,7 +17,7 @@ pub mod generator;
 pub mod priority;
 pub mod sae_buffer_bucket;
 
-pub use ack_pending::{AckPendingStore, AckPendingEntry};
+pub use ack_pending::{AckPendingEntry, AckPendingStore};
 pub use ack_socket::{AckClient, AckFrame, BatchedAckClient};
 pub use generator::Generator;
 pub use priority::{classify, BufferQos};

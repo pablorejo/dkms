@@ -84,7 +84,8 @@ impl QkcConfig {
         for link in &self.links {
             if link.neighbor_id == self.qkc_id {
                 return Err(QkcError::BadRequest(format!(
-                    "link.neighbor_id == qkc_id ({})", self.qkc_id
+                    "link.neighbor_id == qkc_id ({})",
+                    self.qkc_id
                 )));
             }
             if link.key_size_bits == 0 || link.key_size_bits % 8 != 0 {

@@ -21,7 +21,11 @@ pub enum DkmsError {
     UnknownSae(SaeId),
 
     #[error("rate-limited: sae {sae} requested {requested} tokens, {available} available")]
-    RateLimited { sae: SaeId, requested: u64, available: u64 },
+    RateLimited {
+        sae: SaeId,
+        requested: u64,
+        available: u64,
+    },
 
     #[error("invalid request: {0}")]
     BadRequest(String),
@@ -37,7 +41,11 @@ pub enum DkmsError {
     PeerUnreachable { peer: String, source: anyhow::Error },
 
     #[error("peer dkms {peer} rejected: HTTP {status} — {body}")]
-    PeerRejected { peer: String, status: u16, body: String },
+    PeerRejected {
+        peer: String,
+        status: u16,
+        body: String,
+    },
 
     #[error("peer dkms {peer} did not ack within timeout")]
     PeerAckTimeout { peer: String },

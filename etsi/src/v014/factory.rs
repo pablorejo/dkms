@@ -78,9 +78,7 @@ impl Etsi014 {
                 "enc_keys" | "dec_keys" => msg
                     .data
                     .as_ref()
-                    .and_then(|d| {
-                        serde_json::from_value::<Etsi014KeyContainer>(d.clone()).ok()
-                    })
+                    .and_then(|d| serde_json::from_value::<Etsi014KeyContainer>(d.clone()).ok())
                     .map(Etsi014Built::KeyContainer),
                 _ => None,
             }

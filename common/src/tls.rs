@@ -32,8 +32,7 @@ pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError>
 
 pub fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
     let mut rd = BufReader::new(File::open(path)?);
-    rustls_pemfile::private_key(&mut rd)?
-        .ok_or_else(|| TlsError::NoKey(path.display().to_string()))
+    rustls_pemfile::private_key(&mut rd)?.ok_or_else(|| TlsError::NoKey(path.display().to_string()))
 }
 
 pub fn server_config(
@@ -50,9 +49,12 @@ pub fn server_config(
         for c in load_certs(ca)? {
             roots.add(c)?;
         }
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build()
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
             .map_err(|e| TlsError::BadPem(e.to_string()))?;
-        builder.with_client_cert_verifier(verifier).with_single_cert(certs, key)?
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)?
     } else {
         builder.with_no_client_auth().with_single_cert(certs, key)?
     };
@@ -69,5 +71,9 @@ pub fn client_config(ca_path: Option<&Path>) -> Result<Arc<ClientConfig>, TlsErr
     } else {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    Ok(Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()))
+    Ok(Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
 }

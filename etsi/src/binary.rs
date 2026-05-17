@@ -48,7 +48,7 @@ const MAGIC: [u8; 4] = *b"QKDB";
 const VERSION: u8 = 0x01;
 
 const KEYS_HDR_LEN: usize = 4 + 1 + 2 + 4; // magic + ver + bits + count
-const IDS_HDR_LEN: usize = 4 + 1 + 4;     // magic + ver + count
+const IDS_HDR_LEN: usize = 4 + 1 + 4; // magic + ver + count
 
 #[derive(Debug, Error)]
 pub enum BinaryError {
@@ -173,7 +173,11 @@ mod tests {
 
     #[test]
     fn ids_round_trip() {
-        let ids = vec![Uuid::from_u128(10), Uuid::from_u128(20), Uuid::from_u128(30)];
+        let ids = vec![
+            Uuid::from_u128(10),
+            Uuid::from_u128(20),
+            Uuid::from_u128(30),
+        ];
         let buf = pack_key_ids(&ids);
         let back = unpack_key_ids(&buf).unwrap();
         assert_eq!(back, ids);
@@ -183,16 +187,15 @@ mod tests {
     fn rejects_bad_magic() {
         let mut buf = pack_key_ids(&[Uuid::nil()]);
         buf[0] = 0;
-        assert!(matches!(
-            unpack_key_ids(&buf),
-            Err(BinaryError::BadMagic)
-        ));
+        assert!(matches!(unpack_key_ids(&buf), Err(BinaryError::BadMagic)));
     }
 
     #[test]
     fn binary_wire_is_smaller_than_json() {
         // 128 claves de 256 bits.
-        let keys: Vec<(Uuid, [u8; 32])> = (0u128..128).map(|i| (Uuid::from_u128(i), [0; 32])).collect();
+        let keys: Vec<(Uuid, [u8; 32])> = (0u128..128)
+            .map(|i| (Uuid::from_u128(i), [0; 32]))
+            .collect();
         let refs: Vec<(Uuid, &[u8])> = keys.iter().map(|(id, m)| (*id, &m[..])).collect();
         let binary = pack_keys(&refs, 256);
         // 11 + 128 * (16 + 32) = 11 + 6144 = 6155

@@ -59,9 +59,9 @@ pub fn flow_id(src_dkms: &str, dst_dkms: &str) -> String {
 pub struct Commodity {
     pub src_dkms: String,
     pub dst_dkms: String,
-    pub src_qkc:  String,
-    pub dst_qkc:  String,
-    pub paths:    Vec<Path>,
+    pub src_qkc: String,
+    pub dst_qkc: String,
+    pub paths: Vec<Path>,
 }
 
 impl Commodity {
@@ -126,7 +126,7 @@ pub fn k_shortest_paths(
 
     let first = match bfs_shortest(graph, &HashSet::new(), &HashSet::new(), src, dst) {
         Some(p) => p,
-        None    => return vec![],
+        None => return vec![],
     };
     let mut shortest = vec![first];
 
@@ -155,7 +155,9 @@ pub fn k_shortest_paths(
 
             let Some(spur_path) =
                 bfs_shortest(graph, &excluded_edges, &excluded_nodes, spur_node, dst)
-            else { continue };
+            else {
+                continue;
+            };
 
             let mut full_path: Path = root_path[..root_path.len() - 1].to_vec();
             full_path.extend(spur_path);
@@ -168,7 +170,9 @@ pub fn k_shortest_paths(
             candidates.insert((full_path.len(), counter), full_path);
             counter += 1;
         }
-        let Some((&key, _)) = candidates.iter().next() else { break };
+        let Some((&key, _)) = candidates.iter().next() else {
+            break;
+        };
         let next_path = candidates.remove(&key).unwrap();
         shortest.push(next_path);
     }
@@ -177,11 +181,11 @@ pub fn k_shortest_paths(
 }
 
 fn bfs_shortest(
-    graph:          &HashMap<String, HashSet<String>>,
+    graph: &HashMap<String, HashSet<String>>,
     excluded_edges: &HashSet<EdgeKey>,
     excluded_nodes: &HashSet<String>,
-    start:          &str,
-    dst:            &str,
+    start: &str,
+    dst: &str,
 ) -> Option<Path> {
     if start == dst {
         return Some(vec![start.to_string()]);
@@ -242,7 +246,9 @@ impl Default for McfSolver {
 
 impl McfSolver {
     pub fn new(k_paths: usize) -> Self {
-        Self { k_paths: k_paths.max(1) }
+        Self {
+            k_paths: k_paths.max(1),
+        }
     }
 
     /// Generate the full commodity set from a topology snapshot. Pairs
@@ -258,8 +264,12 @@ impl McfSolver {
                 if s == d {
                     continue;
                 }
-                let Some(src_qkc) = topo.qkc_of_dkms(s).map(str::to_string) else { continue };
-                let Some(dst_qkc) = topo.qkc_of_dkms(d).map(str::to_string) else { continue };
+                let Some(src_qkc) = topo.qkc_of_dkms(s).map(str::to_string) else {
+                    continue;
+                };
+                let Some(dst_qkc) = topo.qkc_of_dkms(d).map(str::to_string) else {
+                    continue;
+                };
                 if src_qkc == dst_qkc {
                     continue;
                 }
@@ -295,8 +305,8 @@ impl McfSolver {
     pub fn solve(
         &self,
         commodities: &[Commodity],
-        capacities:  &HashMap<EdgeKey, f64>,
-        weights:     &HashMap<String, f64>,
+        capacities: &HashMap<EdgeKey, f64>,
+        weights: &HashMap<String, f64>,
     ) -> McfSnapshot {
         self.strict_priority_within_class(commodities, capacities, weights)
     }
@@ -306,8 +316,8 @@ impl McfSolver {
     fn strict_priority_within_class(
         &self,
         commodities: &[Commodity],
-        capacities:  &HashMap<EdgeKey, f64>,
-        weights:     &HashMap<String, f64>,
+        capacities: &HashMap<EdgeKey, f64>,
+        weights: &HashMap<String, f64>,
     ) -> McfSnapshot {
         if commodities.is_empty() {
             return McfSnapshot::default();
@@ -346,10 +356,8 @@ impl McfSolver {
 
             // Within a class everybody has equal share (the priority is
             // expressed by the class, not by weight magnitude).
-            let equal_weights: HashMap<String, f64> = class_flows
-                .iter()
-                .map(|c| (c.flow_id(), 1.0))
-                .collect();
+            let equal_weights: HashMap<String, f64> =
+                class_flows.iter().map(|c| (c.flow_id(), 1.0)).collect();
 
             let sub = self.proportional_fair(class_flows, &remaining_caps, &equal_weights);
 
@@ -358,7 +366,10 @@ impl McfSolver {
                 snap.rates.insert(fid.clone(), *r);
             }
             for (dkms, m) in &sub.rates_by_dkms {
-                snap.rates_by_dkms.entry(dkms.clone()).or_default().extend(m.clone());
+                snap.rates_by_dkms
+                    .entry(dkms.clone())
+                    .or_default()
+                    .extend(m.clone());
             }
             for (u, ft) in &sub.forwarding {
                 let merged = snap.forwarding.entry(u.clone()).or_default();
@@ -404,8 +415,8 @@ impl McfSolver {
     fn proportional_fair(
         &self,
         commodities: &[&Commodity],
-        capacities:  &HashMap<EdgeKey, f64>,
-        weights:     &HashMap<String, f64>,
+        capacities: &HashMap<EdgeKey, f64>,
+        weights: &HashMap<String, f64>,
     ) -> McfSnapshot {
         let mut snap = McfSnapshot::default();
         if commodities.is_empty() || capacities.is_empty() {
@@ -419,18 +430,15 @@ impl McfSolver {
             v.sort();
             v
         };
-        let edge_idx: HashMap<&EdgeKey, usize> = edge_list
-            .iter()
-            .enumerate()
-            .map(|(i, k)| (k, i))
-            .collect();
+        let edge_idx: HashMap<&EdgeKey, usize> =
+            edge_list.iter().enumerate().map(|(i, k)| (k, i)).collect();
         let n_edges = edge_list.len();
         let n_flows = commodities.len();
 
         // Per-flow: list of edge indices traversed by its first path.
         // Per-edge: list of flow indices passing through it.
-        let mut flow_edges:  Vec<Vec<usize>> = vec![vec![]; n_flows];
-        let mut edge_flows:  Vec<Vec<usize>> = vec![vec![]; n_edges];
+        let mut flow_edges: Vec<Vec<usize>> = vec![vec![]; n_flows];
+        let mut edge_flows: Vec<Vec<usize>> = vec![vec![]; n_edges];
         for (i, c) in commodities.iter().enumerate() {
             let Some(p) = c.paths.first() else { continue };
             for ek in path_edges(p) {
@@ -458,14 +466,14 @@ impl McfSolver {
         // Hyper-parameters — same defaults as the Python (no env-var
         // override; we'll add a config knob if it turns out to matter).
         let max_iter = 200usize;
-        let tol      = 1e-3_f64;
-        let eta      = 0.5_f64;
-        const EPS:     f64 = 1e-9;
-        const LAM_LO:  f64 = 1e-12;
-        const LAM_HI:  f64 = 1e12;
+        let tol = 1e-3_f64;
+        let eta = 0.5_f64;
+        const EPS: f64 = 1e-9;
+        const LAM_LO: f64 = 1e-12;
+        const LAM_HI: f64 = 1e12;
 
         let mut rates = vec![0.0_f64; n_flows];
-        let mut viol  = f64::INFINITY;
+        let mut viol = f64::INFINITY;
         let mut iter_count = 0;
 
         for it in 0..max_iter {
@@ -529,7 +537,7 @@ impl McfSolver {
             // Single-path: omega = 1.0 along the first path.
             if let Some(p) = c.paths.first() {
                 for w in p.windows(2) {
-                    let u   = &w[0];
+                    let u = &w[0];
                     let nxt = &w[1];
                     let qkc_ft = snap.forwarding.entry(u.clone()).or_default();
                     let entries = qkc_ft.entry(fid.clone()).or_default();
@@ -541,9 +549,13 @@ impl McfSolver {
                 }
             }
 
-            snap.rates_by_dkms.entry(c.src_dkms.clone()).or_default()
+            snap.rates_by_dkms
+                .entry(c.src_dkms.clone())
+                .or_default()
                 .insert((c.dst_dkms.clone(), BufferRole::EncKeys), total);
-            snap.rates_by_dkms.entry(c.dst_dkms.clone()).or_default()
+            snap.rates_by_dkms
+                .entry(c.dst_dkms.clone())
+                .or_default()
                 .insert((c.src_dkms.clone(), BufferRole::DecKeys), total);
         }
 
@@ -551,7 +563,7 @@ impl McfSolver {
             flows = n_flows,
             edges = n_edges,
             iters = iter_count,
-            viol  = viol,
+            viol = viol,
             "proportional_fair done"
         );
         snap
@@ -564,15 +576,21 @@ impl McfSolver {
 struct OrderedF64(f64);
 
 impl PartialEq for OrderedF64 {
-    fn eq(&self, o: &Self) -> bool { self.0.to_bits() == o.0.to_bits() }
+    fn eq(&self, o: &Self) -> bool {
+        self.0.to_bits() == o.0.to_bits()
+    }
 }
 impl Eq for OrderedF64 {}
 impl PartialOrd for OrderedF64 {
-    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) }
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
 }
 impl Ord for OrderedF64 {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&o.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&o.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -612,7 +630,11 @@ mod tests {
     }
 
     fn host(id: i64) -> HostEndpoint {
-        HostEndpoint { id, ip: format!("10.0.0.{id}"), port: 9000 + id as u16 }
+        HostEndpoint {
+            id,
+            ip: format!("10.0.0.{id}"),
+            port: 9000 + id as u16,
+        }
     }
 
     fn small_topo() -> Topology {
@@ -620,18 +642,54 @@ mod tests {
         // DKMSs: dA@1, dB@3.
         let mut t = Topology::default();
         for q in ["1", "2", "3"] {
-            t.upsert_qkc(Qkc { id: q.into(), host: host(q.parse().unwrap()), kme_host: None });
+            t.upsert_qkc(Qkc {
+                id: q.into(),
+                host: host(q.parse().unwrap()),
+                kme_host: None,
+            });
         }
-        t.add_edge("1", "2", EdgeMeta {
-            distance_km: 0, r0_keys_per_second: 100.0, alpha: 0.2, max_buffer_size: 10,
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 100.0,
+                alpha: 0.2,
+                max_buffer_size: 10,
+            },
+        );
+        t.add_edge(
+            "2",
+            "3",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 100.0,
+                alpha: 0.2,
+                max_buffer_size: 10,
+            },
+        );
+        t.upsert_orr(Orr {
+            id: "o1".into(),
+            host: host(11),
+            qkc_id: "1".into(),
         });
-        t.add_edge("2", "3", EdgeMeta {
-            distance_km: 0, r0_keys_per_second: 100.0, alpha: 0.2, max_buffer_size: 10,
+        t.upsert_orr(Orr {
+            id: "o3".into(),
+            host: host(13),
+            qkc_id: "3".into(),
         });
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o3".into(), host: host(13), qkc_id: "3".into() });
-        t.upsert_dkms(Dkms { id: "dA".into(), host: host(21), tls_id: None, orr_id: "o1".into() });
-        t.upsert_dkms(Dkms { id: "dB".into(), host: host(23), tls_id: None, orr_id: "o3".into() });
+        t.upsert_dkms(Dkms {
+            id: "dA".into(),
+            host: host(21),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dB".into(),
+            host: host(23),
+            tls_id: None,
+            orr_id: "o3".into(),
+        });
         t
     }
 
@@ -649,8 +707,14 @@ mod tests {
         }
         // Buffer view: dA pushes ENC to dB, dB receives DEC from dA.
         let r_ab = snap.rate_for_flow("dA", "dB");
-        assert!((snap.rates_by_dkms["dA"][&("dB".to_string(), BufferRole::EncKeys)] - r_ab).abs() < 1e-9);
-        assert!((snap.rates_by_dkms["dB"][&("dA".to_string(), BufferRole::DecKeys)] - r_ab).abs() < 1e-9);
+        assert!(
+            (snap.rates_by_dkms["dA"][&("dB".to_string(), BufferRole::EncKeys)] - r_ab).abs()
+                < 1e-9
+        );
+        assert!(
+            (snap.rates_by_dkms["dB"][&("dA".to_string(), BufferRole::DecKeys)] - r_ab).abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -665,14 +729,22 @@ mod tests {
             let mut usage = 0.0;
             for c in &coms {
                 let r = snap.rates.get(&c.flow_id()).copied().unwrap_or(0.0);
-                if r <= 0.0 { continue }
+                if r <= 0.0 {
+                    continue;
+                }
                 if let Some(p) = c.paths.first() {
                     if p.windows(2).any(|w| &edge_key(&w[0], &w[1]) == k) {
                         usage += r;
                     }
                 }
             }
-            assert!(usage <= cap * 1.01 + 1e-6, "edge {:?} usage {} > cap {}", k, usage, cap);
+            assert!(
+                usage <= cap * 1.01 + 1e-6,
+                "edge {:?} usage {} > cap {}",
+                k,
+                usage,
+                cap
+            );
         }
     }
 
@@ -684,17 +756,56 @@ mod tests {
         // gets weight 100.0.
         let mut t = Topology::default();
         for q in ["1", "2"] {
-            t.upsert_qkc(Qkc { id: q.into(), host: host(q.parse().unwrap()), kme_host: None });
+            t.upsert_qkc(Qkc {
+                id: q.into(),
+                host: host(q.parse().unwrap()),
+                kme_host: None,
+            });
         }
-        t.add_edge("1", "2", EdgeMeta {
-            distance_km: 0, r0_keys_per_second: 1.0, alpha: 0.0, max_buffer_size: 1,
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 1.0,
+                alpha: 0.0,
+                max_buffer_size: 1,
+            },
+        );
+        t.upsert_orr(Orr {
+            id: "o1".into(),
+            host: host(11),
+            qkc_id: "1".into(),
         });
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o2".into(), host: host(12), qkc_id: "2".into() });
-        t.upsert_dkms(Dkms { id: "dA".into(), host: host(21), tls_id: None, orr_id: "o1".into() });
-        t.upsert_dkms(Dkms { id: "dB".into(), host: host(22), tls_id: None, orr_id: "o2".into() });
-        t.upsert_dkms(Dkms { id: "dC".into(), host: host(23), tls_id: None, orr_id: "o1".into() });
-        t.upsert_dkms(Dkms { id: "dD".into(), host: host(24), tls_id: None, orr_id: "o2".into() });
+        t.upsert_orr(Orr {
+            id: "o2".into(),
+            host: host(12),
+            qkc_id: "2".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dA".into(),
+            host: host(21),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dB".into(),
+            host: host(22),
+            tls_id: None,
+            orr_id: "o2".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dC".into(),
+            host: host(23),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dD".into(),
+            host: host(24),
+            tls_id: None,
+            orr_id: "o2".into(),
+        });
 
         let s = McfSolver::new(1);
         let coms = s.build_commodities(&t);
@@ -702,7 +813,11 @@ mod tests {
         let mut weights = HashMap::new();
         // dA→dB and dB→dA are class 100; dC→dD and dD→dC are class 1.
         for c in &coms {
-            let w = if c.src_dkms == "dA" || c.src_dkms == "dB" { 100.0 } else { 1.0 };
+            let w = if c.src_dkms == "dA" || c.src_dkms == "dB" {
+                100.0
+            } else {
+                1.0
+            };
             weights.insert(c.flow_id(), w);
         }
         let snap = s.solve(&coms, &caps, &weights);

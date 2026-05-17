@@ -35,8 +35,16 @@ pub fn load_config<T: DeserializeOwned>(module_name: &str) -> Result<T, ConfigEr
     let env_prefix = module_name.to_ascii_uppercase();
 
     let cfg = Config::builder()
-        .add_source(File::from(default_path).format(FileFormat::Toml).required(false))
-        .add_source(File::from(local_path).format(FileFormat::Toml).required(false))
+        .add_source(
+            File::from(default_path)
+                .format(FileFormat::Toml)
+                .required(false),
+        )
+        .add_source(
+            File::from(local_path)
+                .format(FileFormat::Toml)
+                .required(false),
+        )
         .add_source(
             Environment::with_prefix(&env_prefix)
                 .separator("__")

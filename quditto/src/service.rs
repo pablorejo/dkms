@@ -43,8 +43,8 @@ impl QudittoService {
     pub async fn run_minter(self) -> Result<()> {
         let rate = self.link.current_rate_kps();
         info!(
-            r0       = self.cfg().r0,
-            alpha    = self.cfg().alpha,
+            r0 = self.cfg().r0,
+            alpha = self.cfg().alpha,
             distance = self.cfg().distance_km,
             rate_kps = rate,
             "quditto: minter started",

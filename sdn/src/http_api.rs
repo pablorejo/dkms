@@ -39,7 +39,9 @@ use crate::{
 };
 
 #[derive(Serialize)]
-struct Health { status: &'static str }
+struct Health {
+    status: &'static str,
+}
 
 async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
@@ -60,19 +62,47 @@ async fn get_topology(State(svc): State<SdnService>) -> impl IntoResponse {
 }
 
 async fn get_qkcs(State(svc): State<SdnService>) -> impl IntoResponse {
-    Json(svc.topology.load().qkcs.values().cloned().collect::<Vec<_>>())
+    Json(
+        svc.topology
+            .load()
+            .qkcs
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
 }
 
 async fn get_orrs(State(svc): State<SdnService>) -> impl IntoResponse {
-    Json(svc.topology.load().orrs.values().cloned().collect::<Vec<_>>())
+    Json(
+        svc.topology
+            .load()
+            .orrs
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
 }
 
 async fn get_dkms_all(State(svc): State<SdnService>) -> impl IntoResponse {
-    Json(svc.topology.load().dkms.values().cloned().collect::<Vec<_>>())
+    Json(
+        svc.topology
+            .load()
+            .dkms
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
 }
 
 async fn get_saes(State(svc): State<SdnService>) -> impl IntoResponse {
-    Json(svc.topology.load().saes.values().cloned().collect::<Vec<_>>())
+    Json(
+        svc.topology
+            .load()
+            .saes
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// GET /rate/{dkms_id} — devuelve las rates per-peer asignadas por el MCF solver.
@@ -150,9 +180,9 @@ async fn get_rate(
 #[derive(Deserialize)]
 struct PriorityUpdate {
     dkms_id: String,
-    peer:    String,
-    role:    String,
-    class:   String,
+    peer: String,
+    role: String,
+    class: String,
 }
 
 #[derive(Deserialize)]
@@ -178,11 +208,17 @@ async fn post_priority(
         }
         let role = match crate::priority::BufferRole::from_str(&u.role) {
             Ok(r) => r,
-            Err(e) => { errors.push(format!("role: {e}")); continue; }
+            Err(e) => {
+                errors.push(format!("role: {e}"));
+                continue;
+            }
         };
         let pri = match crate::priority::TrafficPriority::from_str(&u.class) {
             Ok(p) => p,
-            Err(e) => { errors.push(format!("class: {e}")); continue; }
+            Err(e) => {
+                errors.push(format!("class: {e}"));
+                continue;
+            }
         };
         svc.priorities.set(&u.dkms_id, &u.peer, role, pri);
         applied += 1;
@@ -192,7 +228,11 @@ async fn post_priority(
         // No es caro: el MCF tarda <10ms para 12 commodities.
         let _ = svc.recompute_mcf();
     }
-    let status = if errors.is_empty() { StatusCode::OK } else { StatusCode::PARTIAL_CONTENT };
+    let status = if errors.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::PARTIAL_CONTENT
+    };
     (status, Json(json!({"applied": applied, "errors": errors})))
 }
 
@@ -214,17 +254,21 @@ async fn get_priorities(State(svc): State<SdnService>) -> impl IntoResponse {
 
 async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
     let t = svc.topology.load();
-    let v: Vec<_> = t.edges.iter().map(|((a, b), meta)| {
-        json!({
-            "a": a,
-            "b": b,
-            "distance_km":        meta.distance_km,
-            "r0_keys_per_second": meta.r0_keys_per_second,
-            "alpha":              meta.alpha,
-            "max_buffer_size":    meta.max_buffer_size,
-            "capacity_keys_per_second": meta.quditto_capacity_keys_per_second(),
+    let v: Vec<_> = t
+        .edges
+        .iter()
+        .map(|((a, b), meta)| {
+            json!({
+                "a": a,
+                "b": b,
+                "distance_km":        meta.distance_km,
+                "r0_keys_per_second": meta.r0_keys_per_second,
+                "alpha":              meta.alpha,
+                "max_buffer_size":    meta.max_buffer_size,
+                "capacity_keys_per_second": meta.quditto_capacity_keys_per_second(),
+            })
         })
-    }).collect();
+        .collect();
     Json(v)
 }
 
@@ -255,7 +299,7 @@ async fn get_sae_binding(
         return err_response(SdnError::UnknownSae(sae_id));
     };
     match binding_json(&t, sae) {
-        Ok(v)  => Json(v).into_response(),
+        Ok(v) => Json(v).into_response(),
         Err(e) => err_response(e),
     }
 }
@@ -270,32 +314,44 @@ async fn list_sae_bindings(
     };
     // Python returns the FULL table (not filtered by dkms_id). DKMS uses it
     // as a single bootstrap call to warm its SaeBindingCache.
-    let bindings: serde_json::Map<String, Value> = t.saes.iter().filter_map(|(sid, s)| {
-        let d = t.dkms.get(&s.dkms_id)?;
-        Some((sid.clone(), build_binding(&t, sid, d)))
-    }).collect();
+    let bindings: serde_json::Map<String, Value> = t
+        .saes
+        .iter()
+        .filter_map(|(sid, s)| {
+            let d = t.dkms.get(&s.dkms_id)?;
+            Some((sid.clone(), build_binding(&t, sid, d)))
+        })
+        .collect();
     Json(json!({
         "dkms_id":  dkms.id,
         "bindings": bindings,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ---------------- SAE CRUD ---------------------------------------------------
 
 #[derive(Deserialize)]
-struct DkmsTargetPayload { ip: String, port: u16 }
+struct DkmsTargetPayload {
+    ip: String,
+    port: u16,
+}
 
 #[derive(Deserialize)]
 struct SaeCreatePayload {
     id: String,
-    #[serde(default)] dkms_id: Option<String>,
-    #[serde(default)] dkms_target: Option<DkmsTargetPayload>,
+    #[serde(default)]
+    dkms_id: Option<String>,
+    #[serde(default)]
+    dkms_target: Option<DkmsTargetPayload>,
 }
 
 #[derive(Deserialize)]
 struct SaeUpdatePayload {
-    #[serde(default)] dkms_id: Option<String>,
-    #[serde(default)] dkms_target: Option<DkmsTargetPayload>,
+    #[serde(default)]
+    dkms_id: Option<String>,
+    #[serde(default)]
+    dkms_target: Option<DkmsTargetPayload>,
 }
 
 async fn register_sae(
@@ -303,9 +359,12 @@ async fn register_sae(
     Json(p): Json<SaeCreatePayload>,
 ) -> impl IntoResponse {
     let target = p.dkms_target.as_ref().map(|t| (t.ip.as_str(), t.port));
-    match svc.topology.register_sae(&p.id, p.dkms_id.as_deref(), target) {
+    match svc
+        .topology
+        .register_sae(&p.id, p.dkms_id.as_deref(), target)
+    {
         Ok(sae) => (StatusCode::CREATED, Json(sae)).into_response(),
-        Err(e)  => err_response(e),
+        Err(e) => err_response(e),
     }
 }
 
@@ -315,9 +374,12 @@ async fn update_sae(
     Json(p): Json<SaeUpdatePayload>,
 ) -> impl IntoResponse {
     let target = p.dkms_target.as_ref().map(|t| (t.ip.as_str(), t.port));
-    match svc.topology.update_sae(&sae_id, p.dkms_id.as_deref(), target) {
+    match svc
+        .topology
+        .update_sae(&sae_id, p.dkms_id.as_deref(), target)
+    {
         Ok(sae) => Json(sae).into_response(),
-        Err(e)  => err_response(e),
+        Err(e) => err_response(e),
     }
 }
 
@@ -326,8 +388,8 @@ async fn delete_sae(
     AxumPath(sae_id): AxumPath<String>,
 ) -> impl IntoResponse {
     match svc.topology.delete_sae(&sae_id) {
-        Ok(())  => StatusCode::NO_CONTENT.into_response(),
-        Err(e)  => err_response(e),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_response(e),
     }
 }
 
@@ -345,17 +407,19 @@ async fn update_link_capacity(
     Json(p): Json<LinkCapacityPayload>,
 ) -> impl IntoResponse {
     if p.qkc_a.is_empty() || p.qkc_b.is_empty() {
-        return err_response(SdnError::BadRequest(
-            "qkc_a and qkc_b are required".into(),
-        ));
+        return err_response(SdnError::BadRequest("qkc_a and qkc_b are required".into()));
     }
-    match svc.topology.update_edge_capacity_kps(&p.qkc_a, &p.qkc_b, p.capacity_keys_per_second) {
+    match svc
+        .topology
+        .update_edge_capacity_kps(&p.qkc_a, &p.qkc_b, p.capacity_keys_per_second)
+    {
         Ok(changed) => Json(json!({
             "qkc_a": p.qkc_a,
             "qkc_b": p.qkc_b,
             "capacity_keys_per_second": p.capacity_keys_per_second,
             "changed": changed,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => err_response(e),
     }
 }
@@ -371,24 +435,27 @@ struct PathRequest {
     #[serde(default = "default_policy")]
     policy: String,
 }
-fn default_policy() -> String { "shortest_hops".into() }
+fn default_policy() -> String {
+    "shortest_hops".into()
+}
 
 async fn compute_path(
     State(svc): State<SdnService>,
     Json(req): Json<PathRequest>,
 ) -> impl IntoResponse {
     let policy = match req.policy.as_str() {
-        "min_latency"            => routing::Policy::MinLatency,
+        "min_latency" => routing::Policy::MinLatency,
         "max_available_capacity" => routing::Policy::MaxAvailableCapacity,
-        "min_cost_flow"          => routing::Policy::MinCostFlow,
-        _                        => routing::Policy::ShortestHops,
+        "min_cost_flow" => routing::Policy::MinCostFlow,
+        _ => routing::Policy::ShortestHops,
     };
     match routing::compute(&svc.topology, &req.src, &req.dst, req.required_bps, policy) {
         Ok(p) => Json(json!({
             "path": p.nodes,
             "estimated_latency_us": p.estimated_latency_us,
             "bottleneck_capacity_bps": p.bottleneck_capacity_bps,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => err_response(e),
     }
 }
@@ -404,16 +471,12 @@ fn http_status_for(e: &SdnError) -> (StatusCode, String) {
     use SdnError::*;
     let msg = e.to_string();
     let code = match e {
-        UnknownNode(_)
-        | UnknownLink(_)
-        | UnknownDkms(_)
-        | UnknownSae(_)
-        | NoPath(..)             => StatusCode::NOT_FOUND,
-        SaeAlreadyRegistered(_)  => StatusCode::CONFLICT,
-        BadRequest(_)
-        | Topology(_)
-        | AdmissionDenied(_)     => StatusCode::BAD_REQUEST,
-        _                        => StatusCode::INTERNAL_SERVER_ERROR,
+        UnknownNode(_) | UnknownLink(_) | UnknownDkms(_) | UnknownSae(_) | NoPath(..) => {
+            StatusCode::NOT_FOUND
+        }
+        SaeAlreadyRegistered(_) => StatusCode::CONFLICT,
+        BadRequest(_) | Topology(_) | AdmissionDenied(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, msg)
 }
@@ -422,21 +485,21 @@ fn http_status_for(e: &SdnError) -> (StatusCode, String) {
 
 pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
     let app = Router::new()
-        .route("/healthz",                  get(healthz))
-        .route("/topology",                 get(get_topology))
-        .route("/qkcs",                     get(get_qkcs))
-        .route("/orrs",                     get(get_orrs))
-        .route("/dkms",                     get(get_dkms_all))
-        .route("/saes",                     get(get_saes))
-        .route("/links",                    get(get_links))
-        .route("/sae",                      post(register_sae))
-        .route("/sae/:sae_id",              put(update_sae).delete(delete_sae))
-        .route("/sae/:sae_id/binding",      get(get_sae_binding))
-        .route("/sae-bindings/:dkms_id",    get(list_sae_bindings))
-        .route("/link-capacity",            post(update_link_capacity))
-        .route("/paths",                    post(compute_path))
-        .route("/rate/:dkms_id",            get(get_rate))
-        .route("/priority",                 post(post_priority).get(get_priorities))
+        .route("/healthz", get(healthz))
+        .route("/topology", get(get_topology))
+        .route("/qkcs", get(get_qkcs))
+        .route("/orrs", get(get_orrs))
+        .route("/dkms", get(get_dkms_all))
+        .route("/saes", get(get_saes))
+        .route("/links", get(get_links))
+        .route("/sae", post(register_sae))
+        .route("/sae/:sae_id", put(update_sae).delete(delete_sae))
+        .route("/sae/:sae_id/binding", get(get_sae_binding))
+        .route("/sae-bindings/:dkms_id", get(list_sae_bindings))
+        .route("/link-capacity", post(update_link_capacity))
+        .route("/paths", post(compute_path))
+        .route("/rate/:dkms_id", get(get_rate))
+        .route("/priority", post(post_priority).get(get_priorities))
         .with_state(svc);
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "sdn HTTP listening");

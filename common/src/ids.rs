@@ -65,7 +65,10 @@ macro_rules! id_newtype {
 id_newtype!(NodeId, "Identifies a node in the topology graph.");
 id_newtype!(SaeId, "Identifies a Secure Application Entity (ETSI SAE).");
 id_newtype!(KeyId, "Identifies a single key blob.");
-id_newtype!(LinkId, "Identifies a topology link (directed edge between two NodeIds).");
+id_newtype!(
+    LinkId,
+    "Identifies a topology link (directed edge between two NodeIds)."
+);
 
 #[cfg(test)]
 mod tests {

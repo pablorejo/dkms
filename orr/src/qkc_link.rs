@@ -41,8 +41,8 @@ pub struct QkcLink {
 }
 
 struct LinkInner {
-    addr:       String,
-    send_tx:    mpsc::Sender<Frame>,
+    addr: String,
+    send_tx: mpsc::Sender<Frame>,
     /// Sender que el reader usa para inyectar deliveries. `Mutex` para
     /// poder rotarlo en escenarios de test.
     deliveries: Mutex<Option<DeliveryTx>>,
@@ -147,9 +147,7 @@ async fn run_session(
                         }
                     }
                 }
-                Err(wire::WireError::Io(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
+                Err(wire::WireError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!("orr.qkc_link.eof");
                     return;
                 }

@@ -83,11 +83,7 @@ impl AckPendingStore {
 
     /// Devuelve cuántas entradas pendientes hay para un peer concreto.
     pub fn pending_count(&self, peer: &str) -> usize {
-        self.inner
-            .lock()
-            .get(peer)
-            .map(|m| m.len())
-            .unwrap_or(0)
+        self.inner.lock().get(peer).map(|m| m.len()).unwrap_or(0)
     }
 
     /// Snapshot agregado: lista de (peer, count). Útil para métricas y

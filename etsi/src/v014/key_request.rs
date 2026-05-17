@@ -188,7 +188,11 @@ fn split_csv_like(s: &str) -> Vec<Value> {
 fn deserialize_sae_list<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Vec<String>>, D::Error> {
     let v = Value::deserialize(de)?;
     let normalized = Etsi014KeyRequest::normalize_sae_list(&v);
-    Ok(if normalized.is_empty() { None } else { Some(normalized) })
+    Ok(if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    })
 }
 
 impl EtsiMessage for Etsi014KeyRequest {

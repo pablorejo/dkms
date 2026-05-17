@@ -19,7 +19,9 @@ pub struct Etsi020Key {
 impl Etsi020Key {
     pub fn validate(&self) -> Result<(), EtsiError> {
         if self.value.is_empty() {
-            return Err(EtsiError::Validation("value must be at least 1 byte".into()));
+            return Err(EtsiError::Validation(
+                "value must be at least 1 byte".into(),
+            ));
         }
         Ok(())
     }

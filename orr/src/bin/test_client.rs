@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use clap::{Parser, Subcommand};
 use common::proto::{
     common::v1::NodeId,
     orr::v1::{
@@ -85,15 +85,26 @@ enum Cmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { addr, dest, message, max_hops, headers } => {
-            do_send(&addr, &dest, message.into_bytes(), max_hops, headers).await
-        }
-        Cmd::Listen { addr, subscriber_id, count } => {
-            do_listen(&addr, &subscriber_id, count).await
-        }
-        Cmd::Stress { addr, dest, count, bytes, max_hops, orr_path } => {
-            do_stress(&addr, &dest, count, bytes, max_hops, &orr_path).await
-        }
+        Cmd::Send {
+            addr,
+            dest,
+            message,
+            max_hops,
+            headers,
+        } => do_send(&addr, &dest, message.into_bytes(), max_hops, headers).await,
+        Cmd::Listen {
+            addr,
+            subscriber_id,
+            count,
+        } => do_listen(&addr, &subscriber_id, count).await,
+        Cmd::Stress {
+            addr,
+            dest,
+            count,
+            bytes,
+            max_hops,
+            orr_path,
+        } => do_stress(&addr, &dest, count, bytes, max_hops, &orr_path).await,
         Cmd::GetPubkey { addr } => do_get_pubkey(&addr).await,
     }
 }
@@ -123,7 +134,9 @@ async fn do_stress(
         }
         let resp = client
             .send_message(SendMessageRequest {
-                destination: Some(NodeId { value: dest.to_string() }),
+                destination: Some(NodeId {
+                    value: dest.to_string(),
+                }),
                 payload,
                 max_hops,
                 has_max_hops: true,
@@ -181,7 +194,9 @@ async fn do_send(
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .send_message(SendMessageRequest {
-            destination: Some(NodeId { value: dest.to_string() }),
+            destination: Some(NodeId {
+                value: dest.to_string(),
+            }),
             payload,
             max_hops,
             has_max_hops: true,
@@ -215,7 +230,11 @@ async fn do_listen(addr: &str, subscriber_id: &str, count: Option<u64>) -> Resul
     while let Some(msg) = stream.message().await? {
         n += 1;
         let origin = msg.origin.as_ref().map(|n| n.value.as_str()).unwrap_or("?");
-        let dest = msg.destination.as_ref().map(|n| n.value.as_str()).unwrap_or("?");
+        let dest = msg
+            .destination
+            .as_ref()
+            .map(|n| n.value.as_str())
+            .unwrap_or("?");
         println!(
             "[{n}] origin={} dest={} pqc={} bytes={} payload={}",
             origin,

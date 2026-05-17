@@ -52,7 +52,11 @@ pub fn compute(
             bottleneck = bottleneck.min(meta.quditto_capacity_keys_per_second());
         }
     }
-    let bottleneck_bps = if bottleneck.is_finite() { bottleneck as u64 } else { 0 };
+    let bottleneck_bps = if bottleneck.is_finite() {
+        bottleneck as u64
+    } else {
+        0
+    };
 
     Ok(Path {
         nodes,

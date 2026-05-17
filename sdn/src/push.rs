@@ -14,7 +14,9 @@ pub struct Pushers {
 
 impl Pushers {
     pub fn new() -> Self {
-        Self { subscribers: Mutex::new(Vec::new()) }
+        Self {
+            subscribers: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn subscribe(&self) -> mpsc::Receiver<std::result::Result<TopologyEvent, tonic::Status>> {
@@ -33,12 +35,16 @@ impl Pushers {
         }
         if !to_remove.is_empty() {
             let mut g = self.subscribers.lock();
-            to_remove.into_iter().rev().for_each(|i| { g.remove(i); });
+            to_remove.into_iter().rev().for_each(|i| {
+                g.remove(i);
+            });
             debug!(remaining = g.len(), "pruned closed topology subscribers");
         }
     }
 }
 
 impl Default for Pushers {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

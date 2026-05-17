@@ -53,7 +53,7 @@ pub enum AeadError {
 /// adjunto al final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedMessage {
-    pub nonce:      [u8; NONCE_LEN],
+    pub nonce: [u8; NONCE_LEN],
     pub ciphertext: Vec<u8>,
 }
 
@@ -91,11 +91,20 @@ pub fn seal(key: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<SealedMessage, A
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng); // 12 B random
     let ct = cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| AeadError::Encrypt)?;
     let mut nonce_out = [0u8; NONCE_LEN];
     nonce_out.copy_from_slice(nonce.as_slice());
-    Ok(SealedMessage { nonce: nonce_out, ciphertext: ct })
+    Ok(SealedMessage {
+        nonce: nonce_out,
+        ciphertext: ct,
+    })
 }
 
 /// Descifra y verifica. Devuelve error si la clave es incorrecta, el
@@ -108,7 +117,13 @@ pub fn open(key: &[u8], msg: &SealedMessage, aad: &[u8]) -> Result<Vec<u8>, Aead
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Nonce::from_slice(&msg.nonce);
     cipher
-        .decrypt(nonce, Payload { msg: &msg.ciphertext, aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &msg.ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| AeadError::Decrypt)
 }
 
@@ -129,7 +144,10 @@ mod tests {
     fn wrong_aad_fails() {
         let key = [0x42u8; KEY_LEN];
         let sealed = seal(&key, b"hello", b"hdr").unwrap();
-        assert!(matches!(open(&key, &sealed, b"NOPE"), Err(AeadError::Decrypt)));
+        assert!(matches!(
+            open(&key, &sealed, b"NOPE"),
+            Err(AeadError::Decrypt)
+        ));
     }
 
     #[test]

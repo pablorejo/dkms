@@ -5,9 +5,7 @@ use serde_json::Value;
 
 use crate::message::NetworkMessage;
 
-use super::{
-    Etsi020GetVersions, Etsi020Message, Etsi020PostExtKeysVoid, Etsi020VersionContainer,
-};
+use super::{Etsi020GetVersions, Etsi020Message, Etsi020PostExtKeysVoid, Etsi020VersionContainer};
 
 /// Códigos HTTP que en Python disparan la rama "es error".
 /// (`ETSI020.AVAILABLE_ERROR_CODES`).

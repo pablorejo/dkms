@@ -53,6 +53,8 @@ pub fn spawn_all(
     peers: Arc<PeerRegistry>,
     peer_grpc_addrs: std::collections::HashMap<String, String>,
     suite: String,
+    rotation_period_ms: u64,
+    epoch_history_keep: usize,
 ) {
     let local_orr_id = peers.local_orr_id().to_string();
     for (peer_id, addr) in peer_grpc_addrs {
@@ -61,7 +63,17 @@ pub fn spawn_all(
         let local_orr_id = local_orr_id.clone();
         let suite = suite.clone();
         tokio::spawn(async move {
-            bootstrap_peer(identity, peers, local_orr_id, peer_id, addr, suite).await;
+            bootstrap_peer(
+                identity,
+                peers,
+                local_orr_id,
+                peer_id,
+                addr,
+                suite,
+                rotation_period_ms,
+                epoch_history_keep,
+            )
+            .await;
         });
     }
 }
@@ -73,6 +85,8 @@ async fn bootstrap_peer(
     peer_id: String,
     addr: String,
     suite: String,
+    rotation_period_ms: u64,
+    epoch_history_keep: usize,
 ) {
     // Fase 1: asegurar pubkey en el registry (necesaria para encap, y
     // útil incluso si vamos a ser el lado pasivo del handshake — la
@@ -95,6 +109,12 @@ async fn bootstrap_peer(
     // inicia el encap. El otro espera a recibir el RPC y guarda en su
     // handler de `establish_secret`. Garantiza un único initiator por
     // par → un único shared_secret → ambos lados coinciden.
+    //
+    // Tras OBJ-011 (audit H-3 / Option B), ese shared_secret se guarda
+    // como `bootstrap_secret` (NO como master_secret) y se usa solo
+    // como clave HMAC para autenticar las RPCs de rotación. El
+    // master_secret real por época nace de cada rotación con keypair
+    // ML-KEM efímera fresca (ver `rotation.rs`).
     if local_orr_id >= peer_id {
         debug!(
             peer = %peer_id,
@@ -103,56 +123,86 @@ async fn bootstrap_peer(
         return;
     }
 
-    // Idempotente: si ya hubo otra task que nos rellenó el slot, no
-    // rehacemos (defensa por si en el futuro hay refresh).
-    if peers.has_master_secret(&peer_id) {
-        debug!(peer = %peer_id, "orr.bootstrap secret already present");
-        return;
-    }
-
-    let pk = match peers.public_key(&peer_id) {
-        Some(p) => p,
-        None => {
-            warn!(peer = %peer_id, "orr.bootstrap pubkey still missing — aborting secret");
-            return;
-        }
-    };
-
-    let mut backoff = Duration::from_millis(250);
-    let max_backoff = Duration::from_secs(30);
-    loop {
-        match attempt_establish(&identity, &suite, &pk, &local_orr_id, &peer_id, &addr).await {
-            Ok(secret) => {
-                peers.put_master_secret(peer_id.clone(), secret);
-                info!(
-                    local = %local_orr_id,
-                    peer  = %peer_id,
-                    addr  = %addr,
-                    "orr.bootstrap master_secret ok"
-                );
+    // Idempotente: si ya hubo otra task que nos rellenó el bootstrap,
+    // saltamos el encap pero igual disparamos rotación + spawn por si
+    // este peer reinició y perdió `master_secrets`.
+    if !peers.has_bootstrap(&peer_id) {
+        let pk = match peers.public_key(&peer_id) {
+            Some(p) => p,
+            None => {
+                warn!(peer = %peer_id, "orr.bootstrap pubkey still missing — aborting bootstrap");
                 return;
             }
-            Err(e) => {
-                debug!(
-                    peer = %peer_id,
-                    addr = %addr,
-                    error = %e,
-                    backoff_ms = backoff.as_millis() as u64,
-                    "orr.bootstrap establish_secret retry",
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
+        };
+
+        let mut backoff = Duration::from_millis(250);
+        let max_backoff = Duration::from_secs(30);
+        loop {
+            match attempt_establish(&identity, &suite, &pk, &local_orr_id, &peer_id, &addr).await {
+                Ok(secret) => {
+                    // OBJ-011: guardar como bootstrap_secret (HMAC key),
+                    // NO como master_secret.
+                    peers.set_bootstrap(peer_id.clone(), secret);
+                    info!(
+                        local = %local_orr_id,
+                        peer  = %peer_id,
+                        addr  = %addr,
+                        "orr.bootstrap bootstrap_secret ok"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    debug!(
+                        peer = %peer_id,
+                        addr = %addr,
+                        error = %e,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "orr.bootstrap establish_secret retry",
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
             }
         }
+    } else {
+        debug!(peer = %peer_id, "orr.bootstrap bootstrap_secret already present");
     }
+
+    // Fase 3: primera rotación inmediata (epoch 1). Sin ella, las
+    // callsites de `service.rs` que esperan `master_secrets[peer][*]`
+    // (envío de onion frames) no tendrían entrada disponible. Si
+    // falla (p.ej. responder aún booteando), la task periódica de
+    // abajo reintentará en el siguiente tick.
+    match crate::rotation::run_one_rotation(&suite, &local_orr_id, &peer_id, &addr, &peers).await {
+        Ok(epoch) => info!(
+            local = %local_orr_id,
+            peer  = %peer_id,
+            epoch,
+            "orr.bootstrap first rotation complete",
+        ),
+        Err(e) => warn!(
+            local = %local_orr_id,
+            peer  = %peer_id,
+            error = %e,
+            "orr.bootstrap first rotation failed; periodic task will retry",
+        ),
+    }
+
+    // Fase 4: arrancar el task periódico que renueva master_secret
+    // cada `rotation_period_ms`. Backoff + lex-smaller guard se
+    // hacen dentro de `spawn_rotation_task`.
+    crate::rotation::spawn_rotation_task(
+        suite,
+        local_orr_id,
+        peer_id,
+        addr,
+        peers,
+        rotation_period_ms,
+        epoch_history_keep,
+    );
 }
 
-async fn fetch_pubkey(
-    peers: &PeerRegistry,
-    local_orr_id: &str,
-    peer_id: &str,
-    addr: &str,
-) {
+async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, addr: &str) {
     let mut backoff = Duration::from_millis(250);
     let max_backoff = Duration::from_secs(30);
     loop {
@@ -194,9 +244,7 @@ async fn fetch_pubkey(
     }
 }
 
-async fn try_fetch_pubkey(
-    addr: &str,
-) -> std::result::Result<(Vec<u8>, String, String), String> {
+async fn try_fetch_pubkey(addr: &str) -> std::result::Result<(Vec<u8>, String, String), String> {
     let ch = Channel::from_shared(addr.to_string())
         .map_err(|e| format!("addr inválido: {e}"))?
         .connect()
@@ -240,7 +288,9 @@ async fn attempt_establish(
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .establish_secret(EstablishSecretRequest {
-            from:       Some(NodeId { value: local_orr_id.to_string() }),
+            from: Some(NodeId {
+                value: local_orr_id.to_string(),
+            }),
             ciphertext: encap.ciphertext,
         })
         .await

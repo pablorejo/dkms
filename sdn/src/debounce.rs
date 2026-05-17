@@ -50,26 +50,26 @@ type FireFn = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[derive(Debug)]
 struct State {
-    window:       Duration,
-    max_wait:     Duration,
+    window: Duration,
+    max_wait: Duration,
     /// `true` between the first request of a cycle and the moment we
     /// fire (or cancel).
-    pending:      bool,
+    pending: bool,
     /// When the first request of the current cycle landed. `None`
     /// outside a cycle.
-    cycle_start:  Option<Instant>,
+    cycle_start: Option<Instant>,
     /// When the most recent request of the current cycle landed.
     /// Drives the sliding-window deadline.
     last_request: Option<Instant>,
     /// Once flipped on `shutdown()`, the worker exits at its next
     /// chance and no further fires are scheduled.
-    closed:       bool,
+    closed: bool,
 }
 
 struct Inner {
-    state:  Mutex<State>,
+    state: Mutex<State>,
     notify: Notify,
-    fire:   FireFn,
+    fire: FireFn,
 }
 
 #[derive(Clone)]
@@ -96,13 +96,13 @@ impl Debouncer {
             state: Mutex::new(State {
                 window,
                 max_wait,
-                pending:      false,
-                cycle_start:  None,
+                pending: false,
+                cycle_start: None,
                 last_request: None,
-                closed:       false,
+                closed: false,
             }),
             notify: Notify::new(),
-            fire:   Arc::new(fire),
+            fire: Arc::new(fire),
         });
         let worker_inner = inner.clone();
         tokio::spawn(async move { run_worker(worker_inner).await });
@@ -190,7 +190,7 @@ impl Debouncer {
     pub fn update_timing(&self, window: Duration, max_wait: Duration) {
         {
             let mut s = self.inner.state.lock();
-            s.window   = window;
+            s.window = window;
             s.max_wait = max_wait;
         }
         self.inner.notify.notify_one();
@@ -242,7 +242,7 @@ async fn run_worker(inner: Arc<Inner>) {
             }
             match (s.pending, s.last_request) {
                 (true, Some(last)) => Wake::At(last + s.window),
-                _                  => Wake::Idle,
+                _ => Wake::Idle,
             }
         };
         match next {
@@ -319,8 +319,8 @@ pub fn estimate_timing(n_dkms: usize) -> (Duration, Duration, Duration) {
     }
     let n = n_dkms as f64;
     let est_solve_s = ((n / 50.0).powi(3) * 8.0).max(0.5);
-    let max_wait_s  = (est_solve_s * 1.25 + 1.0).max(2.0);
-    let window_s    = (max_wait_s * 0.2).max(0.5);
+    let max_wait_s = (est_solve_s * 1.25 + 1.0).max(2.0);
+    let window_s = (max_wait_s * 0.2).max(0.5);
     (
         Duration::from_secs_f64(est_solve_s),
         Duration::from_secs_f64(window_s),
@@ -339,18 +339,24 @@ mod tests {
     fn counter() -> (Arc<AtomicUsize>, impl Fn() + Send + Sync + 'static) {
         let c = Arc::new(AtomicUsize::new(0));
         let cc = c.clone();
-        (c, move || { cc.fetch_add(1, Ordering::SeqCst); })
+        (c, move || {
+            cc.fetch_add(1, Ordering::SeqCst);
+        })
     }
 
     /// Wait for a counter to reach `target` (or fail after `bound`).
     async fn wait_for(c: &AtomicUsize, target: usize, bound: Duration) {
         let start = Instant::now();
         loop {
-            if c.load(Ordering::SeqCst) >= target { return; }
+            if c.load(Ordering::SeqCst) >= target {
+                return;
+            }
             if start.elapsed() > bound {
                 panic!(
                     "counter only reached {} (expected {}) in {:?}",
-                    c.load(Ordering::SeqCst), target, bound,
+                    c.load(Ordering::SeqCst),
+                    target,
+                    bound,
                 );
             }
             sleep(Duration::from_millis(2)).await;

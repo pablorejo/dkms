@@ -94,11 +94,7 @@ impl PendingStore {
     /// Recupera *K* para `sae`. Devuelve `(material, initiator)` para que el
     /// handler ETSI pueda armar la respuesta. Tras servir al último SAE
     /// autorizado, la entrada se borra (zeroize automático).
-    pub fn take_for_sae(
-        &self,
-        key_id: &KeyId,
-        sae: &SaeId,
-    ) -> Result<(Zeroizing<Vec<u8>>, SaeId)> {
+    pub fn take_for_sae(&self, key_id: &KeyId, sae: &SaeId) -> Result<(Zeroizing<Vec<u8>>, SaeId)> {
         let now = Instant::now();
 
         // Fase 1: bajo el lock, validar y marcar como entregada.
@@ -215,16 +211,22 @@ mod tests {
         );
 
         // alice está autorizada
-        let (m, ini) = s.take_for_sae(&KeyId::new("k1"), &SaeId::new("alice")).unwrap();
+        let (m, ini) = s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("alice"))
+            .unwrap();
         assert_eq!(&*m, &[1, 2, 3]);
         assert_eq!(ini.as_str(), "master");
 
         // eve no
-        let err = s.take_for_sae(&KeyId::new("k1"), &SaeId::new("eve")).unwrap_err();
+        let err = s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("eve"))
+            .unwrap_err();
         assert!(matches!(err, DkmsError::KeyNotAuthorized { .. }));
 
         // bob sí (y al ser el último autorizado, la entrada se borra)
-        let (m, _) = s.take_for_sae(&KeyId::new("k1"), &SaeId::new("bob")).unwrap();
+        let (m, _) = s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("bob"))
+            .unwrap();
         assert_eq!(&*m, &[1, 2, 3]);
         assert_eq!(s.len(), 0);
     }
@@ -239,13 +241,17 @@ mod tests {
             vec![1, 2, 3],
             None,
         );
-        let _ = s.take_for_sae(&KeyId::new("k1"), &SaeId::new("alice")).unwrap();
+        let _ = s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("alice"))
+            .unwrap();
         let err = s
             .take_for_sae(&KeyId::new("k1"), &SaeId::new("alice"))
             .unwrap_err();
         assert!(matches!(err, DkmsError::KeyNotAuthorized { .. }));
         // bob todavía puede
-        assert!(s.take_for_sae(&KeyId::new("k1"), &SaeId::new("bob")).is_ok());
+        assert!(s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("bob"))
+            .is_ok());
     }
 
     #[test]
@@ -259,7 +265,9 @@ mod tests {
             Some(Duration::from_millis(1)),
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let err = s.take_for_sae(&KeyId::new("k1"), &SaeId::new("alice")).unwrap_err();
+        let err = s
+            .take_for_sae(&KeyId::new("k1"), &SaeId::new("alice"))
+            .unwrap_err();
         assert!(matches!(err, DkmsError::KeyExpired));
         // se eliminó al detectar la expiración
         assert_eq!(s.len(), 0);

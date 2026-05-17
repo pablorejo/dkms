@@ -22,10 +22,10 @@ pub struct DialOpts {
 impl Default for DialOpts {
     fn default() -> Self {
         Self {
-            connect_timeout:   Duration::from_secs(2),
-            request_timeout:   Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(10),
             keepalive_interval: Duration::from_secs(15),
-            keepalive_timeout:  Duration::from_secs(5),
+            keepalive_timeout: Duration::from_secs(5),
             tls: None,
         }
     }

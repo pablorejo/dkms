@@ -25,12 +25,12 @@
 //! El `shared_secret` siempre es 32 bytes — encaja directo como clave
 //! de AES-256-GCM ([`crate::crypto::aead`]) en el patrón KEM-DEM.
 
+use ml_kem::array::typenum::Unsigned;
 use ml_kem::{
     array::Array,
     kem::{Decapsulate, Encapsulate},
     EncodedSizeUser, KemCore, MlKem1024, MlKem512, MlKem768,
 };
-use ml_kem::array::typenum::Unsigned;
 use rand::rngs::OsRng;
 use thiserror::Error;
 
@@ -47,8 +47,8 @@ pub enum PqcError {
 /// Identifiers para los parameter sets soportados. Coinciden con los
 /// nombres FIPS 203 (en kebab-case minúscula).
 pub mod suite {
-    pub const ML_KEM_512:  &str = "ml-kem-512";
-    pub const ML_KEM_768:  &str = "ml-kem-768";
+    pub const ML_KEM_512: &str = "ml-kem-512";
+    pub const ML_KEM_768: &str = "ml-kem-768";
     pub const ML_KEM_1024: &str = "ml-kem-1024";
 }
 
@@ -57,13 +57,13 @@ pub mod suite {
 pub struct KemKeypair {
     pub public: Vec<u8>,
     pub secret: Vec<u8>,
-    pub suite:  String,
+    pub suite: String,
 }
 
 /// Salida de encapsulación.
 #[derive(Clone, Debug)]
 pub struct KemEncap {
-    pub ciphertext:    Vec<u8>,
+    pub ciphertext: Vec<u8>,
     pub shared_secret: Vec<u8>, // 32 bytes (B32)
 }
 
@@ -85,8 +85,8 @@ pub trait Kem: Send + Sync {
 /// [`suite`].
 pub fn kem_for(suite: &str) -> Result<Box<dyn Kem>, PqcError> {
     match suite {
-        suite::ML_KEM_512  => Ok(Box::new(MlKem512Kem)),
-        suite::ML_KEM_768  => Ok(Box::new(MlKem768Kem)),
+        suite::ML_KEM_512 => Ok(Box::new(MlKem512Kem)),
+        suite::ML_KEM_768 => Ok(Box::new(MlKem768Kem)),
         suite::ML_KEM_1024 => Ok(Box::new(MlKem1024Kem)),
         other => Err(PqcError::UnsupportedSuite(other.into())),
     }
@@ -168,8 +168,8 @@ macro_rules! impl_kem {
     };
 }
 
-impl_kem!(MlKem512Kem,  MlKem512,  suite::ML_KEM_512);
-impl_kem!(MlKem768Kem,  MlKem768,  suite::ML_KEM_768);
+impl_kem!(MlKem512Kem, MlKem512, suite::ML_KEM_512);
+impl_kem!(MlKem768Kem, MlKem768, suite::ML_KEM_768);
 impl_kem!(MlKem1024Kem, MlKem1024, suite::ML_KEM_1024);
 
 #[cfg(test)]
@@ -212,14 +212,17 @@ mod tests {
             assert_eq!(k.suite(), s);
             let kp = k.keygen().unwrap();
             let enc = k.encap(&kp.public).unwrap();
-            let ss  = k.decap(&kp.secret, &enc.ciphertext).unwrap();
+            let ss = k.decap(&kp.secret, &enc.ciphertext).unwrap();
             assert_eq!(ss, enc.shared_secret);
         }
     }
 
     #[test]
     fn kem_for_unknown_suite() {
-        assert!(matches!(kem_for("kyber-classic"), Err(PqcError::UnsupportedSuite(_))));
+        assert!(matches!(
+            kem_for("kyber-classic"),
+            Err(PqcError::UnsupportedSuite(_))
+        ));
     }
 
     #[test]

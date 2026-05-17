@@ -123,7 +123,8 @@ impl SaeBuckets {
     }
 
     pub fn set_limits(&self, sae: &SaeId, refill_per_sec: u64, capacity: u64) {
-        self.map.insert(sae.clone(), Bucket::new(capacity, refill_per_sec));
+        self.map
+            .insert(sae.clone(), Bucket::new(capacity, refill_per_sec));
     }
 
     /// Intenta consumir `n` tokens al SAE. Si no se ha visto antes se le

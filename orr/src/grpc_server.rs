@@ -18,10 +18,12 @@
 use common::proto::common::v1::{NodeId, Status as ProtoStatus};
 use common::proto::orr::v1::{
     orr_control_server::{OrrControl, OrrControlServer},
-    Circuit as ProtoCircuit, CloseCircuitRequest, DeliveredMessage, EstablishSecretRequest,
+    Circuit as ProtoCircuit, CloseCircuitRequest, DeliveredMessage,
+    EstablishEphemeralSecretRequest, EstablishEphemeralSecretResponse, EstablishSecretRequest,
     EstablishSecretResponse, GetCircuitRequest, GetPublicKeyRequest, GetPublicKeyResponse,
     ListCircuitsRequest, OpenCircuitRequest, OpenCircuitResponse, RelayFrame,
-    SendMessageRequest, SendMessageResponse, StreamDeliveriesRequest,
+    RequestEphemeralKeyRequest, RequestEphemeralKeyResponse, SendMessageRequest,
+    SendMessageResponse, StreamDeliveriesRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -76,7 +78,9 @@ impl OrrControl for OrrGrpc {
 
         Ok(Response::new(SendMessageResponse {
             status: outcome.status.to_string(),
-            final_destination: Some(NodeId { value: outcome.final_dest_orr }),
+            final_destination: Some(NodeId {
+                value: outcome.final_dest_orr,
+            }),
             next_hop_qkc: outcome.next_hop_qkc,
             remaining_hops: outcome.remaining_hops,
             pqc_layer: outcome.pqc_layer,
@@ -127,8 +131,10 @@ impl OrrControl for OrrGrpc {
         let id = &self.svc.identity;
         Ok(Response::new(GetPublicKeyResponse {
             public_key: id.public_key.clone(),
-            suite:      id.suite.clone(),
-            orr_id:     Some(NodeId { value: self.svc.cfg.orr_id.clone() }),
+            suite: id.suite.clone(),
+            orr_id: Some(NodeId {
+                value: self.svc.cfg.orr_id.clone(),
+            }),
         }))
     }
 
@@ -145,19 +151,19 @@ impl OrrControl for OrrGrpc {
             .unwrap_or_default();
         if from.is_empty() {
             return Ok(Response::new(EstablishSecretResponse {
-                ok:    false,
+                ok: false,
                 error: "from field required".into(),
             }));
         }
         tracing::Span::current().record("from", tracing::field::display(&from));
 
-        // Idempotente: si ya teníamos master_secret con este peer, no
-        // sobreescribimos (puede ser un reintento del initiator). Aún
-        // así devolvemos ok para que el initiator no haga loop.
-        if self.svc.peers.has_master_secret(&from) {
+        // Idempotente: si ya teníamos bootstrap_secret con este peer,
+        // no sobreescribimos (puede ser un reintento del initiator).
+        // Aún así devolvemos ok para que el initiator no haga loop.
+        if self.svc.peers.has_bootstrap(&from) {
             debug!(peer = %from, "orr.establish_secret already_set idempotent_ok");
             return Ok(Response::new(EstablishSecretResponse {
-                ok:    true,
+                ok: true,
                 error: String::new(),
             }));
         }
@@ -168,25 +174,77 @@ impl OrrControl for OrrGrpc {
             Err(e) => {
                 warn!(peer = %from, error = %e, "orr.establish_secret decap_failed");
                 return Ok(Response::new(EstablishSecretResponse {
-                    ok:    false,
+                    ok: false,
                     error: format!("decap: {e}"),
                 }));
             }
         };
         if ss.len() != 32 {
             return Ok(Response::new(EstablishSecretResponse {
-                ok:    false,
+                ok: false,
                 error: format!("shared_secret unexpected len {}", ss.len()),
             }));
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&ss);
-        self.svc.peers.put_master_secret(from.clone(), secret);
-        info!(peer = %from, "orr.establish_secret stored");
+        // OBJ-011 (audit H-3): el shared_secret del bootstrap inicial
+        // se guarda como `bootstrap_secret` (HMAC key para autenticar
+        // rotaciones), NO como master_secret. El master_secret de
+        // cada época se produce vía `RequestEphemeralKey` +
+        // `EstablishEphemeralSecret` con keypair efímera fresca.
+        self.svc.peers.set_bootstrap(from.clone(), secret);
+        info!(peer = %from, "orr.establish_secret bootstrap_secret stored");
         Ok(Response::new(EstablishSecretResponse {
-            ok:    true,
+            ok: true,
             error: String::new(),
         }))
+    }
+
+    // ── ORR Option-B rotation handlers (lado responder) ────────────────
+    //
+    // Delegamos a las funciones puras en `rotation.rs` para que la
+    // lógica esté en un único sitio y los tests in-process (OBJ-014)
+    // puedan reutilizarla byte-a-byte. Aquí sólo desempaquetamos el
+    // `Request<...>`, hacemos record de los campos al span de tracing,
+    // y volvemos a empaquetar en `Response<...>`.
+    #[instrument(skip_all, fields(from, epoch))]
+    async fn request_ephemeral_key(
+        &self,
+        req: Request<RequestEphemeralKeyRequest>,
+    ) -> std::result::Result<Response<RequestEphemeralKeyResponse>, Status> {
+        let m = req.into_inner();
+        tracing::Span::current().record(
+            "from",
+            tracing::field::display(m.from.as_ref().map(|n| n.value.as_str()).unwrap_or("")),
+        );
+        tracing::Span::current().record("epoch", m.epoch_id);
+        let resp = crate::rotation::handle_request_ephemeral_key(
+            &self.svc.peers,
+            &self.svc.cfg.orr_id,
+            &self.svc.cfg.default_pqc_suite,
+            m,
+        );
+        Ok(Response::new(resp))
+    }
+
+    #[instrument(skip_all, fields(from, epoch))]
+    async fn establish_ephemeral_secret(
+        &self,
+        req: Request<EstablishEphemeralSecretRequest>,
+    ) -> std::result::Result<Response<EstablishEphemeralSecretResponse>, Status> {
+        let m = req.into_inner();
+        tracing::Span::current().record(
+            "from",
+            tracing::field::display(m.from.as_ref().map(|n| n.value.as_str()).unwrap_or("")),
+        );
+        tracing::Span::current().record("epoch", m.epoch_id);
+        let resp = crate::rotation::handle_establish_ephemeral_secret(
+            &self.svc.peers,
+            &self.svc.cfg.orr_id,
+            &self.svc.cfg.default_pqc_suite,
+            m,
+        );
+        Ok(Response::new(resp))
     }
 
     // ── onion-circuit surface (stubs) ──────────────────────────────────

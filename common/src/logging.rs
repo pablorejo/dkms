@@ -7,8 +7,8 @@
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub fn init(service_name: &str) {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tonic=warn,h2=warn"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,tonic=warn,h2=warn"));
 
     let json = std::env::var("LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
@@ -18,11 +18,21 @@ pub fn init(service_name: &str) {
 
     if json {
         registry
-            .with(fmt::layer().json().with_current_span(false).with_target(true))
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_current_span(false)
+                    .with_target(true),
+            )
             .init();
     } else {
         registry
-            .with(fmt::layer().with_target(true).with_thread_ids(false).compact())
+            .with(
+                fmt::layer()
+                    .with_target(true)
+                    .with_thread_ids(false)
+                    .compact(),
+            )
             .init();
     }
 

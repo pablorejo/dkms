@@ -65,6 +65,7 @@ use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::error::{OrrError, Result};
 
@@ -83,6 +84,14 @@ pub struct InnerLayer {
     /// ORR destino de la siguiente capa (el peeler que mirará `key_id`
     /// para derivar K y descifrar `xor_ct`).
     pub next_orr_id: String,
+    /// Época del `master_secret` con la que se cifró `xor_ct` para el
+    /// peeler de la siguiente capa. Lo usa el siguiente ORR para
+    /// resolver `peers.master_for_epoch(from, epoch_id)` cuando
+    /// reescribe el wire frame al reenviar (audit H-3 / Option B). `0`
+    /// significa "pre-rotación" / passthrough sin epoch (compat con
+    /// la semántica v2 a través del alias `put_master_secret`).
+    #[serde(default)]
+    pub epoch_id: u32,
     /// UUID v4 raw (16 B) de la K de la siguiente capa.
     #[serde(with = "serde_bytes")]
     pub key_id: [u8; 16],
@@ -93,23 +102,33 @@ pub struct InnerLayer {
 
 impl InnerLayer {
     pub fn encode(&self) -> Result<Vec<u8>> {
-        rmp_serde::to_vec_named(self)
-            .map_err(|e| OrrError::Relay(format!("inner encode: {e}")))
+        rmp_serde::to_vec_named(self).map_err(|e| OrrError::Relay(format!("inner encode: {e}")))
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self> {
-        rmp_serde::from_slice(buf)
-            .map_err(|e| OrrError::Relay(format!("inner decode: {e}")))
+        rmp_serde::from_slice(buf).map_err(|e| OrrError::Relay(format!("inner decode: {e}")))
     }
 }
 
-/// Hop en el path del onion: orr_id + master_secret compartido (lo que
-/// produjo el ML-KEM encap al arrancar). El caller (service.rs) lo
-/// construye consultando `PeerRegistry`.
+/// Hop en el path del onion: orr_id + master_secret + epoch_id
+/// compartido (lo que produjo la última rotación con ese peer, o el
+/// bootstrap inicial cuando aún no hay rotación). El caller
+/// (service.rs) lo construye consultando `PeerRegistry`:
+/// `epoch_id = latest_epoch_for(orr_id)?` y
+/// `master_secret = master_for_epoch(orr_id, epoch_id)?`.
+///
+/// `master_secret` va en `Zeroizing<[u8; 32]>` para que se borre al
+/// drop del struct, aun cuando esta vida sea transitoria (sólo dura
+/// la llamada a `build_onion`). Política CLAUDE.md "RAM-only +
+/// zeroize" + audit H-3 criterio #5.
 #[derive(Debug, Clone)]
 pub struct PathHopSecret {
-    pub orr_id:        String,
-    pub master_secret: [u8; 32],
+    pub orr_id: String,
+    pub master_secret: Zeroizing<[u8; 32]>,
+    /// Época del `master_secret` que se va a usar para cifrar esta
+    /// capa. Acompaña al `key_id` en el wire (capa externa) o en la
+    /// `InnerLayer` previa (capas intermedias).
+    pub epoch_id: u32,
 }
 
 /// Output de `build_onion`: lo que el caller necesita para armar el
@@ -118,14 +137,19 @@ pub struct PathHopSecret {
 pub struct OnionWire {
     /// Primer hop del path (= `header.next_orr_id` del wire frame).
     pub first_hop_orr: String,
+    /// Época del `master_secret` con la que se cifró la capa más
+    /// externa. El caller la copia a `Frame.epoch_id` del wire frame
+    /// (audit H-3): el primer hop lee `frame.epoch_id` para resolver
+    /// `peers.master_for_epoch(from, epoch_id)`.
+    pub first_epoch_id: u32,
     /// `key_id` UUID v4 de la capa más externa (= `header.key_id`).
-    pub first_key_id:  [u8; 16],
+    pub first_key_id: [u8; 16],
     /// Hops onion restantes tras pelar la capa externa (= `header.max_hops`).
     /// Si el path tiene N hops, este valor es N-1.
-    pub max_hops:      i32,
+    pub max_hops: i32,
     /// El payload cifrado de la capa externa: `K ⊕ inner`. Va en el
     /// `payload` del wire frame.
-    pub payload:       Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 /// Resultado de pelar una capa.
@@ -157,18 +181,16 @@ pub fn derive_key(master_secret: &[u8; 32], key_id: &[u8; 16], body_len: usize) 
         hk.expand(&info, &mut okm[off..off + take])
             .expect("HKDF-SHA256 expand within 8160 B chunk");
         off += take;
-        chunk_idx = chunk_idx.checked_add(1).expect("body_len overflows chunk_idx u32");
+        chunk_idx = chunk_idx
+            .checked_add(1)
+            .expect("body_len overflows chunk_idx u32");
     }
     okm
 }
 
 /// XOR del plaintext con la K derivada. XOR es simétrico → cifrar y
 /// descifrar usan esta misma función.
-fn xor_with_derived_key(
-    master_secret: &[u8; 32],
-    key_id: &[u8; 16],
-    data: &[u8],
-) -> Vec<u8> {
+fn xor_with_derived_key(master_secret: &[u8; 32], key_id: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let k = derive_key(master_secret, key_id, data.len());
     let mut out = Vec::with_capacity(data.len());
     for (b, kb) in data.iter().zip(k.iter()) {
@@ -179,41 +201,54 @@ fn xor_with_derived_key(
 
 /// Construye un onion completo dado el `path` (lista ordenada de
 /// `PathHopSecret`, primer elemento = primer hop, último = destino
-/// final). Devuelve el `OnionWire` con todo lo que el caller necesita.
+/// final). Devuelve el `OnionWire` con todo lo que el caller necesita,
+/// incluido el `first_epoch_id` que va a `Frame.epoch_id` en el wire.
+///
+/// El `epoch_id` se propaga capa-a-capa: la `InnerLayer` que
+/// recibe el hop `path[i]` lleva el `epoch_id` de `path[i+1]` (el
+/// peeler de la siguiente capa lo usa para descifrar su propia
+/// `xor_ct`). El `epoch_id` del primer hop sale en
+/// `OnionWire.first_epoch_id`.
 pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
     if path.is_empty() {
         return Err(OrrError::Relay("onion: empty path".into()));
     }
 
-    // Capa más interna: cifra body con K_{O,dst}.
+    // Capa más interna: cifra body con K_{O,dst}. La época del
+    // destino se "consume" al envolver la siguiente capa hacia fuera
+    // (acaba en la InnerLayer.epoch_id que llega al penúltimo hop).
     let dst = path.last().unwrap();
     let kid_dst = *Uuid::new_v4().as_bytes();
     let mut current_xor = xor_with_derived_key(&dst.master_secret, &kid_dst, &body);
     let mut current_next_orr_id = dst.orr_id.clone();
+    let mut current_next_epoch = dst.epoch_id;
     let mut current_key_id = kid_dst;
 
     // Reenvolver hacia fuera: cada hop intermedio recibe una capa cuyo
-    // plaintext es un `InnerLayer { next_orr_id, key_id, xor_ct }`
-    // apuntando a la siguiente capa.
+    // plaintext es un `InnerLayer { next_orr_id, epoch_id, key_id,
+    // xor_ct }` apuntando a la siguiente capa.
     for i in (0..path.len() - 1).rev() {
         let hop = &path[i];
         let layer = InnerLayer {
             next_orr_id: current_next_orr_id,
-            key_id:      current_key_id,
-            xor_ct:      current_xor,
+            epoch_id: current_next_epoch,
+            key_id: current_key_id,
+            xor_ct: current_xor,
         };
         let layer_pt = layer.encode()?;
         let kid_hop = *Uuid::new_v4().as_bytes();
         current_xor = xor_with_derived_key(&hop.master_secret, &kid_hop, &layer_pt);
         current_next_orr_id = hop.orr_id.clone();
+        current_next_epoch = hop.epoch_id;
         current_key_id = kid_hop;
     }
 
     Ok(OnionWire {
         first_hop_orr: current_next_orr_id,
-        first_key_id:  current_key_id,
-        max_hops:      (path.len() as i32) - 1,
-        payload:       current_xor,
+        first_epoch_id: current_next_epoch,
+        first_key_id: current_key_id,
+        max_hops: (path.len() as i32) - 1,
+        payload: current_xor,
     })
 }
 
@@ -313,46 +348,66 @@ mod tests {
         let ms_dst = random_secret();
         let body = b"single hop test".to_vec();
         let path = vec![PathHopSecret {
-            orr_id:        "orr_dst".into(),
-            master_secret: ms_dst,
+            orr_id: "orr_dst".into(),
+            master_secret: Zeroizing::new(ms_dst),
+            epoch_id: 7,
         }];
         let onion = build_onion(&path, body.clone()).unwrap();
         assert_eq!(onion.first_hop_orr, "orr_dst");
+        assert_eq!(onion.first_epoch_id, 7);
         assert_eq!(onion.max_hops, 0);
         let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, 0).unwrap();
         assert_eq!(peeled, Peeled::Deliver(body));
     }
 
     #[test]
-    fn build_and_peel_3_hops() {
+    fn build_and_peel_3_hops_threads_epoch() {
         let ms_b = random_secret();
         let ms_c = random_secret();
         let ms_d = random_secret();
         let body = b"viaje cebolla 3 hops".to_vec();
         let path = vec![
-            PathHopSecret { orr_id: "orr_b".into(), master_secret: ms_b },
-            PathHopSecret { orr_id: "orr_c".into(), master_secret: ms_c },
-            PathHopSecret { orr_id: "orr_d".into(), master_secret: ms_d },
+            PathHopSecret {
+                orr_id: "orr_b".into(),
+                master_secret: Zeroizing::new(ms_b),
+                epoch_id: 11,
+            },
+            PathHopSecret {
+                orr_id: "orr_c".into(),
+                master_secret: Zeroizing::new(ms_c),
+                epoch_id: 22,
+            },
+            PathHopSecret {
+                orr_id: "orr_d".into(),
+                master_secret: Zeroizing::new(ms_d),
+                epoch_id: 33,
+            },
         ];
         let onion = build_onion(&path, body.clone()).unwrap();
         assert_eq!(onion.first_hop_orr, "orr_b");
+        // El epoch que va al wire (Frame.epoch_id) es el del primer hop.
+        assert_eq!(onion.first_epoch_id, 11);
         assert_eq!(onion.max_hops, 2);
 
-        // B pela: max_hops=2 ⇒ Forward(InnerLayer apuntando a C).
+        // B pela: max_hops=2 ⇒ Forward(InnerLayer apuntando a C con
+        // epoch_id=22, que es el de C).
         let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, 2).unwrap();
         let inner_b = match peeled_b {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
         };
         assert_eq!(inner_b.next_orr_id, "orr_c");
+        assert_eq!(inner_b.epoch_id, 22);
 
-        // C pela: max_hops=1 ⇒ Forward(InnerLayer apuntando a D).
+        // C pela: max_hops=1 ⇒ Forward(InnerLayer apuntando a D con
+        // epoch_id=33).
         let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, 1).unwrap();
         let inner_c = match peeled_c {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
         };
         assert_eq!(inner_c.next_orr_id, "orr_d");
+        assert_eq!(inner_c.epoch_id, 33);
 
         // D pela: max_hops=0 ⇒ Deliver(body_dkms).
         let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, 0).unwrap();
@@ -366,15 +421,29 @@ mod tests {
         let ms_dst = random_secret();
         let body = vec![0xAA; 64];
         let path = vec![
-            PathHopSecret { orr_id: "orr_x".into(), master_secret: ms_x },
-            PathHopSecret { orr_id: "orr_dst".into(), master_secret: ms_dst },
+            PathHopSecret {
+                orr_id: "orr_x".into(),
+                master_secret: Zeroizing::new(ms_x),
+                epoch_id: 0,
+            },
+            PathHopSecret {
+                orr_id: "orr_dst".into(),
+                master_secret: Zeroizing::new(ms_dst),
+                epoch_id: 0,
+            },
         ];
         let onion = build_onion(&path, body).unwrap();
         // Tamaño realista: chequeo de cota superior — no debería estar
-        // por debajo de 64 ni explotar a > 200 B.
+        // por debajo de 64 ni explotar a > 200 B. Con `epoch_id: u32`
+        // añadido a `InnerLayer` (~10 B msgpack-named: 1 B campo,
+        // ~8 B nombre "epoch_id", 1-5 B valor según varint), el techo
+        // queda holgado en 200 B incluso así.
         assert!(onion.payload.len() >= 64);
-        assert!(onion.payload.len() < 200,
-            "outer payload = {} B (esperado <200)", onion.payload.len());
+        assert!(
+            onion.payload.len() < 200,
+            "outer payload = {} B (esperado <200)",
+            onion.payload.len()
+        );
     }
 
     #[test]
@@ -389,8 +458,9 @@ mod tests {
         let wrong = random_secret();
         let body = b"x".to_vec();
         let path = vec![PathHopSecret {
-            orr_id:        "orr_dst".into(),
-            master_secret: ms,
+            orr_id: "orr_dst".into(),
+            master_secret: Zeroizing::new(ms),
+            epoch_id: 0,
         }];
         let onion = build_onion(&path, body.clone()).unwrap();
         let peeled = peel(&wrong, &onion.first_key_id, &onion.payload, 0).unwrap();

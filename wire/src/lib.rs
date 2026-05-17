@@ -29,7 +29,7 @@
 //!
 //! ```text
 //! Prefijo fijo (10 B):
-//!   MAGIC      4 B  = b"\x51\x4B\x43\x02"   ('Q','K','C', v2)
+//!   MAGIC      4 B  = b"\x51\x4B\x43\x03"   ('Q','K','C', v3)
 //!   FRAME_TYPE 1 B  = 0x01..0x20
 //!   RESERVED   1 B  = 0x00
 //!   TOTAL_LEN  4 B  u32 LE — bytes restantes (no incluye prefijo)
@@ -39,6 +39,10 @@
 //!   RECEIVER_ID   4 B  u32 LE
 //!   DEST_FINAL    4 B  u32 LE   (en RECV/LOCAL_DELIVER = RECEIVER_ID)
 //!   KEY_SIZE_BITS 2 B  u16 LE   (0 = sin cifrado, p.ej. frames LOCAL)
+//!   EPOCH_ID      4 B  u32 BE   (ORR Option-B forward secrecy: identifica
+//!                                la época del master_secret usado por la
+//!                                capa ORR de este frame; 0 = pre-rotación
+//!                                / passthrough sin epoch)
 //!   N_KEY_IDS     1 B  u8       (0 cuando el frame no lleva keys)
 //!   KEY_ID_LEN    1 B  u8       (longitud uniforme por key_id)
 //!   KEY_IDS       N_KEY_IDS * KEY_ID_LEN
@@ -51,6 +55,15 @@
 //!   PAYLOAD_LEN   4 B  u32 LE
 //!   PAYLOAD       PAYLOAD_LEN B   (ciphertext o plaintext según kind)
 //! ```
+//!
+//! ## Versionado
+//!
+//! El último byte de `MAGIC` codifica la versión del wire. `v3` (este
+//! archivo) introduce el campo `EPOCH_ID` para soportar la rotación de
+//! master_secret del ORR (Option B forward secrecy, audit H-3). `v2` no
+//! es bit-compatible: los lectores `v3` rechazan frames `v2` con
+//! `BadMagic`, y viceversa. La incompatibilidad es deliberada para que
+//! deployments mezclados fallen ruidosos en lugar de misparsear.
 
 use std::io;
 
@@ -58,7 +71,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const MAGIC: [u8; 4] = [0x51, 0x4B, 0x43, 0x02]; // 'Q','K','C', v2
+pub const MAGIC: [u8; 4] = [0x51, 0x4B, 0x43, 0x03]; // 'Q','K','C', v3
 
 /// Frame QKC→QKC: el destino final soy yo. Payload cifrado con OTP.
 pub const FRAME_RECV: u8 = 0x01;
@@ -106,26 +119,32 @@ pub enum WireError {
 /// Frame deserializado. `kind` lo rellena el reader desde el prefijo.
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub kind:           u8,
-    pub sender_id:      u32,
-    pub receiver_id:    u32,
-    pub dest_final:     u32,
-    pub key_size_bits:  u16,
-    pub key_ids:        Vec<String>,
+    pub kind: u8,
+    pub sender_id: u32,
+    pub receiver_id: u32,
+    pub dest_final: u32,
+    pub key_size_bits: u16,
+    /// Identifica la época del `master_secret` ORR usada para cifrar la
+    /// capa más externa del onion en `payload`. Codificado en BE (u32)
+    /// para ser idéntico al input HMAC de la rotación (`epoch_be`). `0`
+    /// significa "sin capa onion" (passthrough modo 0) o "pre-rotación"
+    /// (compatibilidad con código legado antes del audit H-3).
+    pub epoch_id: u32,
+    pub key_ids: Vec<String>,
     /// Header QKC en cleartext (msgpack). Lo escribe/lee solo el QKC.
     /// Reservado para metadatos del propio QKC (priority, ttl, etc.);
     /// hoy va vacío.
-    pub header_qkc_mp:  Vec<u8>,
+    pub header_qkc_mp: Vec<u8>,
     /// Header ORR en cleartext (msgpack). Lo escribe el ORR origen y lo
     /// reescribe cada ORR que pela una capa onion. El QKC NO lo toca:
     /// lo propaga byte-a-byte.
-    pub header_orr_mp:  Vec<u8>,
+    pub header_orr_mp: Vec<u8>,
     /// Header DKMS en cleartext (msgpack). Lo escribe el DKMS origen y
     /// solo lo lee el DKMS destino. Ni ORR ni QKC lo tocan: lo propagan
     /// byte-a-byte. Lleva los metadatos de la clave QKD que viaja en el
     /// payload (key_id, sae_origin/destination, key_size_bits, etc.).
     pub header_dkms_mp: Vec<u8>,
-    pub payload:        Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl Frame {
@@ -137,6 +156,7 @@ impl Frame {
             receiver_id: 0,
             dest_final: 0,
             key_size_bits: 0,
+            epoch_id: 0,
             key_ids: Vec::new(),
             header_qkc_mp: Vec::new(),
             header_orr_mp: Vec::new(),
@@ -154,12 +174,22 @@ impl Frame {
             debug_assert_eq!(k.len(), key_id_len as usize, "non-uniform key_id length");
         }
 
-        let body_len = 4 + 4 + 4 + 2 + 1 + 1
+        let body_len = 4
+            + 4
+            + 4
+            + 2
+            + 4
+            + 1
+            + 1
             + (key_id_len as usize) * self.key_ids.len()
-            + 2 + self.header_qkc_mp.len()
-            + 2 + self.header_orr_mp.len()
-            + 2 + self.header_dkms_mp.len()
-            + 4 + self.payload.len();
+            + 2
+            + self.header_qkc_mp.len()
+            + 2
+            + self.header_orr_mp.len()
+            + 2
+            + self.header_dkms_mp.len()
+            + 4
+            + self.payload.len();
 
         let mut buf = BytesMut::with_capacity(FIXED_PREFIX + body_len);
         buf.put_slice(&MAGIC);
@@ -171,6 +201,7 @@ impl Frame {
         buf.put_u32_le(self.receiver_id);
         buf.put_u32_le(self.dest_final);
         buf.put_u16_le(self.key_size_bits);
+        buf.put_u32(self.epoch_id); // BE on wire — emparejado con HMAC epoch_be
         buf.put_u8(self.key_ids.len() as u8);
         buf.put_u8(key_id_len);
         for k in &self.key_ids {
@@ -188,15 +219,16 @@ impl Frame {
     }
 
     fn decode_body(mut body: &[u8]) -> Result<Frame, WireError> {
-        if body.remaining() < 4 + 4 + 4 + 2 + 1 + 1 {
+        if body.remaining() < 4 + 4 + 4 + 2 + 4 + 1 + 1 {
             return Err(WireError::Truncated("header"));
         }
-        let sender_id    = body.get_u32_le();
-        let receiver_id  = body.get_u32_le();
-        let dest_final   = body.get_u32_le();
+        let sender_id = body.get_u32_le();
+        let receiver_id = body.get_u32_le();
+        let dest_final = body.get_u32_le();
         let key_size_bits = body.get_u16_le();
-        let n_key_ids    = body.get_u8() as usize;
-        let key_id_len   = body.get_u8() as usize;
+        let epoch_id = body.get_u32(); // BE on wire
+        let n_key_ids = body.get_u8() as usize;
+        let key_id_len = body.get_u8() as usize;
 
         if body.remaining() < n_key_ids * key_id_len + 2 {
             return Err(WireError::Truncated("key_ids"));
@@ -205,8 +237,7 @@ impl Frame {
         for _ in 0..n_key_ids {
             let mut buf = vec![0u8; key_id_len];
             body.copy_to_slice(&mut buf);
-            key_ids
-                .push(String::from_utf8(buf).map_err(|_| WireError::Truncated("key_id utf-8"))?);
+            key_ids.push(String::from_utf8(buf).map_err(|_| WireError::Truncated("key_id utf-8"))?);
         }
 
         let header_qkc_mp = read_lp16(&mut body, "header_qkc")?;
@@ -228,6 +259,7 @@ impl Frame {
             receiver_id,
             dest_final,
             key_size_bits,
+            epoch_id,
             key_ids,
             header_qkc_mp,
             header_orr_mp,
@@ -330,6 +362,7 @@ mod tests {
             receiver_id: 2,
             dest_final: 2,
             key_size_bits: 256,
+            epoch_id: 0,
             key_ids: vec!["abcdefgh".into()],
             header_qkc_mp: vec![0x80], // empty msgpack map
             header_orr_mp: vec![0x81, 0xa4, 0x66, 0x72, 0x6f, 0x6d, 0xa1, 0x41], // {"from":"A"}
@@ -339,15 +372,16 @@ mod tests {
         let buf = f.encode();
         let (_pref, body) = buf.split_at(FIXED_PREFIX);
         let f2 = Frame::decode_body(body).unwrap();
-        assert_eq!(f.sender_id,      f2.sender_id);
-        assert_eq!(f.receiver_id,    f2.receiver_id);
-        assert_eq!(f.dest_final,     f2.dest_final);
-        assert_eq!(f.key_size_bits,  f2.key_size_bits);
-        assert_eq!(f.key_ids,        f2.key_ids);
-        assert_eq!(f.header_qkc_mp,  f2.header_qkc_mp);
-        assert_eq!(f.header_orr_mp,  f2.header_orr_mp);
+        assert_eq!(f.sender_id, f2.sender_id);
+        assert_eq!(f.receiver_id, f2.receiver_id);
+        assert_eq!(f.dest_final, f2.dest_final);
+        assert_eq!(f.key_size_bits, f2.key_size_bits);
+        assert_eq!(f.epoch_id, f2.epoch_id);
+        assert_eq!(f.key_ids, f2.key_ids);
+        assert_eq!(f.header_qkc_mp, f2.header_qkc_mp);
+        assert_eq!(f.header_orr_mp, f2.header_orr_mp);
         assert_eq!(f.header_dkms_mp, f2.header_dkms_mp);
-        assert_eq!(f.payload,        f2.payload);
+        assert_eq!(f.payload, f2.payload);
     }
 
     #[test]
@@ -360,6 +394,7 @@ mod tests {
             receiver_id: 0,
             dest_final: 3,
             key_size_bits: 0,
+            epoch_id: 0,
             key_ids: vec![],
             header_qkc_mp: vec![],
             header_orr_mp: vec![],
@@ -372,6 +407,7 @@ mod tests {
         assert!(f2.header_qkc_mp.is_empty());
         assert!(f2.header_orr_mp.is_empty());
         assert!(f2.header_dkms_mp.is_empty());
+        assert_eq!(f2.epoch_id, 0);
         assert_eq!(f2.payload, f.payload);
     }
 
@@ -383,6 +419,7 @@ mod tests {
         let f2 = Frame::decode_body(body).unwrap();
         assert_eq!(f2.sender_id, 0);
         assert_eq!(f2.payload.len(), 0);
+        assert_eq!(f2.epoch_id, 0);
         assert!(f2.header_qkc_mp.is_empty());
         assert!(f2.header_orr_mp.is_empty());
         assert!(f2.header_dkms_mp.is_empty());
@@ -397,13 +434,75 @@ mod tests {
         buf.put_u32_le(0); // receiver
         buf.put_u32_le(0); // dest_final
         buf.put_u16_le(0); // key_size_bits
-        buf.put_u8(0);     // n_key_ids
-        buf.put_u8(0);     // key_id_len
+        buf.put_u32(0); // epoch_id (BE)
+        buf.put_u8(0); // n_key_ids
+        buf.put_u8(0); // key_id_len
         buf.put_u16_le(0); // hdr_qkc len
         buf.put_u16_le(0); // hdr_orr len
-        // Cortamos antes de hdr_dkms len → Truncated.
+                           // Cortamos antes de hdr_dkms len → Truncated.
         let err = Frame::decode_body(&buf).unwrap_err();
         assert!(matches!(err, WireError::Truncated(_)));
+    }
+
+    #[test]
+    fn epoch_id_nonzero_round_trip() {
+        // OBJ-003: roundtrip con epoch_id distinto de cero verifica que
+        // el campo se escribe y se lee en BE correctamente.
+        let f = Frame {
+            kind: FRAME_LOCAL_SEND,
+            sender_id: 7,
+            receiver_id: 11,
+            dest_final: 11,
+            key_size_bits: 0,
+            epoch_id: 0xDEADBEEF,
+            key_ids: vec![],
+            header_qkc_mp: vec![],
+            header_orr_mp: vec![],
+            header_dkms_mp: vec![],
+            payload: vec![0xAA, 0xBB],
+        };
+        let buf = f.encode();
+        // El epoch_id debe aparecer literalmente como bytes BE en el
+        // buffer codificado, justo después de key_size_bits.
+        // Offset: FIXED_PREFIX (10) + sender(4) + receiver(4) +
+        //          dest_final(4) + key_size_bits(2) = 24.
+        assert_eq!(&buf[24..28], &0xDEADBEEFu32.to_be_bytes());
+        let (_pref, body) = buf.split_at(FIXED_PREFIX);
+        let f2 = Frame::decode_body(body).unwrap();
+        assert_eq!(f2.epoch_id, 0xDEADBEEF);
+        assert_eq!(f2.payload, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn truncated_before_epoch_id_errors() {
+        // OBJ-003: un body que se corta antes de poder leer epoch_id
+        // (faltan los 4 B de epoch_id u32) devuelve Truncated.
+        let mut buf = bytes::BytesMut::new();
+        buf.put_u32_le(0); // sender
+        buf.put_u32_le(0); // receiver
+        buf.put_u32_le(0); // dest_final
+        buf.put_u16_le(0); // key_size_bits
+                           // Cortamos: faltan los 4 B de epoch_id (más n_key_ids+key_id_len).
+        let err = Frame::decode_body(&buf).unwrap_err();
+        assert!(matches!(err, WireError::Truncated(_)));
+    }
+
+    #[test]
+    fn legacy_v2_magic_rejected() {
+        // Versionado v3 vs v2: un prefix con MAGIC v2 (último byte 0x02)
+        // debe ser rechazado por `read_frame` con BadMagic.
+        let v2_prefix: [u8; FIXED_PREFIX] = [
+            0x51, 0x4B, 0x43, 0x02, // MAGIC v2
+            FRAME_RECV, 0x00, // kind, reserved
+            0, 0, 0, 0, // total_len (irrelevante aquí)
+        ];
+        let mut cursor: &[u8] = &v2_prefix;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(read_frame(&mut cursor)).unwrap_err();
+        assert!(matches!(err, WireError::BadMagic));
     }
 
     #[test]

@@ -37,12 +37,12 @@ pub enum BufferQos {
 impl BufferQos {
     pub fn as_str(self) -> &'static str {
         match self {
-            BufferQos::Priority   => "priority",
-            BufferQos::Important  => "important",
-            BufferQos::Quickly    => "quickly",
-            BufferQos::Relax      => "relax",
+            BufferQos::Priority => "priority",
+            BufferQos::Important => "important",
+            BufferQos::Quickly => "quickly",
+            BufferQos::Relax => "relax",
             BufferQos::BestEffort => "best_effort",
-            BufferQos::Saturated  => "saturated",
+            BufferQos::Saturated => "saturated",
         }
     }
 
@@ -50,12 +50,12 @@ impl BufferQos {
     /// Útil para comparar transiciones (entrar a más estricto vs salir).
     pub fn rank(self) -> u8 {
         match self {
-            BufferQos::Priority   => 1,
-            BufferQos::Important  => 2,
-            BufferQos::Quickly    => 3,
-            BufferQos::Relax      => 4,
+            BufferQos::Priority => 1,
+            BufferQos::Important => 2,
+            BufferQos::Quickly => 3,
+            BufferQos::Relax => 4,
             BufferQos::BestEffort => 5,
-            BufferQos::Saturated  => 6,
+            BufferQos::Saturated => 6,
         }
     }
 }
@@ -71,7 +71,7 @@ const HYST_MARGIN: f64 = 0.05;
 
 /// Umbral SATURATED: entrar al 95 %, salir al 85 % (margen 10 %).
 const SAT_ENTER: f64 = 0.95;
-const SAT_EXIT:  f64 = 0.85;
+const SAT_EXIT: f64 = 0.85;
 
 /// Umbrales de entrada (fill_ratio creciendo, va a una clase MENOR).
 /// Tupla `(entry_threshold, clase_resultante)`. Ordenados de menor a mayor.
@@ -126,14 +126,14 @@ pub fn classify(fill_ratio: f64, prev: Option<BufferQos>) -> BufferQos {
     // Aplica histéresis: permanece en `prev` hasta que `fill_ratio` baje
     // `HYST_MARGIN` por debajo del entry de `prev`.
     let exit_of_prev = match prev {
-        BufferQos::Important  => 0.10 - HYST_MARGIN,
-        BufferQos::Quickly    => 0.30 - HYST_MARGIN,
-        BufferQos::Relax      => 0.50 - HYST_MARGIN,
+        BufferQos::Important => 0.10 - HYST_MARGIN,
+        BufferQos::Quickly => 0.30 - HYST_MARGIN,
+        BufferQos::Relax => 0.50 - HYST_MARGIN,
         BufferQos::BestEffort => 0.70 - HYST_MARGIN,
         // Priority no tiene exit (siempre se puede entrar/permanecer).
-        BufferQos::Priority   => 0.0,
+        BufferQos::Priority => 0.0,
         // Saturated ya gestionado arriba.
-        BufferQos::Saturated  => SAT_EXIT,
+        BufferQos::Saturated => SAT_EXIT,
     };
     if fill_ratio > exit_of_prev {
         // Aún no cruzamos el exit → mantén la clase anterior.
@@ -166,23 +166,41 @@ mod tests {
     #[test]
     fn saturated_hysteresis() {
         // Ya en SATURATED, no salimos hasta caer al 85 %.
-        assert_eq!(classify(0.90, Some(BufferQos::Saturated)), BufferQos::Saturated);
-        assert_eq!(classify(0.86, Some(BufferQos::Saturated)), BufferQos::Saturated);
+        assert_eq!(
+            classify(0.90, Some(BufferQos::Saturated)),
+            BufferQos::Saturated
+        );
+        assert_eq!(
+            classify(0.86, Some(BufferQos::Saturated)),
+            BufferQos::Saturated
+        );
         // Cae al 85 % o menos → reclasifica.
-        assert_eq!(classify(0.85, Some(BufferQos::Saturated)), BufferQos::BestEffort);
+        assert_eq!(
+            classify(0.85, Some(BufferQos::Saturated)),
+            BufferQos::BestEffort
+        );
         assert_eq!(classify(0.69, Some(BufferQos::Saturated)), BufferQos::Relax);
     }
 
     #[test]
     fn hysteresis_between_classes() {
         // Subir a clase menos prioritaria: no aplica histéresis.
-        assert_eq!(classify(0.31, Some(BufferQos::Important)), BufferQos::Quickly);
+        assert_eq!(
+            classify(0.31, Some(BufferQos::Important)),
+            BufferQos::Quickly
+        );
         // Bajar a más prioritaria: requiere cruzar exit del prev.
         // Important entry = 0.10, exit = 0.05.
         // En 0.08 (entre 0.05 y 0.10) permanecemos en Important.
-        assert_eq!(classify(0.08, Some(BufferQos::Important)), BufferQos::Important);
+        assert_eq!(
+            classify(0.08, Some(BufferQos::Important)),
+            BufferQos::Important
+        );
         // En 0.04 (< exit) caemos a Priority.
-        assert_eq!(classify(0.04, Some(BufferQos::Important)), BufferQos::Priority);
+        assert_eq!(
+            classify(0.04, Some(BufferQos::Important)),
+            BufferQos::Priority
+        );
     }
 
     #[test]

@@ -13,7 +13,9 @@ pub struct Etsi014GetStatus {
 
 impl Etsi014GetStatus {
     pub fn new(sae_id: impl Into<String>) -> Self {
-        Self { sae_id: sae_id.into() }
+        Self {
+            sae_id: sae_id.into(),
+        }
     }
 
     /// Equivalente al `from_network` del Python: extrae el `SAE_id` del

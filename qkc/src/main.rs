@@ -12,7 +12,8 @@ use anyhow::Result;
 use clap::Parser;
 use qkc::{
     config::QkcConfig,
-    http_admin, service::QkcService,
+    http_admin,
+    service::QkcService,
     transport::{local, peer_server},
 };
 use tokio::signal;
@@ -20,7 +21,11 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "qkc", version, about = "Quantum Key Channel — hop-by-hop OTP relay")]
+#[command(
+    name = "qkc",
+    version,
+    about = "Quantum Key Channel — hop-by-hop OTP relay"
+)]
 struct Cli {
     /// Ruta al fichero TOML de configuración.
     #[arg(long)]

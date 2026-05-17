@@ -14,13 +14,20 @@ pub struct Etsi014KeyIDs {
     pub key_ids: Vec<Etsi014KeyID>,
 
     /// Extensión de la lista de IDs.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "key_IDs_extension")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "key_IDs_extension"
+    )]
     pub key_ids_extension: Option<serde_json::Map<String, Value>>,
 }
 
 impl Etsi014KeyIDs {
     pub fn new(ids: Vec<Etsi014KeyID>) -> Self {
-        Self { key_ids: ids, key_ids_extension: None }
+        Self {
+            key_ids: ids,
+            key_ids_extension: None,
+        }
     }
 }
 

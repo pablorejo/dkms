@@ -21,13 +21,13 @@ pub enum CircuitState {
 
 #[derive(Debug, Clone)]
 pub struct Circuit {
-    pub id:           String,
-    pub path:         Vec<String>,          // ordered NodeIds
-    pub session_keys: Arc<Vec<Vec<u8>>>,    // per-hop, this node's view
-    pub state:        CircuitState,
-    pub opened_at:    DateTime<Utc>,
-    pub last_used:    DateTime<Utc>,
-    pub frames:       u64,
+    pub id: String,
+    pub path: Vec<String>,               // ordered NodeIds
+    pub session_keys: Arc<Vec<Vec<u8>>>, // per-hop, this node's view
+    pub state: CircuitState,
+    pub opened_at: DateTime<Utc>,
+    pub last_used: DateTime<Utc>,
+    pub frames: u64,
 }
 
 pub struct CircuitTable {
@@ -36,7 +36,9 @@ pub struct CircuitTable {
 
 impl CircuitTable {
     pub fn new() -> Self {
-        Self { circuits: DashMap::new() }
+        Self {
+            circuits: DashMap::new(),
+        }
     }
 
     pub fn insert(&self, c: Circuit) {

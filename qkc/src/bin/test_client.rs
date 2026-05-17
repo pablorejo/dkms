@@ -85,17 +85,30 @@ enum Cmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { addr, dest, message, hdr_orr_hex, hdr_dkms_hex } => {
+        Cmd::Send {
+            addr,
+            dest,
+            message,
+            hdr_orr_hex,
+            hdr_dkms_hex,
+        } => {
             let hdr_orr = decode_hex(&hdr_orr_hex)?;
             let hdr_dkms = decode_hex(&hdr_dkms_hex)?;
             do_send(&addr, dest, message.into_bytes(), hdr_orr, hdr_dkms).await
         }
-        Cmd::Listen { addr, count, verbose, print_headers } => {
-            do_listen(&addr, count, verbose, print_headers).await
-        }
-        Cmd::Stress { addr, dest, count, bytes, wait_deliver_on } => {
-            do_stress(&addr, dest, count, bytes, wait_deliver_on).await
-        }
+        Cmd::Listen {
+            addr,
+            count,
+            verbose,
+            print_headers,
+        } => do_listen(&addr, count, verbose, print_headers).await,
+        Cmd::Stress {
+            addr,
+            dest,
+            count,
+            bytes,
+            wait_deliver_on,
+        } => do_stress(&addr, dest, count, bytes, wait_deliver_on).await,
     }
 }
 
@@ -288,8 +301,8 @@ fn build_local_send(dest: u32, payload: Vec<u8>) -> Frame {
     f.receiver_id = 0;
     f.dest_final = dest;
     f.key_size_bits = 0; // sin cifrar
-    // Headers vacíos: el test client simula un ORR que no añade
-    // metadatos de capa propios. El QKC los propaga byte-a-byte.
+                         // Headers vacíos: el test client simula un ORR que no añade
+                         // metadatos de capa propios. El QKC los propaga byte-a-byte.
     f.payload = payload;
     f
 }

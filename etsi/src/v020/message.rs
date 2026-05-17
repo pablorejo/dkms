@@ -17,7 +17,10 @@ pub struct Etsi020Message {
 
 impl Etsi020Message {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), details: None }
+        Self {
+            message: message.into(),
+            details: None,
+        }
     }
 
     pub fn with_details(

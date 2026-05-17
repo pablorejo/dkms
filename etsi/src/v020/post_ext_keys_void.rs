@@ -21,7 +21,10 @@ pub struct Etsi020PostExtKeysVoid {
 
 impl Etsi020PostExtKeysVoid {
     pub fn new(body: Etsi020ExtKeyVoidContainer, all_confirmation: bool) -> Self {
-        Self { body, all_confirmation }
+        Self {
+            body,
+            all_confirmation,
+        }
     }
 
     /// Mirror del `from_network` del Python: lee `all_confirmation`
@@ -32,18 +35,20 @@ impl Etsi020PostExtKeysVoid {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let data = msg.data.clone().unwrap_or(Value::Object(Default::default()));
+        let data = msg
+            .data
+            .clone()
+            .unwrap_or(Value::Object(Default::default()));
         let body: Etsi020ExtKeyVoidContainer = serde_json::from_value(data).ok()?;
 
-        Some(Self { body, all_confirmation: all_conf })
+        Some(Self {
+            body,
+            all_confirmation: all_conf,
+        })
     }
 
     /// Mirror del `add_extension` del Python.
-    pub fn add_extension(
-        &mut self,
-        name: impl Into<String>,
-        data: serde_json::Map<String, Value>,
-    ) {
+    pub fn add_extension(&mut self, name: impl Into<String>, data: serde_json::Map<String, Value>) {
         let target = self.body.extension.get_or_insert_with(serde_json::Map::new);
         target.insert(name.into(), Value::Object(data));
     }

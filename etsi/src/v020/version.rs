@@ -14,7 +14,10 @@ pub struct Etsi020VersionContainer {
 
 impl Etsi020VersionContainer {
     pub fn new(versions: Vec<String>) -> Self {
-        Self { versions, extension: None }
+        Self {
+            versions,
+            extension: None,
+        }
     }
 }
 

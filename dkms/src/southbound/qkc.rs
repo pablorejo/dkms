@@ -87,8 +87,12 @@ impl QkcClient {
         let mut c = self.client();
         let reservation_id = reservation_id.into();
         let req = tonic::Request::new(ReserveRequest {
-            src: Some(ProtoNodeId { value: src.to_string() }),
-            dst: Some(ProtoNodeId { value: dst.to_string() }),
+            src: Some(ProtoNodeId {
+                value: src.to_string(),
+            }),
+            dst: Some(ProtoNodeId {
+                value: dst.to_string(),
+            }),
             count,
             size_bits,
             reservation_id: reservation_id.clone(),

@@ -16,14 +16,14 @@ use common::crypto::pqc::{kem_for, Kem, PqcError};
 
 /// Par ML-KEM persistente del ORR mientras dure el proceso.
 pub struct OrrIdentity {
-    pub orr_id:     String,
-    pub suite:      String,
+    pub orr_id: String,
+    pub suite: String,
     pub public_key: Vec<u8>,
     pub secret_key: Vec<u8>,
     /// Instancia `Kem` para esta suite. Se mantiene para reutilizar el
     /// dispatch (encap/decap) sin volver a llamar a `kem_for` en cada
     /// mensaje.
-    pub kem:        Box<dyn Kem>,
+    pub kem: Box<dyn Kem>,
 }
 
 impl OrrIdentity {
@@ -33,8 +33,8 @@ impl OrrIdentity {
         let kem = kem_for(suite)?;
         let kp = kem.keygen()?;
         Ok(Self {
-            orr_id:     orr_id.into(),
-            suite:      kp.suite,
+            orr_id: orr_id.into(),
+            suite: kp.suite,
             public_key: kp.public,
             secret_key: kp.secret,
             kem,

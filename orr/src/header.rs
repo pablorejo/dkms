@@ -85,13 +85,7 @@ impl OrrHeader {
     /// Header para una capa onion. `payload = K ⊕ inner`, donde `K` se
     /// deriva con HKDF a partir de `master_secret_{from→next_orr_id}` y
     /// el `key_id` que va aquí.
-    pub fn onion(
-        from: &str,
-        to: &str,
-        next_orr_id: &str,
-        key_id: [u8; 16],
-        max_hops: i32,
-    ) -> Self {
+    pub fn onion(from: &str, to: &str, next_orr_id: &str, key_id: [u8; 16], max_hops: i32) -> Self {
         Self {
             kind: HEADER_TYPE.to_string(),
             version: HEADER_VERSION,

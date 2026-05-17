@@ -49,28 +49,28 @@ use crate::{
 /// Valores: `"DKMS_BUFFER"` (fill de buffers compartidos entre DKMSs,
 /// gestionado por el Generator) o ausente / `"ETSI020"` para el flujo
 /// de claves SAE clásico.
-pub const HDR_MSG_TYPE:         &str = "msg_type";
+pub const HDR_MSG_TYPE: &str = "msg_type";
 /// Para mensajes `DKMS_BUFFER`: TCP `host:port` donde el peer destino
 /// debe enviar el FRAME_ACK que mueve la clave de `ack_pending` a
 /// `buffer_enc`. Solo informativo para `ETSI020`.
-pub const HDR_ACK_ENDPOINT:     &str = "ack_endpoint";
+pub const HDR_ACK_ENDPOINT: &str = "ack_endpoint";
 
 pub const MSG_TYPE_DKMS_BUFFER: &str = "DKMS_BUFFER";
-pub const MSG_TYPE_ETSI020:     &str = "ETSI020";
+pub const MSG_TYPE_ETSI020: &str = "ETSI020";
 
-pub const HDR_KEY_ID:           &str = "key_id";
+pub const HDR_KEY_ID: &str = "key_id";
 /// SAE que pidió originar la clave (ETSI 014).
-pub const HDR_SAE_ORIGIN:       &str = "sae_origin";
+pub const HDR_SAE_ORIGIN: &str = "sae_origin";
 /// SAE destinatario de la clave.
-pub const HDR_SAE_DESTINATION:  &str = "sae_destination";
+pub const HDR_SAE_DESTINATION: &str = "sae_destination";
 /// Tamaño de la clave en bits (string decimal, ej. "256").
-pub const HDR_KEY_SIZE_BITS:    &str = "key_size_bits";
+pub const HDR_KEY_SIZE_BITS: &str = "key_size_bits";
 /// `request_id` de la petición ETSI 020 que disparó este envío.
-pub const HDR_REQUEST_ID:       &str = "request_id";
+pub const HDR_REQUEST_ID: &str = "request_id";
 /// Flow id opcional (si aplica routing por flujo).
-pub const HDR_FLOW_ID:          &str = "flow_id";
+pub const HDR_FLOW_ID: &str = "flow_id";
 /// Unix milliseconds de emisión.
-pub const HDR_TIMESTAMP_MS:     &str = "timestamp_ms";
+pub const HDR_TIMESTAMP_MS: &str = "timestamp_ms";
 
 #[derive(Clone)]
 pub struct OrrClient {
@@ -135,7 +135,9 @@ impl OrrClient {
     ) -> Result<SendMessageResponse> {
         let mut client = OrrControlClient::new(self.channel.clone());
         let req = SendMessageRequest {
-            destination: Some(ProtoNodeId { value: dest_orr_id.into() }),
+            destination: Some(ProtoNodeId {
+                value: dest_orr_id.into(),
+            }),
             payload: body,
             max_hops,
             has_max_hops: true,

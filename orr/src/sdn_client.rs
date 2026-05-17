@@ -27,7 +27,7 @@ use crate::error::{OrrError, Result};
 
 #[derive(Clone)]
 pub struct SdnClient {
-    channel:     Channel,
+    channel: Channel,
     rpc_timeout: Duration,
 }
 

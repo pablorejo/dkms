@@ -35,8 +35,18 @@ pub struct SdnConfig {
     pub mcf_k_paths: usize,
 }
 
-fn default_metrics() -> String { "0.0.0.0:9102".into() }
-fn default_policy() -> String { "min_cost_flow".into() }
-fn default_mcf_period() -> u64 { 1000 }
-fn default_debounce() -> u64 { 100 }
-fn default_k_paths() -> usize { 3 }
+fn default_metrics() -> String {
+    "0.0.0.0:9102".into()
+}
+fn default_policy() -> String {
+    "min_cost_flow".into()
+}
+fn default_mcf_period() -> u64 {
+    1000
+}
+fn default_debounce() -> u64 {
+    100
+}
+fn default_k_paths() -> usize {
+    3
+}

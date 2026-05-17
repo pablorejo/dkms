@@ -78,8 +78,12 @@ impl SdnClient {
     ) -> Result<ComputePathResponse> {
         let mut c = self.client();
         let req = tonic::Request::new(ComputePathRequest {
-            src: Some(ProtoNodeId { value: src.to_string() }),
-            dst: Some(ProtoNodeId { value: dst.to_string() }),
+            src: Some(ProtoNodeId {
+                value: src.to_string(),
+            }),
+            dst: Some(ProtoNodeId {
+                value: dst.to_string(),
+            }),
             required_bps,
             policy: PathPolicy::MinCostFlow as i32,
         });

@@ -13,7 +13,11 @@ pub struct Etsi014Key {
     pub key_id: Uuid,
 
     /// Datos de extensión asociados al ID.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "key_ID_extension")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "key_ID_extension"
+    )]
     pub key_id_extension: Option<serde_json::Map<String, Value>>,
 
     /// Valor de la clave (base64 en wire, bytes crudos en memoria).

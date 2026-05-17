@@ -19,11 +19,7 @@ impl Etsi020PostExtKeysAck {
     }
 
     /// Mirror del `add_extension` del Python.
-    pub fn add_extension(
-        &mut self,
-        name: impl Into<String>,
-        data: serde_json::Map<String, Value>,
-    ) {
+    pub fn add_extension(&mut self, name: impl Into<String>, data: serde_json::Map<String, Value>) {
         let target = self.body.extension.get_or_insert_with(serde_json::Map::new);
         target.insert(name.into(), Value::Object(data));
     }

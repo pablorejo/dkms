@@ -19,7 +19,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use etsi::{binary, v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID, Etsi014KeyIDs}, Base64Bytes};
+use etsi::{
+    binary,
+    v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID, Etsi014KeyIDs},
+    Base64Bytes,
+};
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE},
     Client,
@@ -108,9 +112,13 @@ impl KmeClient {
                 "enc_keys {url} -> {status}: {text}"
             )));
         }
-        let container: Etsi014KeyContainer = resp.json().await
+        let container: Etsi014KeyContainer = resp
+            .json()
+            .await
             .map_err(|e| QkcError::Quditto(format!("enc_keys json decode: {e}")))?;
-        let pairs: Vec<(Uuid, Vec<u8>)> = container.keys.into_iter()
+        let pairs: Vec<(Uuid, Vec<u8>)> = container
+            .keys
+            .into_iter()
             .map(|k| (k.key_id, k.key.into_inner()))
             .collect();
         // Aceptamos batches parciales (n < number): el quditto puede
@@ -127,7 +135,10 @@ impl KmeClient {
         }
         Ok(pairs
             .into_iter()
-            .map(|(id, mat)| OtpKey { key_id: id, material: mat })
+            .map(|(id, mat)| OtpKey {
+                key_id: id,
+                material: mat,
+            })
             .collect())
     }
 
@@ -154,14 +165,21 @@ impl KmeClient {
                 "dec_keys {url} -> {status}: {text}"
             )));
         }
-        let container: Etsi014KeyContainer = resp.json().await
+        let container: Etsi014KeyContainer = resp
+            .json()
+            .await
             .map_err(|e| QkcError::Quditto(format!("dec_keys json decode: {e}")))?;
-        let pairs: Vec<(Uuid, Vec<u8>)> = container.keys.into_iter()
+        let pairs: Vec<(Uuid, Vec<u8>)> = container
+            .keys
+            .into_iter()
             .map(|k| (k.key_id, k.key.into_inner()))
             .collect();
         Ok(pairs
             .into_iter()
-            .map(|(id, mat)| OtpKey { key_id: id, material: mat })
+            .map(|(id, mat)| OtpKey {
+                key_id: id,
+                material: mat,
+            })
             .collect())
     }
 }

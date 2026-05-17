@@ -28,9 +28,7 @@ use axum::{
 };
 use etsi::{
     binary,
-    v014::{
-        Etsi014Error, Etsi014Key, Etsi014KeyContainer, Etsi014KeyIDs, Etsi014Status,
-    },
+    v014::{Etsi014Error, Etsi014Key, Etsi014KeyContainer, Etsi014KeyIDs, Etsi014Status},
     Base64Bytes,
 };
 use serde::Deserialize;
@@ -96,10 +94,7 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
-async fn get_status(
-    State(svc): State<QudittoService>,
-    Path(sae_id): Path<String>,
-) -> Response {
+async fn get_status(State(svc): State<QudittoService>, Path(sae_id): Path<String>) -> Response {
     let cfg = svc.cfg();
     let status = Etsi014Status {
         source_kme_id: "quditto".into(),
@@ -143,7 +138,10 @@ async fn get_enc_keys(
     if q.size != cfg.key_size_bits {
         return etsi_error(
             StatusCode::BAD_REQUEST,
-            format!("unsupported size {} (only {} supported)", q.size, cfg.key_size_bits),
+            format!(
+                "unsupported size {} (only {} supported)",
+                q.size, cfg.key_size_bits
+            ),
         );
     }
     if q.number == 0 {
@@ -156,10 +154,7 @@ async fn get_enc_keys(
         // No hay claves zombis porque `take_for_enc` no movió nada.
         return etsi_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "not enough fresh keys: requested {}, available 0",
-                q.number,
-            ),
+            format!("not enough fresh keys: requested {}, available 0", q.number,),
         );
     }
     if taken.len() < q.number as usize {
@@ -173,7 +168,7 @@ async fn get_enc_keys(
         // El caller (QKC) acepta cualquier cantidad ≤ requested.
         warn!(
             requested = q.number,
-            obtained  = taken.len(),
+            obtained = taken.len(),
             "quditto: enc_keys returning partial batch (best-effort)"
         );
     }
@@ -193,7 +188,11 @@ async fn get_enc_keys(
         })
         .collect();
 
-    Json(Etsi014KeyContainer { keys, key_container_extension: None }).into_response()
+    Json(Etsi014KeyContainer {
+        keys,
+        key_container_extension: None,
+    })
+    .into_response()
 }
 
 #[derive(Deserialize, Debug)]
@@ -228,7 +227,10 @@ async fn get_dec_keys(
         }
         None => etsi_error(
             StatusCode::NOT_FOUND,
-            format!("key_id {} not found (already consumed or never issued)", q.key_id),
+            format!(
+                "key_id {} not found (already consumed or never issued)",
+                q.key_id
+            ),
         ),
     }
 }
@@ -288,8 +290,7 @@ async fn post_dec_keys(
 
     if wants_binary(&headers) {
         let cfg = svc.cfg();
-        let refs: Vec<(Uuid, &[u8])> =
-            materials.iter().map(|(id, m)| (*id, &m[..])).collect();
+        let refs: Vec<(Uuid, &[u8])> = materials.iter().map(|(id, m)| (*id, &m[..])).collect();
         return binary_response(binary::pack_keys(&refs, cfg.key_size_bits as u16));
     }
 
@@ -302,13 +303,20 @@ async fn post_dec_keys(
             key_extension: None,
         })
         .collect();
-    Json(Etsi014KeyContainer { keys, key_container_extension: None }).into_response()
+    Json(Etsi014KeyContainer {
+        keys,
+        key_container_extension: None,
+    })
+    .into_response()
 }
 
 // ─────────────────────────── errors ──────────────────────────────
 
 fn etsi_error(code: StatusCode, msg: String) -> Response {
-    let body = Etsi014Error { message: msg, details: None };
+    let body = Etsi014Error {
+        message: msg,
+        details: None,
+    };
     (code, Json(body)).into_response()
 }
 

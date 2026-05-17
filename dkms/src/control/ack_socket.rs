@@ -31,7 +31,7 @@ use crate::control::Generator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckFrame {
-    pub from:    String,
+    pub from: String,
     pub key_ids: Vec<String>,
 }
 
@@ -123,7 +123,7 @@ impl AckClient {
             return Ok(());
         }
         let frame = AckFrame {
-            from:    self.my_dkms_id.clone(),
+            from: self.my_dkms_id.clone(),
             key_ids: key_ids.iter().cloned().collect(),
         };
         let mut line = serde_json::to_string(&frame)?;
@@ -152,8 +152,8 @@ impl AckClient {
 /// bajo carga sostenida.
 #[derive(Clone)]
 pub struct BatchedAckClient {
-    inner:    Arc<AckClient>,
-    pending:  Arc<parking_lot::Mutex<HashMap<String, Vec<String>>>>,
+    inner: Arc<AckClient>,
+    pending: Arc<parking_lot::Mutex<HashMap<String, Vec<String>>>>,
     max_keys: usize,
 }
 
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn ack_frame_roundtrip() {
         let f = AckFrame {
-            from:    "dkms-11".into(),
+            from: "dkms-11".into(),
             key_ids: vec!["a".into(), "b".into()],
         };
         let s = serde_json::to_string(&f).unwrap();

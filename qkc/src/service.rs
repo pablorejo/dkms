@@ -97,7 +97,11 @@ impl QkcService {
             );
             links.insert(
                 link.neighbor_id,
-                LinkRuntime { cfg: link.clone(), kme, keys },
+                LinkRuntime {
+                    cfg: link.clone(),
+                    kme,
+                    keys,
+                },
             );
             direct.insert(link.neighbor_id);
         }
@@ -132,7 +136,9 @@ impl QkcService {
     }
 
     pub fn neighbor_peer_addr(&self, neighbor_id: u32) -> Option<String> {
-        self.links.get(&neighbor_id).map(|l| l.cfg.neighbor_peer_addr.clone())
+        self.links
+            .get(&neighbor_id)
+            .map(|l| l.cfg.neighbor_peer_addr.clone())
     }
 
     pub fn deliver_local(&self, frame: wire::Frame) {
@@ -156,9 +162,15 @@ impl QkcService {
                 }
             }
         }
-        self.stats.deliver_sends_ok.fetch_add(n_ok as u64, Ordering::Relaxed);
-        self.stats.deliver_drops_full.fetch_add(n_full as u64, Ordering::Relaxed);
-        self.stats.deliver_drops_closed.fetch_add(n_closed as u64, Ordering::Relaxed);
+        self.stats
+            .deliver_sends_ok
+            .fetch_add(n_ok as u64, Ordering::Relaxed);
+        self.stats
+            .deliver_drops_full
+            .fetch_add(n_full as u64, Ordering::Relaxed);
+        self.stats
+            .deliver_drops_closed
+            .fetch_add(n_closed as u64, Ordering::Relaxed);
         // Si el frame no llegó a NINGÚN consumidor, lo gritamos: es un
         // drop silencioso real (no había listener vivo o todos llenos).
         if n_ok == 0 && n_targets > 0 {

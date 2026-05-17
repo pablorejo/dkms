@@ -39,7 +39,9 @@ pub fn encrypt(plaintext: &[u8], keys: &[OtpKey]) -> Result<(Vec<u8>, Vec<Uuid>)
     }
     let chunk_bytes = keys[0].material.len();
     if chunk_bytes == 0 {
-        return Err(QkcError::BadRequest("encrypt: key material is empty".into()));
+        return Err(QkcError::BadRequest(
+            "encrypt: key material is empty".into(),
+        ));
     }
     let needed = num_chunks(plaintext.len(), chunk_bytes);
     if keys.len() < needed {
@@ -104,7 +106,9 @@ pub fn decrypt(
             .ok_or_else(|| QkcError::Quditto(format!("missing key for key_id {id}")))?;
         if mat.len() < chunk.len() {
             return Err(QkcError::Quditto(format!(
-                "key for {id} is shorter than chunk ({} < {})", mat.len(), chunk.len()
+                "key for {id} is shorter than chunk ({} < {})",
+                mat.len(),
+                chunk.len()
             )));
         }
         for (b, kb) in chunk.iter().zip(mat.iter()) {
@@ -127,7 +131,8 @@ mod tests {
 
     #[test]
     fn encrypt_then_decrypt_round_trip() {
-        let pt = b"hello world, this is a longer test message that spans multiple 32-byte chunks!".to_vec();
+        let pt = b"hello world, this is a longer test message that spans multiple 32-byte chunks!"
+            .to_vec();
         let keys: Vec<_> = (1..=4).map(fake_key).collect();
         let (ct, ids) = encrypt(&pt, &keys).unwrap();
         assert_eq!(ct.len(), pt.len());
@@ -141,7 +146,10 @@ mod tests {
         let keys: Vec<_> = (1..=2).map(fake_key).collect();
         let err = encrypt(&pt, &keys).unwrap_err();
         match err {
-            QkcError::NotEnoughKeys { requested, received } => {
+            QkcError::NotEnoughKeys {
+                requested,
+                received,
+            } => {
                 assert_eq!(requested, 4);
                 assert_eq!(received, 2);
             }

@@ -27,31 +27,31 @@ use crate::error::{Result, SdnError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostEndpoint {
-    pub id:   i64,
-    pub ip:   String,
+    pub id: i64,
+    pub ip: String,
     pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Qkc {
-    pub id:       String,
-    pub host:     HostEndpoint,
+    pub id: String,
+    pub host: HostEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kme_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Orr {
-    pub id:     String,
-    pub host:   HostEndpoint,
+    pub id: String,
+    pub host: HostEndpoint,
     /// Id of the QKC this ORR belongs to.
     pub qkc_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Dkms {
-    pub id:     String,
-    pub host:   HostEndpoint,
+    pub id: String,
+    pub host: HostEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_id: Option<i64>,
     /// Id of the ORR this DKMS uses (which in turn is anchored to one QKC).
@@ -60,7 +60,7 @@ pub struct Dkms {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sae {
-    pub id:      String,
+    pub id: String,
     /// Id of the DKMS that serves this SAE.
     pub dkms_id: String,
 }
@@ -72,26 +72,32 @@ pub struct Sae {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeMeta {
     #[serde(default)]
-    pub distance_km:        u32,
+    pub distance_km: u32,
     #[serde(default = "default_r0")]
     pub r0_keys_per_second: f64,
     #[serde(default = "default_alpha")]
-    pub alpha:              f64,
+    pub alpha: f64,
     #[serde(default = "default_buf_size")]
-    pub max_buffer_size:    u32,
+    pub max_buffer_size: u32,
 }
 
-fn default_r0() -> f64 { 20.0 }
-fn default_alpha() -> f64 { 0.2 }
-fn default_buf_size() -> u32 { 100 }
+fn default_r0() -> f64 {
+    20.0
+}
+fn default_alpha() -> f64 {
+    0.2
+}
+fn default_buf_size() -> u32 {
+    100
+}
 
 impl Default for EdgeMeta {
     fn default() -> Self {
         Self {
-            distance_km:        0,
+            distance_km: 0,
             r0_keys_per_second: default_r0(),
-            alpha:              default_alpha(),
-            max_buffer_size:    default_buf_size(),
+            alpha: default_alpha(),
+            max_buffer_size: default_buf_size(),
         }
     }
 }
@@ -124,24 +130,24 @@ pub fn edge_key(a: &str, b: &str) -> EdgeKey {
 /// MCF solve hits a snapshot).
 #[derive(Debug, Default, Clone)]
 pub struct Topology {
-    pub qkcs:         HashMap<String, Qkc>,
-    pub orrs:         HashMap<String, Orr>,
+    pub qkcs: HashMap<String, Qkc>,
+    pub orrs: HashMap<String, Orr>,
     /// Convenience index: QKC id → ORR id that lives on it.
-    pub orr_by_qkc:   HashMap<String, String>,
-    pub dkms:         HashMap<String, Dkms>,
+    pub orr_by_qkc: HashMap<String, String>,
+    pub dkms: HashMap<String, Dkms>,
     /// Convenience index: QKC id → first DKMS anchored to it.
-    pub dkms_by_qkc:  HashMap<String, String>,
-    pub saes:         HashMap<String, Sae>,
+    pub dkms_by_qkc: HashMap<String, String>,
+    pub saes: HashMap<String, Sae>,
 
     /// Undirected adjacency between QKCs.
-    pub graph:        HashMap<String, HashSet<String>>,
+    pub graph: HashMap<String, HashSet<String>>,
     /// Physical metadata, keyed by sorted (qkc_a, qkc_b).
-    pub edges:        HashMap<EdgeKey, EdgeMeta>,
+    pub edges: HashMap<EdgeKey, EdgeMeta>,
 
     /// Monotonically increasing snapshot version. Bumped on every mutation.
-    pub version:      i64,
+    pub version: i64,
     /// Folder we last loaded from, if any.
-    pub loaded_from:  Option<PathBuf>,
+    pub loaded_from: Option<PathBuf>,
 }
 
 impl Topology {
@@ -162,7 +168,10 @@ impl Topology {
             }
         }
         if let Some((ip, port)) = ip_port {
-            return self.dkms.values().find(|d| d.host.ip == ip && d.host.port == port);
+            return self
+                .dkms
+                .values()
+                .find(|d| d.host.ip == ip && d.host.port == port);
         }
         None
     }
@@ -288,8 +297,14 @@ impl Topology {
             warn!(a, b, "edge endpoints not registered as QKCs; skipping");
             return false;
         }
-        self.graph.entry(a.to_string()).or_default().insert(b.to_string());
-        self.graph.entry(b.to_string()).or_default().insert(a.to_string());
+        self.graph
+            .entry(a.to_string())
+            .or_default()
+            .insert(b.to_string());
+        self.graph
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string());
         let key = edge_key(a, b);
         match self.edges.get_mut(&key) {
             Some(existing) => {
@@ -380,20 +395,23 @@ fn read_json(path: &Path) -> Result<Value> {
 
 fn json_str(v: &Value) -> Option<String> {
     match v {
-        Value::String(s)  => Some(s.clone()),
-        Value::Number(n)  => Some(n.to_string()),
-        _                 => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
 fn parse_host(value: &Value) -> Option<HostEndpoint> {
     let host_obj = value.get("host").or(Some(value))?;
-    let id_v = host_obj.get("id").or_else(|| value.get("host_id")).or_else(|| value.get("id_host"))?;
+    let id_v = host_obj
+        .get("id")
+        .or_else(|| value.get("host_id"))
+        .or_else(|| value.get("id_host"))?;
     let ip_v = host_obj.get("ip").or_else(|| value.get("ip"))?;
     let port_v = host_obj.get("port").or_else(|| value.get("port"))?;
     Some(HostEndpoint {
-        id:   id_v.as_i64()?,
-        ip:   ip_v.as_str()?.to_string(),
+        id: id_v.as_i64()?,
+        ip: ip_v.as_str()?.to_string(),
         port: u16::try_from(port_v.as_i64()?).ok()?,
     })
 }
@@ -401,24 +419,20 @@ fn parse_host(value: &Value) -> Option<HostEndpoint> {
 fn parse_edge_meta(channel: &Value) -> EdgeMeta {
     let m = |k: &str| channel.get(k);
     EdgeMeta {
-        distance_km:
-            m("distance").and_then(Value::as_i64).unwrap_or(0).max(0) as u32,
-        r0_keys_per_second:
-            m("quditto_rate_r0")
-                .or_else(|| m("rate_r0"))
-                .and_then(Value::as_f64)
-                .unwrap_or(default_r0()),
-        alpha:
-            m("quditto_rate_alpha")
-                .or_else(|| m("rate_alpha"))
-                .and_then(Value::as_f64)
-                .unwrap_or(default_alpha()),
-        max_buffer_size:
-            m("quditto_max_buffer_size")
-                .or_else(|| m("max_buffer_size"))
-                .and_then(Value::as_i64)
-                .unwrap_or(default_buf_size() as i64)
-                .max(0) as u32,
+        distance_km: m("distance").and_then(Value::as_i64).unwrap_or(0).max(0) as u32,
+        r0_keys_per_second: m("quditto_rate_r0")
+            .or_else(|| m("rate_r0"))
+            .and_then(Value::as_f64)
+            .unwrap_or(default_r0()),
+        alpha: m("quditto_rate_alpha")
+            .or_else(|| m("rate_alpha"))
+            .and_then(Value::as_f64)
+            .unwrap_or(default_alpha()),
+        max_buffer_size: m("quditto_max_buffer_size")
+            .or_else(|| m("max_buffer_size"))
+            .and_then(Value::as_i64)
+            .unwrap_or(default_buf_size() as i64)
+            .max(0) as u32,
     }
 }
 
@@ -484,13 +498,15 @@ impl Topology {
 
     fn load_qkc_file(&mut self, path: &Path) -> Result<()> {
         let v = read_json(path)?;
-        let id = v.get("id").and_then(json_str)
+        let id = v
+            .get("id")
+            .and_then(json_str)
             .or_else(|| v.get("QKC_id").and_then(json_str))
             .ok_or_else(|| SdnError::Topology(format!("QKC file {} has no id", path.display())))?;
         let host = parse_host(&v)
             .ok_or_else(|| SdnError::Topology(format!("QKC {id} missing host info")))?;
         let qkc = Qkc {
-            id:       id.clone(),
+            id: id.clone(),
             host,
             kme_host: v.get("kme_host").and_then(Value::as_str).map(String::from),
         };
@@ -499,7 +515,8 @@ impl Topology {
         // Inline KME/neighbor channel info, if present, produces edges.
         if let Some(kmes) = v.get("kmes").and_then(Value::as_array) {
             for kme in kmes {
-                let neighbor = kme.get("neighbor_qkc_id")
+                let neighbor = kme
+                    .get("neighbor_qkc_id")
                     .or_else(|| kme.get("id_nei"))
                     .and_then(json_str);
                 let Some(neighbor) = neighbor else { continue };
@@ -520,9 +537,14 @@ impl Topology {
 
     fn load_orr_file(&mut self, path: &Path) -> Result<()> {
         let v = read_json(path)?;
-        let id = v.get("id").and_then(json_str)
+        let id = v
+            .get("id")
+            .and_then(json_str)
             .ok_or_else(|| SdnError::Topology(format!("ORR file {} has no id", path.display())))?;
-        let qkc_id = v.get("qkc_id").or_else(|| v.get("QKC_id")).or_else(|| v.get("id_qkc"))
+        let qkc_id = v
+            .get("qkc_id")
+            .or_else(|| v.get("QKC_id"))
+            .or_else(|| v.get("id_qkc"))
             .and_then(json_str)
             .ok_or_else(|| SdnError::Topology(format!("ORR {id} missing qkc_id")))?;
         let host = parse_host(&v)
@@ -533,22 +555,34 @@ impl Topology {
 
     fn load_dkms_file(&mut self, path: &Path) -> Result<()> {
         let v = read_json(path)?;
-        let id = v.get("id").and_then(json_str)
+        let id = v
+            .get("id")
+            .and_then(json_str)
             .or_else(|| v.get("id_dkms").and_then(json_str))
             .ok_or_else(|| SdnError::Topology(format!("DKMS file {} has no id", path.display())))?;
-        let orr_id = v.get("orr_id").or_else(|| v.get("ORR_id")).or_else(|| v.get("id_orr"))
+        let orr_id = v
+            .get("orr_id")
+            .or_else(|| v.get("ORR_id"))
+            .or_else(|| v.get("id_orr"))
             .and_then(json_str)
             .ok_or_else(|| SdnError::Topology(format!("DKMS {id} missing orr_id")))?;
         let host = parse_host(&v)
             .ok_or_else(|| SdnError::Topology(format!("DKMS {id} missing host info")))?;
         let tls_id = v.get("tls_id").and_then(Value::as_i64);
-        self.upsert_dkms(Dkms { id, host, tls_id, orr_id });
+        self.upsert_dkms(Dkms {
+            id,
+            host,
+            tls_id,
+            orr_id,
+        });
         Ok(())
     }
 
     fn load_sae_file(&mut self, path: &Path) -> Result<()> {
         let v = read_json(path)?;
-        let id = v.get("id").and_then(json_str)
+        let id = v
+            .get("id")
+            .and_then(json_str)
             .ok_or_else(|| SdnError::Topology(format!("SAE file {} has no id", path.display())))?;
         // Either explicit dkms_id, or dkms_target {ip,port}.
         let dkms_id = if let Some(did) = v.get("dkms_id").and_then(json_str) {
@@ -560,15 +594,22 @@ impl Topology {
             did
         } else if let Some(t) = v.get("dkms_target") {
             let ip = t.get("ip").and_then(Value::as_str);
-            let port = t.get("port").and_then(Value::as_i64).and_then(|n| u16::try_from(n).ok());
-            let (ip, port) = ip.zip(port)
+            let port = t
+                .get("port")
+                .and_then(Value::as_i64)
+                .and_then(|n| u16::try_from(n).ok());
+            let (ip, port) = ip
+                .zip(port)
                 .ok_or_else(|| SdnError::Topology(format!("SAE {id} dkms_target invalid")))?;
-            self.dkms.values()
+            self.dkms
+                .values()
                 .find(|d| d.host.ip == ip && d.host.port == port)
                 .map(|d| d.id.clone())
-                .ok_or_else(|| SdnError::Topology(format!(
-                    "SAE {id} dkms_target {ip}:{port} did not match any DKMS"
-                )))?
+                .ok_or_else(|| {
+                    SdnError::Topology(format!(
+                        "SAE {id} dkms_target {ip}:{port} did not match any DKMS"
+                    ))
+                })?
         } else {
             return Err(SdnError::Topology(format!(
                 "SAE {id} has no dkms_id nor dkms_target"
@@ -587,7 +628,7 @@ impl Topology {
 /// only cloned on write.
 #[derive(Clone)]
 pub struct TopologyStore {
-    inner:     Arc<ArcSwap<Topology>>,
+    inner: Arc<ArcSwap<Topology>>,
     write_mux: Arc<Mutex<()>>,
 }
 
@@ -600,7 +641,7 @@ impl Default for TopologyStore {
 impl TopologyStore {
     pub fn new(initial: Topology) -> Self {
         Self {
-            inner:     Arc::new(ArcSwap::from_pointee(initial)),
+            inner: Arc::new(ArcSwap::from_pointee(initial)),
             write_mux: Arc::new(Mutex::new(())),
         }
     }
@@ -672,17 +713,18 @@ impl TopologyStore {
             let dkms = t
                 .resolve_dkms(dkms_id, dkms_target)
                 .ok_or_else(|| {
-                    SdnError::UnknownDkms(
-                        dkms_id.map(String::from).unwrap_or_else(|| {
-                            dkms_target
-                                .map(|(ip, p)| format!("{ip}:{p}"))
-                                .unwrap_or_default()
-                        }),
-                    )
+                    SdnError::UnknownDkms(dkms_id.map(String::from).unwrap_or_else(|| {
+                        dkms_target
+                            .map(|(ip, p)| format!("{ip}:{p}"))
+                            .unwrap_or_default()
+                    }))
                 })?
                 .id
                 .clone();
-            let sae = Sae { id: sae_id.into(), dkms_id: dkms };
+            let sae = Sae {
+                id: sae_id.into(),
+                dkms_id: dkms,
+            };
             t.saes.insert(sae.id.clone(), sae.clone());
             Ok(sae)
         })
@@ -707,17 +749,18 @@ impl TopologyStore {
             let dkms = t
                 .resolve_dkms(dkms_id, dkms_target)
                 .ok_or_else(|| {
-                    SdnError::UnknownDkms(
-                        dkms_id.map(String::from).unwrap_or_else(|| {
-                            dkms_target
-                                .map(|(ip, p)| format!("{ip}:{p}"))
-                                .unwrap_or_default()
-                        }),
-                    )
+                    SdnError::UnknownDkms(dkms_id.map(String::from).unwrap_or_else(|| {
+                        dkms_target
+                            .map(|(ip, p)| format!("{ip}:{p}"))
+                            .unwrap_or_default()
+                    }))
                 })?
                 .id
                 .clone();
-            let sae = Sae { id: sae_id.into(), dkms_id: dkms };
+            let sae = Sae {
+                id: sae_id.into(),
+                dkms_id: dkms,
+            };
             t.saes.insert(sae.id.clone(), sae.clone());
             Ok(sae)
         })
@@ -752,18 +795,19 @@ impl TopologyStore {
         {
             let snap = self.load();
             if snap.edge(qkc_a, qkc_b).is_none() {
-                return Err(SdnError::UnknownLink(format!(
-                    "{qkc_a}<->{qkc_b}"
-                )));
+                return Err(SdnError::UnknownLink(format!("{qkc_a}<->{qkc_b}")));
             }
         }
         let mut applied = false;
-        self.mutate(|t| {
-            match t.set_edge_capacity_kps(qkc_a, qkc_b, capacity_kps) {
-                Some(true)  => { applied = true; true }
-                _           => false,
-            }
-        });
+        self.mutate(
+            |t| match t.set_edge_capacity_kps(qkc_a, qkc_b, capacity_kps) {
+                Some(true) => {
+                    applied = true;
+                    true
+                }
+                _ => false,
+            },
+        );
         Ok(applied)
     }
 
@@ -856,7 +900,9 @@ impl TopologyStore {
 
     pub fn delete_orr(&self, orr_id: &str) -> Result<()> {
         self.try_mutate(|t| {
-            let orr = t.orrs.remove(orr_id)
+            let orr = t
+                .orrs
+                .remove(orr_id)
                 .ok_or_else(|| SdnError::Topology(format!("ORR {orr_id} not found")))?;
             if t.orr_by_qkc.get(&orr.qkc_id).map(String::as_str) == Some(orr_id) {
                 t.orr_by_qkc.remove(&orr.qkc_id);
@@ -869,7 +915,8 @@ impl TopologyStore {
         self.try_mutate(|t| {
             if !t.orrs.contains_key(&dkms.orr_id) {
                 return Err(SdnError::Topology(format!(
-                    "DKMS {} references unknown ORR {}", dkms.id, dkms.orr_id
+                    "DKMS {} references unknown ORR {}",
+                    dkms.id, dkms.orr_id
                 )));
             }
             if t.dkms.contains_key(&dkms.id) {
@@ -889,11 +936,14 @@ impl TopologyStore {
             }
             if !t.orrs.contains_key(&dkms.orr_id) {
                 return Err(SdnError::Topology(format!(
-                    "DKMS {} references unknown ORR {}", dkms.id, dkms.orr_id
+                    "DKMS {} references unknown ORR {}",
+                    dkms.id, dkms.orr_id
                 )));
             }
             // Keep dkms_by_qkc consistent if the anchor ORR moved.
-            let old_qkc = t.dkms.get(&dkms.id)
+            let old_qkc = t
+                .dkms
+                .get(&dkms.id)
                 .and_then(|d| t.orrs.get(&d.orr_id))
                 .map(|o| o.qkc_id.clone());
             let new_qkc = t.orrs[&dkms.orr_id].qkc_id.clone();
@@ -912,7 +962,9 @@ impl TopologyStore {
 
     pub fn delete_dkms(&self, dkms_id: &str) -> Result<()> {
         self.try_mutate(|t| {
-            let dkms = t.dkms.remove(dkms_id)
+            let dkms = t
+                .dkms
+                .remove(dkms_id)
                 .ok_or_else(|| SdnError::UnknownDkms(dkms_id.into()))?;
             // Unlink dkms_by_qkc only if it pointed to this dkms.
             let qkc_id_opt = t.orrs.get(&dkms.orr_id).map(|o| o.qkc_id.clone());
@@ -933,33 +985,86 @@ mod tests {
     use super::*;
 
     fn dummy_host(id: i64, port: u16) -> HostEndpoint {
-        HostEndpoint { id, ip: format!("10.0.0.{id}"), port }
+        HostEndpoint {
+            id,
+            ip: format!("10.0.0.{id}"),
+            port,
+        }
     }
 
     fn make_topo() -> Topology {
         let mut t = Topology::default();
-        t.upsert_qkc(Qkc { id: "1".into(), host: dummy_host(1, 9001), kme_host: None });
-        t.upsert_qkc(Qkc { id: "2".into(), host: dummy_host(2, 9002), kme_host: None });
-        t.upsert_qkc(Qkc { id: "3".into(), host: dummy_host(3, 9003), kme_host: None });
-        t.add_edge("1", "2", EdgeMeta { distance_km: 10, ..EdgeMeta::default() });
-        t.add_edge("2", "3", EdgeMeta { distance_km: 20, ..EdgeMeta::default() });
-        t.upsert_orr(Orr { id: "o1".into(), host: dummy_host(11, 9101), qkc_id: "1".into() });
-        t.upsert_dkms(Dkms { id: "d1".into(), host: dummy_host(21, 9201), tls_id: None, orr_id: "o1".into() });
-        t.upsert_sae(Sae { id: "sae-a".into(), dkms_id: "d1".into() });
+        t.upsert_qkc(Qkc {
+            id: "1".into(),
+            host: dummy_host(1, 9001),
+            kme_host: None,
+        });
+        t.upsert_qkc(Qkc {
+            id: "2".into(),
+            host: dummy_host(2, 9002),
+            kme_host: None,
+        });
+        t.upsert_qkc(Qkc {
+            id: "3".into(),
+            host: dummy_host(3, 9003),
+            kme_host: None,
+        });
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                distance_km: 10,
+                ..EdgeMeta::default()
+            },
+        );
+        t.add_edge(
+            "2",
+            "3",
+            EdgeMeta {
+                distance_km: 20,
+                ..EdgeMeta::default()
+            },
+        );
+        t.upsert_orr(Orr {
+            id: "o1".into(),
+            host: dummy_host(11, 9101),
+            qkc_id: "1".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "d1".into(),
+            host: dummy_host(21, 9201),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
+        t.upsert_sae(Sae {
+            id: "sae-a".into(),
+            dkms_id: "d1".into(),
+        });
         t
     }
 
     #[test]
     fn bfs_finds_shortest_path() {
         let t = make_topo();
-        assert_eq!(t.shortest_path_qkc("1", "3"), Some(vec!["1".into(), "2".into(), "3".into()]));
+        assert_eq!(
+            t.shortest_path_qkc("1", "3"),
+            Some(vec!["1".into(), "2".into(), "3".into()])
+        );
         assert_eq!(t.next_hop_qkc("1", "3"), Some("2".into()));
     }
 
     #[test]
     fn quditto_capacity_decays_with_distance() {
-        let near = EdgeMeta { distance_km: 0, r0_keys_per_second: 100.0, alpha: 0.2, max_buffer_size: 10 };
-        let far  = EdgeMeta { distance_km: 50, ..near.clone() };
+        let near = EdgeMeta {
+            distance_km: 0,
+            r0_keys_per_second: 100.0,
+            alpha: 0.2,
+            max_buffer_size: 10,
+        };
+        let far = EdgeMeta {
+            distance_km: 50,
+            ..near.clone()
+        };
         assert!((near.quditto_capacity_keys_per_second() - 100.0).abs() < 1e-9);
         assert!(far.quditto_capacity_keys_per_second() < near.quditto_capacity_keys_per_second());
     }
@@ -974,7 +1079,9 @@ mod tests {
     fn register_sae_happy_path() {
         let store = TopologyStore::new(make_topo());
         let v0 = store.load().version;
-        let sae = store.register_sae("sae-b", Some("d1"), None).expect("register");
+        let sae = store
+            .register_sae("sae-b", Some("d1"), None)
+            .expect("register");
         assert_eq!(sae.dkms_id, "d1");
         assert_eq!(store.load().version, v0 + 1);
     }
@@ -989,7 +1096,9 @@ mod tests {
     #[test]
     fn register_sae_unknown_dkms_is_not_found() {
         let store = TopologyStore::new(make_topo());
-        let err = store.register_sae("sae-x", Some("does-not-exist"), None).unwrap_err();
+        let err = store
+            .register_sae("sae-x", Some("does-not-exist"), None)
+            .unwrap_err();
         assert!(matches!(err, SdnError::UnknownDkms(_)));
     }
 
@@ -1004,7 +1113,12 @@ mod tests {
     fn update_sae_rebinds_to_target_by_ip_port() {
         let mut t = make_topo();
         // Second DKMS, anchored to same ORR for simplicity.
-        t.upsert_dkms(Dkms { id: "d2".into(), host: dummy_host(22, 9202), tls_id: None, orr_id: "o1".into() });
+        t.upsert_dkms(Dkms {
+            id: "d2".into(),
+            host: dummy_host(22, 9202),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
         let store = TopologyStore::new(t);
         let sae = store
             .update_sae("sae-a", None, Some(("10.0.0.22", 9202)))
@@ -1029,14 +1143,18 @@ mod tests {
             .quditto_capacity_keys_per_second();
         // 1% delta — under both the 5% relative and 0.5 absolute thresholds.
         let tiny_change = current * 1.01_f64.min(current + 0.1);
-        let changed = store.update_edge_capacity_kps("1", "2", tiny_change).expect("ok");
+        let changed = store
+            .update_edge_capacity_kps("1", "2", tiny_change)
+            .expect("ok");
         assert!(!changed, "tiny change should be absorbed by deadband");
     }
 
     #[test]
     fn link_capacity_unknown_link_is_not_found() {
         let store = TopologyStore::new(make_topo());
-        let err = store.update_edge_capacity_kps("1", "99", 100.0).unwrap_err();
+        let err = store
+            .update_edge_capacity_kps("1", "99", 100.0)
+            .unwrap_err();
         assert!(matches!(err, SdnError::UnknownLink(_)));
     }
 
@@ -1050,7 +1168,11 @@ mod tests {
     #[test]
     fn register_qkc_happy_path() {
         let store = TopologyStore::new(Topology::default());
-        let q = Qkc { id: "1".into(), host: dummy_host(1, 9001), kme_host: None };
+        let q = Qkc {
+            id: "1".into(),
+            host: dummy_host(1, 9001),
+            kme_host: None,
+        };
         let out = store.register_qkc(q.clone()).expect("register");
         assert_eq!(out, q);
         assert!(store.load().qkcs.contains_key("1"));
@@ -1059,7 +1181,11 @@ mod tests {
     #[test]
     fn register_qkc_duplicate_is_conflict() {
         let store = TopologyStore::new(make_topo());
-        let dup = Qkc { id: "1".into(), host: dummy_host(99, 9999), kme_host: None };
+        let dup = Qkc {
+            id: "1".into(),
+            host: dummy_host(99, 9999),
+            kme_host: None,
+        };
         let err = store.register_qkc(dup).unwrap_err();
         assert!(matches!(err, SdnError::AlreadyExists(_)));
     }
@@ -1067,7 +1193,11 @@ mod tests {
     #[test]
     fn update_qkc_unknown_is_not_found() {
         let store = TopologyStore::new(make_topo());
-        let q = Qkc { id: "9999".into(), host: dummy_host(99, 9999), kme_host: None };
+        let q = Qkc {
+            id: "9999".into(),
+            host: dummy_host(99, 9999),
+            kme_host: None,
+        };
         let err = store.update_qkc(q).unwrap_err();
         assert!(matches!(err, SdnError::UnknownNode(_)));
     }
@@ -1081,13 +1211,21 @@ mod tests {
         // Edge "1"-"2" must be gone.
         assert!(!snap.edges.contains_key(&("1".to_string(), "2".to_string())));
         // Neighbor's adjacency cleaned up.
-        assert!(!snap.graph.get("2").map(|s| s.contains("1")).unwrap_or(false));
+        assert!(!snap
+            .graph
+            .get("2")
+            .map(|s| s.contains("1"))
+            .unwrap_or(false));
     }
 
     #[test]
     fn register_orr_requires_existing_qkc() {
         let store = TopologyStore::new(make_topo());
-        let bad = Orr { id: "o-x".into(), host: dummy_host(50, 9050), qkc_id: "does-not-exist".into() };
+        let bad = Orr {
+            id: "o-x".into(),
+            host: dummy_host(50, 9050),
+            qkc_id: "does-not-exist".into(),
+        };
         let err = store.register_orr(bad).unwrap_err();
         assert!(matches!(err, SdnError::UnknownNode(_)));
     }
@@ -1095,7 +1233,12 @@ mod tests {
     #[test]
     fn register_dkms_requires_existing_orr() {
         let store = TopologyStore::new(make_topo());
-        let bad = Dkms { id: "d-x".into(), host: dummy_host(60, 9060), tls_id: None, orr_id: "no-orr".into() };
+        let bad = Dkms {
+            id: "d-x".into(),
+            host: dummy_host(60, 9060),
+            tls_id: None,
+            orr_id: "no-orr".into(),
+        };
         let err = store.register_dkms(bad).unwrap_err();
         assert!(matches!(err, SdnError::Topology(_)));
     }
@@ -1113,15 +1256,37 @@ mod tests {
         // ORR-1 / QKC-1. Then re-bind the DKMS to ORR-2 (so QKC-2).
         let mut t = Topology::default();
         for id in ["q1", "q2"] {
-            t.upsert_qkc(Qkc { id: id.into(), host: dummy_host(1, 1), kme_host: None });
+            t.upsert_qkc(Qkc {
+                id: id.into(),
+                host: dummy_host(1, 1),
+                kme_host: None,
+            });
         }
-        t.upsert_orr(Orr { id: "o1".into(), host: dummy_host(2, 2), qkc_id: "q1".into() });
-        t.upsert_orr(Orr { id: "o2".into(), host: dummy_host(3, 3), qkc_id: "q2".into() });
-        t.upsert_dkms(Dkms { id: "d1".into(), host: dummy_host(4, 4), tls_id: None, orr_id: "o1".into() });
+        t.upsert_orr(Orr {
+            id: "o1".into(),
+            host: dummy_host(2, 2),
+            qkc_id: "q1".into(),
+        });
+        t.upsert_orr(Orr {
+            id: "o2".into(),
+            host: dummy_host(3, 3),
+            qkc_id: "q2".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "d1".into(),
+            host: dummy_host(4, 4),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
         let store = TopologyStore::new(t);
 
         // Move the DKMS to ORR-2.
-        let moved = Dkms { id: "d1".into(), host: dummy_host(4, 4), tls_id: None, orr_id: "o2".into() };
+        let moved = Dkms {
+            id: "d1".into(),
+            host: dummy_host(4, 4),
+            tls_id: None,
+            orr_id: "o2".into(),
+        };
         store.update_dkms(moved).expect("update");
 
         let snap = store.load();
@@ -1135,7 +1300,12 @@ mod tests {
     fn store_mutate_publishes_version() {
         let store = TopologyStore::new(make_topo());
         let v0 = store.load().version;
-        let ok = store.mutate(|t| t.upsert_sae(Sae { id: "sae-b".into(), dkms_id: "d1".into() }));
+        let ok = store.mutate(|t| {
+            t.upsert_sae(Sae {
+                id: "sae-b".into(),
+                dkms_id: "d1".into(),
+            })
+        });
         assert!(ok);
         assert_eq!(store.load().version, v0 + 1);
         assert!(store.load().saes.contains_key("sae-b"));

@@ -50,21 +50,21 @@ use parking_lot::RwLock;
 /// `SendMessageResponse`.
 #[derive(Debug, Clone)]
 pub struct SendOutcome {
-    pub status:         &'static str,
+    pub status: &'static str,
     pub final_dest_orr: String,
-    pub next_hop_qkc:   u32,
+    pub next_hop_qkc: u32,
     pub remaining_hops: i32,
-    pub pqc_layer:      bool,
+    pub pqc_layer: bool,
 }
 
 #[derive(Clone)]
 pub struct OrrService {
-    pub cfg:       Arc<OrrConfig>,
-    pub identity:  Arc<OrrIdentity>,
-    pub circuits:  Arc<CircuitTable>,
-    pub peers:     Arc<PeerRegistry>,
-    pub metrics:   Metrics,
-    pub qkc_link:  QkcLink,
+    pub cfg: Arc<OrrConfig>,
+    pub identity: Arc<OrrIdentity>,
+    pub circuits: Arc<CircuitTable>,
+    pub peers: Arc<PeerRegistry>,
+    pub metrics: Metrics,
+    pub qkc_link: QkcLink,
     deliveries_tx: broadcast::Sender<DeliveredMessage>,
     /// Cliente gRPC contra la SDN. Sólo se usa en modos onion
     /// (`max_hops != 0,1`) cuando el caller no manda `orr_path` en el
@@ -127,8 +127,7 @@ impl OrrService {
         ));
 
         let (deliveries_tx, _) = broadcast::channel(cfg.deliver_queue_capacity.max(1));
-        let (frames_tx, mut frames_rx) =
-            mpsc::channel::<Frame>(cfg.deliver_queue_capacity.max(1));
+        let (frames_tx, mut frames_rx) = mpsc::channel::<Frame>(cfg.deliver_queue_capacity.max(1));
         let qkc_link = QkcLink::spawn(cfg.qkc_local_addr.clone(), frames_tx);
 
         // Conecta con la SDN (best-effort). Si no responde, seguimos
@@ -184,6 +183,8 @@ impl OrrService {
             svc.peers.clone(),
             svc.cfg.peer_grpc_addrs.clone(),
             svc.cfg.default_pqc_suite.clone(),
+            svc.cfg.rotation_period_ms,
+            svc.cfg.epoch_history_keep,
         );
 
         // Suscripción a topology events de la SDN. Cualquier evento
@@ -265,20 +266,24 @@ impl OrrService {
         if dest_orr == self.cfg.orr_id {
             self.broadcast_self(payload, app_header);
             return Ok(SendOutcome {
-                status:         "delivered_local",
+                status: "delivered_local",
                 final_dest_orr: dest_orr.into(),
-                next_hop_qkc:   self.cfg.qkc_id,
+                next_hop_qkc: self.cfg.qkc_id,
                 remaining_hops: 0,
-                pqc_layer:      false,
+                pqc_layer: false,
             });
         }
 
         match max_hops {
             0 => self.send_passthrough(dest_orr, payload, app_header).await,
             1 => self.send_onion_e2e(dest_orr, payload, app_header).await,
-            -1 => self.send_onion_path(dest_orr, payload, app_header, None).await,
+            -1 => {
+                self.send_onion_path(dest_orr, payload, app_header, None)
+                    .await
+            }
             n if n >= 2 => {
-                self.send_onion_path(dest_orr, payload, app_header, Some(n as usize)).await
+                self.send_onion_path(dest_orr, payload, app_header, Some(n as usize))
+                    .await
             }
             n => Err(OrrError::InvalidPath(format!("max_hops inválido: {n}"))),
         }
@@ -295,29 +300,35 @@ impl OrrService {
         app_header: BTreeMap<String, String>,
     ) -> Result<SendOutcome> {
         let dest_qkc = self.peers.qkc_id(dest_orr).ok_or_else(|| {
-            OrrError::Relay(format!("ORR destino {dest_orr} no resoluble (peers config)"))
+            OrrError::Relay(format!(
+                "ORR destino {dest_orr} no resoluble (peers config)"
+            ))
         })?;
         let header = OrrHeader::passthrough(&self.cfg.orr_id, dest_orr);
         let frame = Frame {
-            kind:           FRAME_LOCAL_SEND,
-            sender_id:      self.cfg.qkc_id,
-            receiver_id:    self.cfg.qkc_id,
-            dest_final:     dest_qkc,
-            key_size_bits:  0,
-            key_ids:        Vec::new(),
-            header_qkc_mp:  Vec::new(),
-            header_orr_mp:  header.encode()?,
+            kind: FRAME_LOCAL_SEND,
+            sender_id: self.cfg.qkc_id,
+            receiver_id: self.cfg.qkc_id,
+            dest_final: dest_qkc,
+            key_size_bits: 0,
+            // Passthrough modo 0: sin capa onion → epoch_id no aplica.
+            // El campo se cablea en OBJ-008+ cuando empezamos a generar
+            // capas onion contra master_secrets versionados.
+            epoch_id: 0,
+            key_ids: Vec::new(),
+            header_qkc_mp: Vec::new(),
+            header_orr_mp: header.encode()?,
             header_dkms_mp: dkms_header::encode(&app_header)?,
             payload,
         };
         self.qkc_link.send(frame).await?;
         debug!(dest = %dest_orr, dest_qkc, "orr.send passthrough");
         Ok(SendOutcome {
-            status:         "sent",
+            status: "sent",
             final_dest_orr: dest_orr.into(),
-            next_hop_qkc:   dest_qkc,
+            next_hop_qkc: dest_qkc,
             remaining_hops: 0,
-            pqc_layer:      false,
+            pqc_layer: false,
         })
     }
 
@@ -332,28 +343,40 @@ impl OrrService {
         payload: Vec<u8>,
         app_header: BTreeMap<String, String>,
     ) -> Result<SendOutcome> {
-        let dest_qkc = self.peers.qkc_id(dest_orr).ok_or_else(|| {
-            OrrError::Relay(format!("ORR destino {dest_orr} no resoluble"))
-        })?;
-        let ms = self.peers.master_secret(dest_orr).ok_or_else(|| {
+        let dest_qkc = self
+            .peers
+            .qkc_id(dest_orr)
+            .ok_or_else(|| OrrError::Relay(format!("ORR destino {dest_orr} no resoluble")))?;
+        // OBJ-010: usar la última época poblada (típicamente 0 hasta que
+        // la rotación esté cableada en OBJ-011/012; > 0 después).
+        let epoch_id = self.peers.latest_epoch_for(dest_orr).ok_or_else(|| {
             OrrError::Relay(format!(
                 "ORR destino {dest_orr} sin master_secret (bootstrap aún no completo)"
             ))
         })?;
+        let ms = self
+            .peers
+            .master_for_epoch(dest_orr, epoch_id)
+            .ok_or_else(|| {
+                OrrError::Relay(format!(
+                    "ORR destino {dest_orr} sin master_secret para epoch {epoch_id}"
+                ))
+            })?;
         let path = vec![PathHopSecret {
-            orr_id:        dest_orr.into(),
-            master_secret: ms,
+            orr_id: dest_orr.into(),
+            master_secret: zeroize::Zeroizing::new(ms),
+            epoch_id,
         }];
         let onion = onion::build_onion(&path, payload)?;
         self.send_onion_frame(dest_orr, dest_qkc, onion, app_header)
             .await?;
         debug!(dest = %dest_orr, dest_qkc, "orr.send pqc_e2e");
         Ok(SendOutcome {
-            status:         "sent",
+            status: "sent",
             final_dest_orr: dest_orr.into(),
-            next_hop_qkc:   dest_qkc,
+            next_hop_qkc: dest_qkc,
             remaining_hops: 0,
-            pqc_layer:      true,
+            pqc_layer: true,
         })
     }
 
@@ -384,8 +407,7 @@ impl OrrService {
         // `cached_path` se materializa primero a Option<Vec<String>>
         // para liberar el `RwLockReadGuard` antes del posible .await
         // del fallback SDN (el guard de parking_lot no es Send).
-        let cached_path: Option<Vec<String>> =
-            self.path_cache.read().get(dest_orr).cloned();
+        let cached_path: Option<Vec<String>> = self.path_cache.read().get(dest_orr).cloned();
         let hint_str = if let Some(h) = app_header.get("orr_path").cloned() {
             h
         } else if let Some(cached) = cached_path {
@@ -414,7 +436,9 @@ impl OrrService {
             .filter(|s| !s.is_empty() && s != &self.cfg.orr_id)
             .collect();
         if full_path.is_empty() {
-            return Err(OrrError::InvalidPath("orr_path vacío tras filtrar self".into()));
+            return Err(OrrError::InvalidPath(
+                "orr_path vacío tras filtrar self".into(),
+            ));
         }
         // Asegurar que el destino sea el último elemento.
         if full_path.last().map(|s| s.as_str()) != Some(dest_orr) {
@@ -425,20 +449,32 @@ impl OrrService {
             full_path = select_random_hops(full_path, c)?;
         }
 
-        // Resolver cada hop (qkc_id + master_secret).
+        // Resolver cada hop (qkc_id + master_secret + epoch_id).
         let mut hops = Vec::with_capacity(full_path.len());
         for orr_id in &full_path {
             let _qkc_id = self.peers.qkc_id(orr_id).ok_or_else(|| {
                 OrrError::Relay(format!("hop {orr_id} sin qkc_id en peers config"))
             })?;
-            let ms = self.peers.master_secret(orr_id).ok_or_else(|| {
+            // OBJ-010: la época que se usa para cifrar la capa de este
+            // hop es la última conocida. Pre-rotación cableada
+            // (OBJ-011/012/013) este valor es 0 para todos los peers.
+            let epoch_id = self.peers.latest_epoch_for(orr_id).ok_or_else(|| {
                 OrrError::Relay(format!(
                     "hop {orr_id} sin master_secret (bootstrap incompleto)"
                 ))
             })?;
+            let ms = self
+                .peers
+                .master_for_epoch(orr_id, epoch_id)
+                .ok_or_else(|| {
+                    OrrError::Relay(format!(
+                        "hop {orr_id} sin master_secret para epoch {epoch_id}"
+                    ))
+                })?;
             hops.push(PathHopSecret {
-                orr_id:        orr_id.clone(),
-                master_secret: ms,
+                orr_id: orr_id.clone(),
+                master_secret: zeroize::Zeroizing::new(ms),
+                epoch_id,
             });
         }
         let onion = onion::build_onion(&hops, payload)?;
@@ -451,7 +487,8 @@ impl OrrService {
         let remaining = onion.max_hops;
         let first_orr = onion.first_hop_orr.clone();
         let n_hops = hops.len();
-        self.send_onion_frame(dest_orr, first_qkc, onion, app_header).await?;
+        self.send_onion_frame(dest_orr, first_qkc, onion, app_header)
+            .await?;
         debug!(
             dest = %dest_orr,
             first_hop = %first_orr,
@@ -459,11 +496,11 @@ impl OrrService {
             "orr.send onion_path",
         );
         Ok(SendOutcome {
-            status:         "sent",
+            status: "sent",
             final_dest_orr: dest_orr.into(),
-            next_hop_qkc:   first_qkc,
+            next_hop_qkc: first_qkc,
             remaining_hops: remaining,
-            pqc_layer:      true,
+            pqc_layer: true,
         })
     }
 
@@ -486,16 +523,21 @@ impl OrrService {
             onion.max_hops,
         );
         let frame = Frame {
-            kind:           FRAME_LOCAL_SEND,
-            sender_id:      self.cfg.qkc_id,
-            receiver_id:    self.cfg.qkc_id,
-            dest_final:     next_qkc,
-            key_size_bits:  0,
-            key_ids:        Vec::new(),
-            header_qkc_mp:  Vec::new(),
-            header_orr_mp:  header.encode()?,
+            kind: FRAME_LOCAL_SEND,
+            sender_id: self.cfg.qkc_id,
+            receiver_id: self.cfg.qkc_id,
+            dest_final: next_qkc,
+            key_size_bits: 0,
+            // OBJ-010: la época del master_secret con que se cifró la
+            // capa más externa del onion. El primer hop la usará
+            // (vía `Frame.epoch_id` → `peers.master_for_epoch`) para
+            // descifrar `payload`.
+            epoch_id: onion.first_epoch_id,
+            key_ids: Vec::new(),
+            header_qkc_mp: Vec::new(),
+            header_orr_mp: header.encode()?,
             header_dkms_mp: dkms_header::encode(&app_header)?,
-            payload:        onion.payload,
+            payload: onion.payload,
         };
         self.qkc_link.send(frame).await?;
         Ok(())
@@ -522,8 +564,10 @@ impl OrrService {
                 Ok(())
             }
             Some(kid) => {
-                // Modo onion: pelar capa con master_secret_{from}.
-                self.handle_onion_in(&header, kid, dkms_map, frame.payload).await
+                // Modo onion: pelar capa con master_secret_{from} de la
+                // época indicada por el wire (`Frame.epoch_id`).
+                self.handle_onion_in(&header, kid, frame.epoch_id, dkms_map, frame.payload)
+                    .await
             }
         }
     }
@@ -532,15 +576,27 @@ impl OrrService {
         &self,
         header: &OrrHeader,
         key_id: [u8; 16],
+        epoch_id: u32,
         dkms_map: BTreeMap<String, String>,
         payload: Vec<u8>,
     ) -> Result<()> {
         let from = header.from.to_lowercase();
-        let ms = self.peers.master_secret(&from).ok_or_else(|| {
-            OrrError::Relay(format!(
-                "incoming onion from {from} sin master_secret (bootstrap pendiente?)"
-            ))
-        })?;
+        // OBJ-010: lookup epoch-aware. Si el frame trae un `epoch_id`
+        // que aún no rotamos con `from` (porque rotation.rs no
+        // completó), `master_for_epoch` devuelve None → drop con warn,
+        // jamás silencio. El emisor reintentará o caerá el frame.
+        let ms = match self.peers.master_for_epoch(&from, epoch_id) {
+            Some(ms) => ms,
+            None => {
+                warn!(
+                    from = %from,
+                    epoch_id,
+                    latest = ?self.peers.latest_epoch_for(&from),
+                    "orr.incoming master_secret missing for epoch (drop)",
+                );
+                return Ok(());
+            }
+        };
         let peeled = onion::peel(&ms, &key_id, &payload, header.max_hops)?;
         match peeled {
             Peeled::Deliver(body) => {
@@ -553,10 +609,7 @@ impl OrrService {
                     return Err(OrrError::Relay("onion forward loop to self".into()));
                 }
                 let next_qkc = self.peers.qkc_id(&inner.next_orr_id).ok_or_else(|| {
-                    OrrError::Relay(format!(
-                        "forward hop {} sin qkc_id",
-                        inner.next_orr_id
-                    ))
+                    OrrError::Relay(format!("forward hop {} sin qkc_id", inner.next_orr_id))
                 })?;
                 debug!(
                     next_orr = %inner.next_orr_id,
@@ -584,17 +637,21 @@ impl OrrService {
             remaining_after,
         );
         let out = Frame {
-            kind:           FRAME_LOCAL_SEND,
-            sender_id:      self.cfg.qkc_id,
-            receiver_id:    self.cfg.qkc_id,
-            dest_final:     next_qkc_id,
-            key_size_bits:  0,
-            key_ids:        Vec::new(),
-            header_qkc_mp:  Vec::new(),
-            header_orr_mp:  new_header.encode()?,
+            kind: FRAME_LOCAL_SEND,
+            sender_id: self.cfg.qkc_id,
+            receiver_id: self.cfg.qkc_id,
+            dest_final: next_qkc_id,
+            key_size_bits: 0,
+            // OBJ-010: la `InnerLayer` que acabamos de pelar trae el
+            // epoch_id que el SIGUIENTE peeler debe usar para
+            // descifrar `inner.xor_ct`. Lo copiamos al wire frame.
+            epoch_id: inner.epoch_id,
+            key_ids: Vec::new(),
+            header_qkc_mp: Vec::new(),
+            header_orr_mp: new_header.encode()?,
             // El header_dkms se propaga byte-a-byte: no es nuestro.
             header_dkms_mp: dkms_header::encode(&dkms_map)?,
-            payload:        inner.xor_ct,
+            payload: inner.xor_ct,
         };
         self.qkc_link.send(out).await
     }
@@ -603,8 +660,12 @@ impl OrrService {
 
     fn broadcast_self(&self, payload: Vec<u8>, app_header: BTreeMap<String, String>) {
         let _ = self.deliveries_tx.send(DeliveredMessage {
-            origin: Some(NodeId { value: self.cfg.orr_id.clone() }),
-            destination: Some(NodeId { value: self.cfg.orr_id.clone() }),
+            origin: Some(NodeId {
+                value: self.cfg.orr_id.clone(),
+            }),
+            destination: Some(NodeId {
+                value: self.cfg.orr_id.clone(),
+            }),
             payload,
             app_header: app_header.into_iter().collect(),
             received_at_unix_ms: now_unix_ms(),
@@ -646,10 +707,7 @@ impl OrrService {
 /// normalización produce colisión (p.ej. el TOML tenía `ORR_1` y `orr_1`),
 /// devuelve `OrrError::Relay` para que el operador lo corrija. `field`
 /// solo se usa en el mensaje de error.
-fn lowercase_keys<V>(
-    map: HashMap<String, V>,
-    field: &'static str,
-) -> Result<HashMap<String, V>> {
+fn lowercase_keys<V>(map: HashMap<String, V>, field: &'static str) -> Result<HashMap<String, V>> {
     let mut out: HashMap<String, V> = HashMap::with_capacity(map.len());
     for (k, v) in map {
         let lk = k.to_lowercase();

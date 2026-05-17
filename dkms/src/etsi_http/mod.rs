@@ -96,9 +96,7 @@ pub fn error_to_response(err: DkmsError) -> Response {
         | DkmsError::OrrSendFailed { .. }
         | DkmsError::SdnUnreachable(_)
         | DkmsError::QkcUnreachable(_) => (StatusCode::BAD_GATEWAY, err.to_string()),
-        DkmsError::PeerOrrMisconfig { .. } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
-        }
+        DkmsError::PeerOrrMisconfig { .. } => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         DkmsError::SaeBindingLookupFailed(_) => (StatusCode::NOT_FOUND, err.to_string()),
         DkmsError::Tls(_)
         | DkmsError::Crypto(_)
@@ -106,7 +104,10 @@ pub fn error_to_response(err: DkmsError) -> Response {
         | DkmsError::Common(_)
         | DkmsError::Other(_) => {
             warn!(error = ?err, "internal dkms error");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_owned(),
+            )
         }
     };
     (status, axum::Json(json!({"message": msg}))).into_response()

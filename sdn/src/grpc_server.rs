@@ -4,8 +4,8 @@ use common::proto::{
         sdn_control_server::{SdnControl, SdnControlServer},
         AdmissionRequest, AdmissionResponse, CapacityReport, ComputePathRequest,
         ComputePathResponse, DkmsMetric, GetOrrPathRequest, GetOrrPathResponse,
-        GetSaeBindingRequest, GetSaeBindingResponse, LinkUpdate, PathPolicy,
-        StreamTopologyRequest, Topology as ProtoTopology, TopologyEvent,
+        GetSaeBindingRequest, GetSaeBindingResponse, LinkUpdate, PathPolicy, StreamTopologyRequest,
+        Topology as ProtoTopology, TopologyEvent,
     },
 };
 use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -37,7 +37,7 @@ impl SdnControl for SdnGrpc {
         Err(Status::unimplemented(
             "PutTopology is out of scope: topology is loaded at boot from `topology_dir` \
              and immutable until SDN restart. Only SAE bindings are mutable at runtime \
-             via HTTP admin (POST/PUT/DELETE /sae)."
+             via HTTP admin (POST/PUT/DELETE /sae).",
         ))
     }
 
@@ -52,7 +52,7 @@ impl SdnControl for SdnGrpc {
         Err(Status::unimplemented(
             "UpdateLink is out of scope. For link-capacity updates use HTTP admin \
              `POST /link-capacity`. Topology mutations (links, nodes) are not \
-             supported at runtime."
+             supported at runtime.",
         ))
     }
 
@@ -65,11 +65,11 @@ impl SdnControl for SdnGrpc {
         let src = m.src.unwrap_or_default().value;
         let dst = m.dst.unwrap_or_default().value;
         let policy = match PathPolicy::try_from(m.policy).unwrap_or(PathPolicy::PolicyUnspecified) {
-            PathPolicy::ShortestHops          => routing::Policy::ShortestHops,
-            PathPolicy::MinLatency            => routing::Policy::MinLatency,
-            PathPolicy::MaxAvailableCapacity  => routing::Policy::MaxAvailableCapacity,
-            PathPolicy::MinCostFlow           => routing::Policy::MinCostFlow,
-            PathPolicy::PolicyUnspecified     => routing::Policy::ShortestHops,
+            PathPolicy::ShortestHops => routing::Policy::ShortestHops,
+            PathPolicy::MinLatency => routing::Policy::MinLatency,
+            PathPolicy::MaxAvailableCapacity => routing::Policy::MaxAvailableCapacity,
+            PathPolicy::MinCostFlow => routing::Policy::MinCostFlow,
+            PathPolicy::PolicyUnspecified => routing::Policy::ShortestHops,
         };
         let p = routing::compute(&self.svc.topology, &src, &dst, m.required_bps, policy)
             .map_err(|e| Status::not_found(e.to_string()))?;
@@ -89,9 +89,9 @@ impl SdnControl for SdnGrpc {
         let link = m.link.unwrap_or_default().value;
         let d = crate::link_admission::check(&self.svc.topology, &link, m.requested_bps);
         Ok(Response::new(AdmissionResponse {
-            allowed:    d.allowed,
+            allowed: d.allowed,
             granted_bps: d.granted_bps,
-            reason:     d.reason,
+            reason: d.reason,
         }))
     }
 
@@ -101,7 +101,9 @@ impl SdnControl for SdnGrpc {
         _req: Request<StreamTopologyRequest>,
     ) -> std::result::Result<Response<Self::StreamTopologyStream>, Status> {
         let rx = self.svc.pushers.subscribe();
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     #[instrument(skip_all)]
@@ -142,7 +144,7 @@ impl SdnControl for SdnGrpc {
             .ok_or_else(|| Status::failed_precondition(format!("dkms {} unknown", sae.dkms_id)))?;
         Ok(Response::new(GetSaeBindingResponse {
             dkms_id: dkms.id.clone(),
-            orr_id:  dkms.orr_id.clone(),
+            orr_id: dkms.orr_id.clone(),
         }))
     }
 
@@ -174,7 +176,10 @@ impl SdnControl for SdnGrpc {
         let qkc_path = topo
             .shortest_path_qkc(&src_orr.qkc_id, &dst_orr.qkc_id)
             .ok_or_else(|| {
-                Status::not_found(format!("no qkc path {} → {}", src_orr.qkc_id, dst_orr.qkc_id))
+                Status::not_found(format!(
+                    "no qkc path {} → {}",
+                    src_orr.qkc_id, dst_orr.qkc_id
+                ))
             })?;
         // En la estrella, los QKC hub/intermedios pueden no tener un
         // ORR adjunto (sólo las hojas lo tienen). El camino ORR-level

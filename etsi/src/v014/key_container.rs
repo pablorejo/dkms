@@ -25,7 +25,9 @@ impl Etsi014KeyContainer {
 
     pub fn validate(&self) -> Result<(), EtsiError> {
         if self.keys.is_empty() {
-            return Err(EtsiError::Validation("keys must contain at least 1 entry".into()));
+            return Err(EtsiError::Validation(
+                "keys must contain at least 1 entry".into(),
+            ));
         }
         for k in &self.keys {
             k.validate()?;

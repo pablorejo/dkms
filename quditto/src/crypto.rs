@@ -32,7 +32,10 @@ impl Key {
         uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80; // variante RFC 4122
 
         let material = buf[16..].to_vec();
-        Self { key_id: Uuid::from_bytes(uuid_bytes), material }
+        Self {
+            key_id: Uuid::from_bytes(uuid_bytes),
+            material,
+        }
     }
 }
 

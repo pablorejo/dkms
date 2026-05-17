@@ -33,20 +33,20 @@ type CommoditiesCache = RwLock<Option<(i64, Arc<Vec<Commodity>>)>>;
 
 #[derive(Clone)]
 pub struct SdnService {
-    pub cfg:          Arc<SdnConfig>,
-    pub topology:     TopologyStore,
-    pub priorities:   Arc<BufferPriorityRegistry>,
-    pub solver:       McfSolver,
+    pub cfg: Arc<SdnConfig>,
+    pub topology: TopologyStore,
+    pub priorities: Arc<BufferPriorityRegistry>,
+    pub solver: McfSolver,
     pub mcf_snapshot: Arc<ArcSwap<McfSnapshot>>,
-    pub pushers:      Arc<Pushers>,
-    pub metrics:      Metrics,
+    pub pushers: Arc<Pushers>,
+    pub metrics: Metrics,
     /// `(topology_version, commodities)`. Rebuilt whenever the
     /// topology version differs from the cached one.
-    commodities:      Arc<CommoditiesCache>,
+    commodities: Arc<CommoditiesCache>,
     /// Coalesces bursts of `request_recompute()` calls into one MCF
     /// solve. Built lazily — only constructed when there's a tokio
     /// runtime available (see `attach_debouncer`).
-    debouncer:        Arc<RwLock<Option<Debouncer>>>,
+    debouncer: Arc<RwLock<Option<Debouncer>>>,
 }
 
 impl SdnService {
@@ -63,15 +63,15 @@ impl SdnService {
         };
         let solver = McfSolver::new(cfg.mcf_k_paths);
         let svc = Self {
-            cfg:          Arc::new(cfg),
-            topology:     TopologyStore::new(initial),
-            priorities:   Arc::new(BufferPriorityRegistry::new()),
+            cfg: Arc::new(cfg),
+            topology: TopologyStore::new(initial),
+            priorities: Arc::new(BufferPriorityRegistry::new()),
             solver,
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
-            pushers:      Arc::new(Pushers::new()),
+            pushers: Arc::new(Pushers::new()),
             metrics,
-            commodities:  Arc::new(RwLock::new(None)),
-            debouncer:    Arc::new(RwLock::new(None)),
+            commodities: Arc::new(RwLock::new(None)),
+            debouncer: Arc::new(RwLock::new(None)),
         };
         // Pre-warm the MCF snapshot so /rate, /forwarding-table, etc.
         // answer something coherent before the first event fires.
@@ -81,12 +81,7 @@ impl SdnService {
 
     /// Convenience helper for the HTTP `/rate` endpoints: look up the
     /// keys-per-second rate the MCF assigned to a single buffer.
-    pub fn rate_for_buffer(
-        &self,
-        dkms_id:      &str,
-        peer_dkms_id: &str,
-        role:         BufferRole,
-    ) -> f64 {
+    pub fn rate_for_buffer(&self, dkms_id: &str, peer_dkms_id: &str, role: BufferRole) -> f64 {
         self.mcf_snapshot
             .load()
             .rate_for_buffer(dkms_id, peer_dkms_id, role)
@@ -124,7 +119,7 @@ impl SdnService {
     /// `max_wait_override`.
     pub fn attach_debouncer(
         &self,
-        window_override:   Option<Duration>,
+        window_override: Option<Duration>,
         max_wait_override: Option<Duration>,
     ) {
         let n = self.topology.load().dkms.len();
@@ -134,10 +129,10 @@ impl SdnService {
 
         // Capture cloned handles (not `self`) so the closure has no
         // back-reference and the Drop chain doesn't form a cycle.
-        let topo  = self.topology.clone();
+        let topo = self.topology.clone();
         let prios = self.priorities.clone();
         let solver = self.solver;
-        let snap  = self.mcf_snapshot.clone();
+        let snap = self.mcf_snapshot.clone();
         let cache = self.commodities.clone();
         let new_deb = Debouncer::new(window, max_wait, move || {
             recompute_mcf_inner(&topo, &prios, solver, &snap, &cache);
@@ -159,7 +154,9 @@ impl SdnService {
     /// Re-tune timings based on the current DKMS count. No-op if the
     /// debouncer isn't attached yet.
     pub fn autotune_debouncer(&self) {
-        let Some(d) = self.debouncer.read().clone() else { return };
+        let Some(d) = self.debouncer.read().clone() else {
+            return;
+        };
         let n = self.topology.load().dkms.len();
         let (_est, w, mw) = estimate_timing(n);
         d.update_timing(w, mw);
@@ -177,7 +174,9 @@ impl SdnService {
     pub fn request_recompute(&self) {
         match self.debouncer.read().as_ref() {
             Some(d) => d.request(),
-            None    => { self.recompute_mcf(); }
+            None => {
+                self.recompute_mcf();
+            }
         }
     }
 
@@ -206,15 +205,13 @@ impl SdnService {
     /// coalesced safely.
     pub fn set_priority_and_recompute(
         &self,
-        dkms_id:      &str,
+        dkms_id: &str,
         peer_dkms_id: &str,
-        role:         BufferRole,
-        priority:     TrafficPriority,
+        role: BufferRole,
+        priority: TrafficPriority,
     ) -> Arc<McfSnapshot> {
         self.priorities.set(dkms_id, peer_dkms_id, role, priority);
-        if priority == TrafficPriority::Saturated
-            || priority == TrafficPriority::BestEffort
-        {
+        if priority == TrafficPriority::Saturated || priority == TrafficPriority::BestEffort {
             return self.recompute_mcf();
         }
         self.request_recompute();
@@ -251,7 +248,9 @@ impl SdnService {
             let topology = self.topology.clone();
             let pushers = self.pushers.clone();
             tokio::spawn(async move {
-                use common::proto::sdn::v1::{topology_event, Topology as ProtoTopology, TopologyEvent};
+                use common::proto::sdn::v1::{
+                    topology_event, Topology as ProtoTopology, TopologyEvent,
+                };
                 let http = reqwest::Client::builder()
                     .timeout(Duration::from_millis(1500))
                     .build()
@@ -270,7 +269,9 @@ impl SdnService {
                         for (qkc_id, qkc) in &snap.qkcs {
                             let mut table = std::collections::HashMap::<String, u32>::new();
                             for other in snap.qkcs.keys() {
-                                if other == qkc_id { continue; }
+                                if other == qkc_id {
+                                    continue;
+                                }
                                 if let Some(next) = snap.next_hop_qkc(qkc_id, other) {
                                     if let Ok(nh) = next.parse::<u32>() {
                                         table.insert(other.clone(), nh);
@@ -286,9 +287,7 @@ impl SdnService {
                             let qid = qkc_id.clone();
                             futures.push(async move {
                                 match client.post(&url).json(&body).send().await {
-                                    Ok(r) if r.status().is_success() => {
-                                        Ok::<String, String>(qid)
-                                    }
+                                    Ok(r) if r.status().is_success() => Ok::<String, String>(qid),
                                     Ok(r) => Err(format!("{qid}: HTTP {}", r.status())),
                                     Err(e) => Err(format!("{qid}: {e}")),
                                 }
@@ -314,8 +313,8 @@ impl SdnService {
                         // 2) Broadcast del evento (DKMS/ORR invalidan).
                         let ev = TopologyEvent {
                             event: Some(topology_event::Event::Snapshot(ProtoTopology {
-                                nodes:   Vec::new(),
-                                links:   Vec::new(),
+                                nodes: Vec::new(),
+                                links: Vec::new(),
                                 version: now,
                             })),
                             version: now,
@@ -366,9 +365,9 @@ impl SdnService {
 /// version has bumped. Free function so the debouncer closure can
 /// call it with just the cache + solver references it captures.
 fn get_or_build_commodities(
-    cache:  &CommoditiesCache,
+    cache: &CommoditiesCache,
     solver: McfSolver,
-    topo:   &Topology,
+    topo: &Topology,
 ) -> Arc<Vec<Commodity>> {
     // Fast path: read lock, hope the cache matches the version.
     {
@@ -408,9 +407,9 @@ fn get_or_build_commodities(
 fn recompute_mcf_inner(
     topo_store: &TopologyStore,
     priorities: &Arc<BufferPriorityRegistry>,
-    solver:     McfSolver,
-    snap_cell:  &Arc<ArcSwap<McfSnapshot>>,
-    cache:      &Arc<CommoditiesCache>,
+    solver: McfSolver,
+    snap_cell: &Arc<ArcSwap<McfSnapshot>>,
+    cache: &Arc<CommoditiesCache>,
 ) -> Arc<McfSnapshot> {
     let topo = topo_store.load();
     let commodities = get_or_build_commodities(cache, solver, &topo);
@@ -461,7 +460,7 @@ fn recompute_mcf_inner(
 
     info!(
         commodities = commodities.len(),
-        excluded    = excluded_count,
+        excluded = excluded_count,
         flows_with_rate = arc.rates.values().filter(|r| **r > 0.0).count(),
         "mcf recomputed"
     );
@@ -477,49 +476,89 @@ mod tests {
     use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc};
 
     fn host(id: i64) -> HostEndpoint {
-        HostEndpoint { id, ip: format!("10.0.0.{id}"), port: 9000 + id as u16 }
+        HostEndpoint {
+            id,
+            ip: format!("10.0.0.{id}"),
+            port: 9000 + id as u16,
+        }
     }
 
     fn small_topo() -> Topology {
         let mut t = Topology::default();
         for q in ["1", "2", "3"] {
-            t.upsert_qkc(Qkc { id: q.into(), host: host(q.parse().unwrap()), kme_host: None });
+            t.upsert_qkc(Qkc {
+                id: q.into(),
+                host: host(q.parse().unwrap()),
+                kme_host: None,
+            });
         }
-        t.add_edge("1", "2", EdgeMeta {
-            distance_km: 0, r0_keys_per_second: 100.0, alpha: 0.2, max_buffer_size: 10,
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 100.0,
+                alpha: 0.2,
+                max_buffer_size: 10,
+            },
+        );
+        t.add_edge(
+            "2",
+            "3",
+            EdgeMeta {
+                distance_km: 0,
+                r0_keys_per_second: 100.0,
+                alpha: 0.2,
+                max_buffer_size: 10,
+            },
+        );
+        t.upsert_orr(Orr {
+            id: "o1".into(),
+            host: host(11),
+            qkc_id: "1".into(),
         });
-        t.add_edge("2", "3", EdgeMeta {
-            distance_km: 0, r0_keys_per_second: 100.0, alpha: 0.2, max_buffer_size: 10,
+        t.upsert_orr(Orr {
+            id: "o3".into(),
+            host: host(13),
+            qkc_id: "3".into(),
         });
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o3".into(), host: host(13), qkc_id: "3".into() });
-        t.upsert_dkms(Dkms { id: "dA".into(), host: host(21), tls_id: None, orr_id: "o1".into() });
-        t.upsert_dkms(Dkms { id: "dB".into(), host: host(23), tls_id: None, orr_id: "o3".into() });
+        t.upsert_dkms(Dkms {
+            id: "dA".into(),
+            host: host(21),
+            tls_id: None,
+            orr_id: "o1".into(),
+        });
+        t.upsert_dkms(Dkms {
+            id: "dB".into(),
+            host: host(23),
+            tls_id: None,
+            orr_id: "o3".into(),
+        });
         t.version = 1;
         t
     }
 
     fn make_service() -> SdnService {
         SdnService {
-            cfg:          Arc::new(SdnConfig {
-                node_id:        "test".into(),
-                grpc_addr:      "0.0.0.0:0".into(),
-                http_addr:      "0.0.0.0:0".into(),
-                metrics_addr:   "0.0.0.0:0".into(),
-                topology_dir:   None,
+            cfg: Arc::new(SdnConfig {
+                node_id: "test".into(),
+                grpc_addr: "0.0.0.0:0".into(),
+                http_addr: "0.0.0.0:0".into(),
+                metrics_addr: "0.0.0.0:0".into(),
+                topology_dir: None,
                 default_policy: "shortest_hops".into(),
-                mcf_period_ms:  60_000,
+                mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
-                mcf_k_paths:    3,
+                mcf_k_paths: 3,
             }),
-            topology:     TopologyStore::new(small_topo()),
-            priorities:   Arc::new(BufferPriorityRegistry::new()),
-            solver:       McfSolver::new(3),
+            topology: TopologyStore::new(small_topo()),
+            priorities: Arc::new(BufferPriorityRegistry::new()),
+            solver: McfSolver::new(3),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
-            pushers:      Arc::new(Pushers::new()),
-            metrics:      Metrics::new("sdn-test"),
-            commodities:  Arc::new(RwLock::new(None)),
-            debouncer:    Arc::new(RwLock::new(None)),
+            pushers: Arc::new(Pushers::new()),
+            metrics: Metrics::new("sdn-test"),
+            commodities: Arc::new(RwLock::new(None)),
+            debouncer: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -580,7 +619,11 @@ mod tests {
 
         // Mutate the topology — version bumps.
         svc.topology.mutate(|t| {
-            t.upsert_qkc(Qkc { id: "99".into(), host: host(99), kme_host: None });
+            t.upsert_qkc(Qkc {
+                id: "99".into(),
+                host: host(99),
+                kme_host: None,
+            });
             true
         });
         let topo2 = svc.topology.load();
@@ -596,7 +639,10 @@ mod tests {
         let before = svc.mcf_snapshot.load().rate_for_flow("dA", "dB");
         assert!(before > 0.0);
         let after_snap = svc.set_priority_and_recompute(
-            "dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated,
+            "dA",
+            "dB",
+            BufferRole::EncKeys,
+            TrafficPriority::Saturated,
         );
         assert_eq!(after_snap.rate_for_flow("dA", "dB"), 0.0);
     }
@@ -613,7 +659,8 @@ mod tests {
         );
         // Pollute the registry, then fire a burst of requests. The
         // debouncer should coalesce them into a single recompute.
-        svc.priorities.set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated);
+        svc.priorities
+            .set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated);
         for _ in 0..10 {
             svc.request_recompute();
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -642,7 +689,10 @@ mod tests {
         // recompute synchronously and the snapshot should reflect the
         // change immediately.
         let snap = svc.set_priority_and_recompute(
-            "dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated,
+            "dA",
+            "dB",
+            BufferRole::EncKeys,
+            TrafficPriority::Saturated,
         );
         assert_eq!(snap.rate_for_flow("dA", "dB"), 0.0);
         assert_eq!(svc.mcf_snapshot.load().rate_for_flow("dA", "dB"), 0.0);
@@ -662,7 +712,10 @@ mod tests {
         // one (pre-change), since the recompute hasn't run yet.
         let before = svc.mcf_snapshot.load().rate_for_flow("dA", "dB");
         let returned = svc.set_priority_and_recompute(
-            "dA", "dB", BufferRole::EncKeys, TrafficPriority::Important,
+            "dA",
+            "dB",
+            BufferRole::EncKeys,
+            TrafficPriority::Important,
         );
         assert_eq!(returned.rate_for_flow("dA", "dB"), before);
         // After the window elapses, the new weights have been applied.
@@ -691,7 +744,7 @@ mod tests {
         // hit their floors.
         let d = svc.debouncer.read().clone().expect("debouncer attached");
         assert!(d.max_wait() >= Duration::from_secs(2));
-        assert!(d.window()   >= Duration::from_millis(500));
+        assert!(d.window() >= Duration::from_millis(500));
         svc.shutdown_debouncer();
     }
 }

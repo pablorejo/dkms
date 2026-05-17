@@ -1865,6 +1865,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hkdf",
+ "hmac",
  "parking_lot",
  "prometheus",
  "prost",
@@ -1874,6 +1875,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -1881,6 +1883,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wire",
+ "zeroize",
 ]
 
 [[package]]

@@ -37,8 +37,8 @@ use crate::state::BufferPool;
 #[derive(Debug)]
 struct Bucket {
     refill_rate: f64,
-    capacity:    f64,
-    tokens:      f64,
+    capacity: f64,
+    tokens: f64,
     last_refill: Instant,
 }
 
@@ -113,7 +113,7 @@ pub struct SaeBufferBuckets {
 
 #[derive(Default)]
 struct State {
-    buckets:      HashMap<(String, String), Bucket>,
+    buckets: HashMap<(String, String), Bucket>,
     last_request: HashMap<(String, String), Instant>,
     last_eviction: Option<Instant>,
 }
@@ -149,7 +149,12 @@ impl SaeBufferBuckets {
         n.max(1)
     }
 
-    fn ensure_bucket<'a>(state: &'a mut State, peer: &str, sae: &str, now: Instant) -> &'a mut Bucket {
+    fn ensure_bucket<'a>(
+        state: &'a mut State,
+        peer: &str,
+        sae: &str,
+        now: Instant,
+    ) -> &'a mut Bucket {
         let key = (peer.to_string(), sae.to_string());
         state
             .buckets
@@ -212,16 +217,19 @@ impl SaeBufferBuckets {
             if let Err(available) = bucket.try_consume(now, cost_per_peer) {
                 // Rollback de buckets ya consumidos.
                 for p in &consumed {
-                    if let Some(b) = state.buckets.get_mut(&(p.clone(), sae.as_str().to_string())) {
+                    if let Some(b) = state
+                        .buckets
+                        .get_mut(&(p.clone(), sae.as_str().to_string()))
+                    {
                         b.refund(cost_per_peer);
                     }
                 }
                 return Err(AdmitFailure {
-                    peer:        peer.clone(),
+                    peer: peer.clone(),
                     available,
-                    requested:   cost_per_peer,
+                    requested: cost_per_peer,
                     active_sae_count: *active,
-                    capacity:    cap,
+                    capacity: cap,
                 });
             }
             consumed.push(peer.clone());
@@ -267,7 +275,9 @@ impl SaeBufferBuckets {
     /// Elimina buckets cuyo SAE no ha pedido nada en la ventana de
     /// observación. Como mucho una vez por ventana (perezoso).
     fn maybe_evict(&self, state: &mut State, now: Instant) {
-        let last = state.last_eviction.unwrap_or(now - self.observation_window - Duration::from_secs(1));
+        let last = state
+            .last_eviction
+            .unwrap_or(now - self.observation_window - Duration::from_secs(1));
         if now.saturating_duration_since(last) < self.observation_window {
             return;
         }
@@ -292,11 +302,11 @@ impl SaeBufferBuckets {
 /// Error de admisión: indica qué peer falló y por qué.
 #[derive(Debug, Clone)]
 pub struct AdmitFailure {
-    pub peer:             String,
-    pub available:        f64,
-    pub requested:        f64,
+    pub peer: String,
+    pub available: f64,
+    pub requested: f64,
     pub active_sae_count: usize,
-    pub capacity:         f64,
+    pub capacity: f64,
 }
 
 #[cfg(test)]

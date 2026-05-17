@@ -56,8 +56,8 @@ pub struct LinkBuffer {
 
     // Stats: lock-free counters. Lectura coherente entre sí no
     // garantizada — solo aproximaciones para `/status`.
-    n_generated:     AtomicU64,
-    n_dropped:       AtomicU64,
+    n_generated: AtomicU64,
+    n_dropped: AtomicU64,
     n_delivered_enc: AtomicU64,
     n_delivered_dec: AtomicU64,
 }
@@ -70,8 +70,8 @@ impl LinkBuffer {
             delivered: DashMap::with_capacity(cfg.max_buffer_keys as usize),
             cfg,
             rate_kps,
-            n_generated:     AtomicU64::new(0),
-            n_dropped:       AtomicU64::new(0),
+            n_generated: AtomicU64::new(0),
+            n_dropped: AtomicU64::new(0),
             n_delivered_enc: AtomicU64::new(0),
             n_delivered_dec: AtomicU64::new(0),
         }
@@ -115,7 +115,8 @@ impl LinkBuffer {
                 None => break,
             }
         }
-        self.n_delivered_enc.fetch_add(out.len() as u64, Ordering::Relaxed);
+        self.n_delivered_enc
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
         out
     }
 
@@ -144,8 +145,8 @@ impl LinkBuffer {
 
     pub fn stats_snapshot(&self) -> Stats {
         Stats {
-            generated:     self.n_generated.load(Ordering::Relaxed),
-            dropped:       self.n_dropped.load(Ordering::Relaxed),
+            generated: self.n_generated.load(Ordering::Relaxed),
+            dropped: self.n_dropped.load(Ordering::Relaxed),
             delivered_enc: self.n_delivered_enc.load(Ordering::Relaxed),
             delivered_dec: self.n_delivered_dec.load(Ordering::Relaxed),
         }

@@ -53,12 +53,12 @@ impl TrafficPriority {
     /// excluded from the LP and pinned to rate 0 by the orchestrator.
     pub fn weight(self) -> f64 {
         match self {
-            Self::Priority   => 100.0,
-            Self::Important  => 30.0,
-            Self::Quickly    => 10.0,
-            Self::Relax      => 3.0,
+            Self::Priority => 100.0,
+            Self::Important => 30.0,
+            Self::Quickly => 10.0,
+            Self::Relax => 3.0,
             Self::BestEffort => 1.0,
-            Self::Saturated  => 0.0,
+            Self::Saturated => 0.0,
         }
     }
 
@@ -66,23 +66,23 @@ impl TrafficPriority {
     /// wants a comparable scalar (e.g. UI sort).
     pub fn rank(self) -> u8 {
         match self {
-            Self::Priority   => 1,
-            Self::Important  => 2,
-            Self::Quickly    => 3,
-            Self::Relax      => 4,
+            Self::Priority => 1,
+            Self::Important => 2,
+            Self::Quickly => 3,
+            Self::Relax => 4,
             Self::BestEffort => 5,
-            Self::Saturated  => 6,
+            Self::Saturated => 6,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Priority   => "priority",
-            Self::Important  => "important",
-            Self::Quickly    => "quickly",
-            Self::Relax      => "relax",
+            Self::Priority => "priority",
+            Self::Important => "important",
+            Self::Quickly => "quickly",
+            Self::Relax => "relax",
             Self::BestEffort => "best_effort",
-            Self::Saturated  => "saturated",
+            Self::Saturated => "saturated",
         }
     }
 }
@@ -91,13 +91,13 @@ impl FromStr for TrafficPriority {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
-            "priority"    => Ok(Self::Priority),
-            "important"   => Ok(Self::Important),
-            "quickly"     => Ok(Self::Quickly),
-            "relax"       => Ok(Self::Relax),
+            "priority" => Ok(Self::Priority),
+            "important" => Ok(Self::Important),
+            "quickly" => Ok(Self::Quickly),
+            "relax" => Ok(Self::Relax),
             "best_effort" => Ok(Self::BestEffort),
-            "saturated"   => Ok(Self::Saturated),
-            other         => Err(format!("invalid priority: {other}")),
+            "saturated" => Ok(Self::Saturated),
+            other => Err(format!("invalid priority: {other}")),
         }
     }
 }
@@ -132,7 +132,7 @@ impl FromStr for BufferRole {
         match s {
             "enc_keys" => Ok(BufferRole::EncKeys),
             "dec_keys" => Ok(BufferRole::DecKeys),
-            other      => Err(format!("invalid buffer role: {other}")),
+            other => Err(format!("invalid buffer role: {other}")),
         }
     }
 }
@@ -149,7 +149,9 @@ pub struct BufferPriorityRegistry {
 
 impl BufferPriorityRegistry {
     pub fn new() -> Self {
-        Self { states: RwLock::new(HashMap::new()) }
+        Self {
+            states: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Set the priority of a buffer. Returns the previous value, if any.
@@ -166,12 +168,7 @@ impl BufferPriorityRegistry {
 
     /// Read the priority. Defaults to [`TrafficPriority::Priority`]
     /// when no entry exists — see the type-level docs for *why*.
-    pub fn get(
-        &self,
-        dkms_id: &str,
-        peer_dkms_id: &str,
-        role: BufferRole,
-    ) -> TrafficPriority {
+    pub fn get(&self, dkms_id: &str, peer_dkms_id: &str, role: BufferRole) -> TrafficPriority {
         self.states
             .read()
             .get(&(dkms_id.into(), peer_dkms_id.into(), role))
@@ -186,7 +183,11 @@ impl BufferPriorityRegistry {
 
     /// Snapshot the registry — for debug endpoints / introspection.
     pub fn snapshot(&self) -> Vec<((String, String, BufferRole), TrafficPriority)> {
-        self.states.read().iter().map(|(k, v)| (k.clone(), *v)).collect()
+        self.states
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 }
 
@@ -198,12 +199,12 @@ mod tests {
 
     #[test]
     fn weights_match_python() {
-        assert_eq!(TrafficPriority::Priority.weight(),   100.0);
-        assert_eq!(TrafficPriority::Important.weight(),   30.0);
-        assert_eq!(TrafficPriority::Quickly.weight(),     10.0);
-        assert_eq!(TrafficPriority::Relax.weight(),        3.0);
-        assert_eq!(TrafficPriority::BestEffort.weight(),   1.0);
-        assert_eq!(TrafficPriority::Saturated.weight(),    0.0);
+        assert_eq!(TrafficPriority::Priority.weight(), 100.0);
+        assert_eq!(TrafficPriority::Important.weight(), 30.0);
+        assert_eq!(TrafficPriority::Quickly.weight(), 10.0);
+        assert_eq!(TrafficPriority::Relax.weight(), 3.0);
+        assert_eq!(TrafficPriority::BestEffort.weight(), 1.0);
+        assert_eq!(TrafficPriority::Saturated.weight(), 0.0);
     }
 
     #[test]
@@ -264,7 +265,9 @@ mod tests {
     #[test]
     fn registry_overwrites_returning_previous() {
         let r = BufferPriorityRegistry::new();
-        assert!(r.set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Relax).is_none());
+        assert!(r
+            .set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Relax)
+            .is_none());
         let prev = r.set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Quickly);
         assert_eq!(prev, Some(TrafficPriority::Relax));
     }

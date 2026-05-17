@@ -94,7 +94,9 @@ impl NetworkMessage {
     /// Atajo case-insensitive sobre headers (`headers_lc` del Python).
     pub fn header_ci(&self, key: &str) -> Option<&Value> {
         let lower = key.to_ascii_lowercase();
-        self.headers.iter().find_map(|(k, v)| (k.to_ascii_lowercase() == lower).then_some(v))
+        self.headers
+            .iter()
+            .find_map(|(k, v)| (k.to_ascii_lowercase() == lower).then_some(v))
     }
 
     /// Devuelve `data` como objeto JSON (`Map<String, Value>`) o un map

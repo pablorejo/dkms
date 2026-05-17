@@ -15,7 +15,10 @@ pub struct Etsi020KeyID {
 
 impl Etsi020KeyID {
     pub fn new(key_id: Uuid) -> Self {
-        Self { key_id, extension: None }
+        Self {
+            key_id,
+            extension: None,
+        }
     }
 }
 

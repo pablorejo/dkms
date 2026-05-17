@@ -1222,7 +1222,13 @@ def _simulation_sdn_service_base_url(simulation_entity) -> str:
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Simulation {simulation_id} has invalid SDN identifiers",
         )
-    return f"http://sdn-{int(sdn_suffix)}.{simulation_id}.svc.cluster.local:{sdn_port}"
+    # SDN exposes gRPC on `sdn_port` and the Rust HTTP admin on
+    # `sdn_port + 2` (cf. `PodSDN.expose_rust_http_port` and
+    # `sdn::main` reading `http_addr`). The BD persists the gRPC port
+    # (e.g. 3000), so derive the HTTP admin port for SAE binding /
+    # /sae / /priority calls.
+    sdn_http_port = sdn_port + 2
+    return f"http://sdn-{int(sdn_suffix)}.{simulation_id}.svc.cluster.local:{sdn_http_port}"
 
 
 def _sdn_http_json(
@@ -1276,47 +1282,27 @@ def _sdn_http_json(
         ) from exc
 
 
-def _resolve_sdn_dkms_id(session, *, dkms_db_id: int) -> int:
-    """Translate a DKMS database PK into the canonical node ID the SDN uses.
+def _resolve_sdn_dkms_id(session, *, dkms_db_id: int) -> str:
+    """Translate a DKMS database PK into the canonical id the SDN uses.
 
-    The SDN identifies nodes by a small integer (1..N) derived from the host IP
-    (127.0.0.10X → X) or port (400X → X).  The database PK is usually a much
-    larger auto-increment value that the SDN does not know about.
+    The SDN registers each DKMS with the string ``dkms-{host.id}`` (cf.
+    `sdn-topology` ConfigMap rendered by `pods.py`, e.g. ``dkms-382``).
+    Returns the same string so callers can POST it verbatim to the SDN.
+
+    If the DKMS or its host cannot be resolved, falls back to the DB PK
+    prefixed: ``dkms-{dkms_db_id}``. That keeps callers from accidentally
+    sending bare ints (which the Rust SDN rejects with 404 ``unknown dkms``).
     """
     from persistence.sqlalchemy.data import DKMS as DKMSEntity
     from persistence.sqlalchemy.data import Host as HostEntity
 
     dkms_entity = session.get(DKMSEntity, int(dkms_db_id))
-    if dkms_entity is None:
-        return int(dkms_db_id)
-
-    host_entity = (
-        session.get(HostEntity, int(dkms_entity.id_host))
-        if dkms_entity.id_host is not None
-        else None
-    )
+    if dkms_entity is None or dkms_entity.id_host is None:
+        return f"dkms-{int(dkms_db_id)}"
+    host_entity = session.get(HostEntity, int(dkms_entity.id_host))
     if host_entity is None:
-        return int(dkms_db_id)
-
-    host_port = getattr(host_entity, "port", None)
-    try:
-        port_int = int(host_port) if host_port is not None else 0
-    except (TypeError, ValueError):
-        port_int = 0
-    if port_int > 4000:
-        return int(port_int - 4000)
-
-    host_ip = str(getattr(host_entity, "ip", "") or "").strip()
-    octets = host_ip.split(".")
-    if len(octets) == 4:
-        try:
-            a, b, c, d = (int(o) for o in octets)
-        except ValueError:
-            a = b = c = d = -1
-        if a == 127 and b == 0 and c == 0 and d > 100:
-            return int(d - 100)
-
-    return int(dkms_db_id)
+        return f"dkms-{int(dkms_db_id)}"
+    return f"dkms-{int(host_entity.id)}"
 
 
 def _sync_sae_binding_to_sdn(
@@ -1326,18 +1312,24 @@ def _sync_sae_binding_to_sdn(
     dkms_id: int,
     session=None,
 ) -> None:
-    sdn_dkms_id = dkms_id
+    # SDN expects the canonical string id `dkms-{host.id}` (matches the
+    # `sdn-topology` ConfigMap). Until the resolver returns a string we
+    # used to pass bare ints, which the Rust SDN rejects with 404
+    # "unknown dkms".
     if session is not None:
         sdn_dkms_id = _resolve_sdn_dkms_id(session, dkms_db_id=dkms_id)
+    else:
+        sdn_dkms_id = f"dkms-{int(dkms_id)}"
     base_url = _simulation_sdn_service_base_url(simulation_entity)
-    post_url = f"{base_url}/sae/"
-    post_payload = {"id": str(sae_id), "dkms_id": str(int(sdn_dkms_id))}
+    # No trailing slash: SDN Axum router has only `POST /sae`.
+    post_url = f"{base_url}/sae"
+    post_payload = {"id": str(sae_id), "dkms_id": str(sdn_dkms_id)}
     status_code, _, raw_body = _sdn_http_json(method="POST", url=post_url, payload=post_payload)
     if status_code in {200, 201}:
         return
     if status_code == 409:
         put_url = f"{base_url}/sae/{sae_id}"
-        put_payload = {"dkms_id": str(int(sdn_dkms_id))}
+        put_payload = {"dkms_id": str(sdn_dkms_id)}
         update_status, _, update_body = _sdn_http_json(
             method="PUT",
             url=put_url,

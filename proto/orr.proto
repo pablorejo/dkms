@@ -32,14 +32,46 @@ service OrrControl {
   // pegar la clave en TOML (que se regenera cada boot).
   rpc GetPublicKey     (GetPublicKeyRequest)     returns (GetPublicKeyResponse);
 
-  // Establece un `master_secret` simétrico de 32 B con el peer. El
-  // initiator hace `kem.encap(peer.pubkey)` y manda el ciphertext; el
-  // receptor decapsula con su sk y obtiene el mismo `shared_secret`.
-  // Ambos lados lo guardan en su tabla `master_secrets[peer_orr_id]`.
-  // A partir de ahí, cada frame onion deriva su K per-frame con
-  // `HKDF-SHA256(salt="orr.onion.v1", ikm=master_secret,
-  //  info=key_id ‖ u32(len(body)), L=len(body))`.
+  // Bootstrap inicial del `bootstrap_secret` de 32 B con el peer. El
+  // initiator hace `kem.encap(peer.long_term_pubkey)` y manda el
+  // ciphertext; el receptor decapsula con su sk long-term y obtiene el
+  // mismo `shared_secret`. Ambos lados lo guardan en
+  // `bootstrap_secrets[peer_orr_id]` y NO lo usan jamás como keystream.
+  //
+  // El `bootstrap_secret` sirve solo como **clave HMAC** para autenticar
+  // las RPCs de rotación (`RequestEphemeralKey` /
+  // `EstablishEphemeralSecret`); el `master_secret` real por época nace
+  // de cada rotación con una keypair ML-KEM efímera nueva. Esto provee
+  // forward secrecy (audit H-3): capturar la `long_term_sk` en el futuro
+  // junto con tráfico grabado pasado NO permite descifrar tráfico de
+  // épocas pasadas, porque la esk efímera del responder se zeroiza tras
+  // decap exitosa.
+  //
+  // Tras éxito de `EstablishSecret`, el initiator dispara
+  // inmediatamente la primera rotación (`epoch_id = 1`) para poblar
+  // `master_secrets[peer][1]`.
   rpc EstablishSecret  (EstablishSecretRequest)  returns (EstablishSecretResponse);
+
+  // ── ORR Option-B forward secrecy: rotación de master_secret ─────────
+  // Sub-protocolo HMAC-autenticado que rota el `master_secret` por
+  // época. Lex-smaller `orr_id` inicia; el otro lado es reactivo
+  // (handlers). Cada rotación reemplaza `master_secrets[peer][N]` por
+  // `master_secrets[peer][N+1]` y zeroiza la esk efímera del responder
+  // tras decap exitosa. Ver `orr/src/rotation.rs` para detalles.
+  //
+  // Paso 1: A → B `RequestEphemeralKey(epoch)`. B valida MAC, genera
+  // `(epk, esk)` ML-KEM-768 frescos, guarda esk en
+  // `ephemeral_sks[A][epoch]`, devuelve epk + MAC.
+  rpc RequestEphemeralKey      (RequestEphemeralKeyRequest)
+      returns (RequestEphemeralKeyResponse);
+
+  // Paso 2: A valida MAC del paso 1, `encap(epk) → (ct, ss)`, guarda
+  // `master_secrets[B][epoch] = ss`, manda `EstablishEphemeralSecret`.
+  // B valida MAC, `decap(esk, ct) → ss`, guarda
+  // `master_secrets[A][epoch] = ss`, ZEROIZA `ephemeral_sks[A][epoch]`.
+  // FS boundary: tras este punto, ninguna sk efímera persiste.
+  rpc EstablishEphemeralSecret (EstablishEphemeralSecretRequest)
+      returns (EstablishEphemeralSecretResponse);
 
   // ── onion-circuit surface (max_hops != 0) ───────────────────────────
   // Open a new onion circuit toward a destination. SDN computes the path,
@@ -117,6 +149,75 @@ message EstablishSecretResponse {
   bool ok                    = 1;
   // Si ok=false, descripción para logs.
   string error               = 2;
+}
+
+// ── ORR Option-B rotation messages ────────────────────────────────────
+//
+// Todas las MACs son HMAC-SHA256 con `bootstrap_secrets[peer]` como
+// clave, sobre un input dominio-separado:
+//
+//   - REQ:  "REQ"||epoch_id_be||from||peer
+//   - RESP: "RESP"||epoch_id_be||from||peer||ephemeral_pubkey
+//   - FIN:  "FIN"||epoch_id_be||from||peer||ciphertext
+//
+// Se verifican con `Mac::verify_slice` (constant-time). `epoch_id_be`
+// es el `epoch_id` u32 en big-endian (mismo encoding que el wire,
+// ver `wire/src/lib.rs`).
+
+message RequestEphemeralKeyRequest {
+  // ORR initiator (lex-smaller `orr_id`). El receptor lo guarda
+  // implícitamente vía `ephemeral_sks[from][epoch_id]`.
+  .dkms.common.v1.NodeId from = 1;
+  // ORR responder (= self del receptor). Se incluye en el input HMAC
+  // para que un MAC válido para par `(A,B)` no sea reutilizable en
+  // par `(A,C)`.
+  .dkms.common.v1.NodeId peer = 2;
+  // Identificador monotónicamente creciente de la época que se está
+  // negociando. El initiator elige `current_send_epoch[peer] + 1`.
+  uint32 epoch_id             = 3;
+  // HMAC-SHA256(bootstrap_secrets[peer],
+  //   "REQ" || epoch_id_be || from || peer).
+  bytes  mac                  = 4;
+}
+
+message RequestEphemeralKeyResponse {
+  // `false` si el MAC falló (no se mutó estado en el receptor).
+  bool   ok               = 1;
+  // Descripción del fallo si `ok = false`.
+  string error            = 2;
+  // Pubkey ML-KEM-768 fresca del responder, generada para esta época.
+  // El initiator hará `encap(ephemeral_pubkey)` para producir el
+  // shared_secret de esta época. Sólo se rellena si `ok = true`.
+  bytes  ephemeral_pubkey = 3;
+  // HMAC-SHA256(bootstrap_secrets[from],
+  //   "RESP" || epoch_id_be || from || peer || ephemeral_pubkey).
+  // `from`/`peer` son los mismos del request (no se reflejan aquí
+  // porque la sesión gRPC los conoce). Sólo se rellena si `ok = true`.
+  bytes  mac              = 4;
+}
+
+message EstablishEphemeralSecretRequest {
+  // Initiator (mismo que `RequestEphemeralKeyRequest.from`).
+  .dkms.common.v1.NodeId from = 1;
+  // Responder (mismo que `RequestEphemeralKeyRequest.peer`).
+  .dkms.common.v1.NodeId peer = 2;
+  // Misma época que se negoció en el `RequestEphemeralKey` previo.
+  uint32 epoch_id             = 3;
+  // ML-KEM-768 ciphertext producido por
+  // `encap(ephemeral_pubkey)` del paso 1. El responder lo decapsula
+  // con la `esk` guardada en `ephemeral_sks[from][epoch_id]` y obtiene
+  // el shared_secret de la época.
+  bytes  ciphertext           = 4;
+  // HMAC-SHA256(bootstrap_secrets[peer],
+  //   "FIN" || epoch_id_be || from || peer || ciphertext).
+  bytes  mac                  = 5;
+}
+
+message EstablishEphemeralSecretResponse {
+  // `false` si MAC inválido o decap falló (no se mutó estado).
+  bool   ok    = 1;
+  // Descripción del fallo si `ok = false`.
+  string error = 2;
 }
 
 message DeliveredMessage {
