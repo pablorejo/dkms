@@ -44,16 +44,24 @@ fi
 
 echo "[k8s-apply] TAG=$TAG INGRESS_HOST=$INGRESS_HOST"
 
-# Render manifest: substitute image tag for a given repo AND __INGRESS_HOST__.
+# Render manifest: substitute image tag for ALL pablopio/* references in
+# the manifest (image: docker.io/pablopio/X:vY  AND
+# value: "pablopio/X:vY" env-var style), plus expand __INGRESS_HOST__.
+#
+# El argumento `image_repo` se conserva por compatibilidad pero ya no
+# se usa: tocamos cualquier `pablopio/<name>:<tag>` que aparezca, sea en
+# `image:` (con `docker.io/` opcional delante) o en un `value:` de un
+# env var. Antes era específico del repo invocado, y eso dejaba los
+# env vars del orchestator (DKMS_IMAGE / SDN_IMAGE / etc.) pegados al
+# tag hardcoded del yaml — `TAG=v5 make deploy` desplegaba el
+# orchestator:v5 pero con DKMS_IMAGE=pablopio/dkms:v2.
 render_manifest() {
     local file="$1"
-    local image_repo="${2:-}"   # empty for ingress-only manifests
-    local sed_args=("-E")
-    if [[ -n "$image_repo" ]]; then
-        sed_args+=("-e" "s|(image:[[:space:]]*)${image_repo}:[^[:space:]]+|\\1${image_repo}:${TAG}|g")
-    fi
-    sed_args+=("-e" "s|__INGRESS_HOST__|${INGRESS_HOST}|g")
-    sed "${sed_args[@]}" "$file"
+    local _legacy_image_repo="${2:-}"   # ignorado, ver comentario arriba
+    sed -E \
+        -e "s|(pablopio/[a-zA-Z0-9_.-]+):[^[:space:]\"]+|\\1:${TAG}|g" \
+        -e "s|__INGRESS_HOST__|${INGRESS_HOST}|g" \
+        "$file"
 }
 
 apply_authz() {
