@@ -1,0 +1,171 @@
+diff --git a/sdn/src/mcf.rs b/sdn/src/mcf.rs
+index c477cc5..d34f8a4 100644
+--- a/sdn/src/mcf.rs
++++ b/sdn/src/mcf.rs
+@@ -180,6 +180,71 @@ pub fn k_shortest_paths(
+     shortest
+ }
+ 
++/// Threshold por defecto para [`filter_overlapping_paths`].
++///
++/// Un path se descarta si comparte > 70 % de sus edges con un path ya
++/// aceptado (mismo commodity). 70 % es heurístico — para topos típicas
++/// de operador con grado medio bajo (2–4) es un buen balance entre
++/// "los paths sean realmente distintos" y "no perder K_efectivo
++/// agresivamente".
++pub const DEFAULT_OVERLAP_THRESHOLD: f64 = 0.70;
++
++/// Descarta paths cuya fracción de edges compartidos con un path ya
++/// aceptado del mismo commodity excede `threshold`.
++///
++/// **No es un requisito de corrección** del solver multipath — el
++/// water-filling congela edges saturados naturalmente, así que dos
++/// paths idénticos producirían rates que suman lo mismo que un único
++/// path. Es una **optimización**:
++///
++/// 1. Reduce el número de pseudo-flujos (menos variables en
++///    `weighted_maxmin`).
++/// 2. Mejora la calidad del sampling en el ORR (evita que el alias
++///    method distribuya entre paths casi idénticos, lo cual sería
++///    desperdicio estadístico).
++/// 3. Acelera el solve.
++///
++/// Algoritmo:
++/// - Itera paths en orden recibido (Yen's devuelve ascending hop
++///   count → el primero es el "shortest", los demás son spurs).
++/// - Cada nuevo `p` se compara contra cada `k` ya aceptado:
++///   `|edges(p) ∩ edges(k)| / |edges(p)| > threshold` → descartar.
++/// - Resultado: `K_efectivo ∈ {1, 2, …, K}`. Topos con grado mínimo
++///   bajo o cuellos estructurales suelen quedarse en 1–2.
++///
++/// Edge case: paths con 0 edges (longitud 1, src == dst) — descartados
++/// implícitamente al inicio, no llegan aquí. Un path con 1 edge nunca
++/// puede tener overlap > 70 % con otro path distinto que también tenga
++/// 1 edge (serían el mismo edge → idénticos → descartados antes).
++pub fn filter_overlapping_paths(paths: &[Path], threshold: f64) -> Vec<Path> {
++    let mut kept: Vec<Path> = Vec::with_capacity(paths.len());
++    let mut kept_edges: Vec<HashSet<EdgeKey>> = Vec::with_capacity(paths.len());
++
++    for p in paths {
++        let edges: HashSet<EdgeKey> = path_edges(p).into_iter().collect();
++        if edges.is_empty() {
++            // Path degenerado (src == dst); el solver lo ignoraría
++            // igualmente. No lo añadimos para no inflar K_efectivo.
++            continue;
++        }
++        let mut redundant = false;
++        for kref in &kept_edges {
++            // Fracción de edges de `p` que también están en `kref`.
++            let shared = edges.iter().filter(|e| kref.contains(*e)).count() as f64;
++            let frac = shared / edges.len() as f64;
++            if frac > threshold {
++                redundant = true;
++                break;
++            }
++        }
++        if !redundant {
++            kept.push(p.clone());
++            kept_edges.push(edges);
++        }
++    }
++    kept
++}
++
+ fn bfs_shortest(
+     graph: &HashMap<String, HashSet<String>>,
+     excluded_edges: &HashSet<EdgeKey>,
+@@ -602,6 +667,94 @@ mod tests {
+         assert!(k_shortest_paths(&g, "1", "4", 3).is_empty());
+     }
+ 
++    // ----------------------------------------------------------------
++    // filter_overlapping_paths
++    // ----------------------------------------------------------------
++
++    fn path(ids: &[&str]) -> Path {
++        ids.iter().map(|s| s.to_string()).collect()
++    }
++
++    #[test]
++    fn filter_keeps_disjoint_paths() {
++        // Paths totalmente edge-disjoint: ambos deben mantenerse.
++        let p1 = path(&["A", "B", "C"]);
++        let p2 = path(&["A", "D", "C"]);
++        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.70);
++        assert_eq!(kept.len(), 2);
++        assert_eq!(kept[0], p1);
++        assert_eq!(kept[1], p2);
++    }
++
++    #[test]
++    fn filter_drops_near_identical_path() {
++        // p1: A-B-C-D (3 edges). p2: A-B-C-E (3 edges, comparte 2 con p1).
++        // overlap = 2/3 ≈ 0.667 < 0.70 → mantener p2.
++        let p1 = path(&["A", "B", "C", "D"]);
++        let p2 = path(&["A", "B", "C", "E"]);
++        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.70);
++        assert_eq!(kept.len(), 2, "2/3 = 0.667 NO supera el umbral 0.70");
++
++        // p3 comparte 3/4 = 0.75 con p1 → descartado a 0.70.
++        let p1b = path(&["A", "B", "C", "D", "E"]);
++        let p3 = path(&["A", "B", "C", "D", "F"]);
++        let kept2 = filter_overlapping_paths(&[p1b.clone(), p3.clone()], 0.70);
++        assert_eq!(kept2.len(), 1, "3/4 = 0.75 supera el umbral 0.70");
++        assert_eq!(kept2[0], p1b);
++    }
++
++    #[test]
++    fn filter_threshold_configurable() {
++        // Mismo conjunto, distinto threshold → distinto resultado.
++        let p1 = path(&["A", "B", "C", "D"]);
++        let p2 = path(&["A", "B", "C", "E"]); // overlap = 2/3
++        // threshold 0.50 → 2/3 > 0.50 → descartar p2.
++        assert_eq!(
++            filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.50).len(),
++            1
++        );
++        // threshold 0.80 → 2/3 < 0.80 → mantener ambos.
++        assert_eq!(
++            filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.80).len(),
++            2
++        );
++    }
++
++    #[test]
++    fn filter_three_paths_one_redundant() {
++        // p1: A-B-C-D (edges AB, BC, CD)
++        // p2: A-E-F-D (totalmente disjoint con p1)
++        // p3: A-B-C-D (idéntico a p1) — debe ser descartado
++        let p1 = path(&["A", "B", "C", "D"]);
++        let p2 = path(&["A", "E", "F", "D"]);
++        let p3 = path(&["A", "B", "C", "D"]);
++        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone(), p3], 0.70);
++        assert_eq!(kept.len(), 2);
++        assert_eq!(kept[0], p1);
++        assert_eq!(kept[1], p2);
++    }
++
++    #[test]
++    fn filter_drops_zero_edge_path() {
++        // Path con 1 nodo (src == dst) → 0 edges, descartado siempre.
++        let p_degenerate = path(&["A"]);
++        let p_real = path(&["A", "B"]);
++        let kept = filter_overlapping_paths(&[p_degenerate, p_real.clone()], 0.70);
++        assert_eq!(kept.len(), 1);
++        assert_eq!(kept[0], p_real);
++    }
++
++    #[test]
++    fn filter_default_threshold_constant_is_0_70() {
++        assert_eq!(DEFAULT_OVERLAP_THRESHOLD, 0.70);
++    }
++
++    #[test]
++    fn filter_empty_input_returns_empty() {
++        let kept = filter_overlapping_paths(&[], 0.70);
++        assert!(kept.is_empty());
++    }
++
+     fn host(id: i64) -> HostEndpoint {
+         HostEndpoint {
+             id,

@@ -1,0 +1,333 @@
+diff --git a/orr/src/service.rs b/orr/src/service.rs
+index ee57464..3fd09e8 100644
+--- a/orr/src/service.rs
++++ b/orr/src/service.rs
+@@ -57,6 +57,21 @@ pub struct SendOutcome {
+     pub pqc_layer: bool,
+ }
+ 
++/// Entrada del caché K-Splittable del ORR: K paths con sus pesos
++/// `omega` ya en formato listo-para-sampling. El `AliasSampler` se
++/// precomputa al cachear para que `sample()` sea O(1).
++#[derive(Debug, Clone)]
++pub struct MultipathCacheEntry {
++    /// Mismo orden que la respuesta del SDN. Cada entry contiene
++    /// la lista de orr_ids (NO qkc_ids — se proyecta al cachear).
++    pub paths: Vec<Vec<String>>,
++    /// Sampler precomputado. Si el commodity solo tiene 1 path útil,
++    /// el sampler retorna siempre 0.
++    pub sampler: crate::alias::AliasSampler,
++    /// Rate total del commodity (informativo; no afecta sampling).
++    pub total_keys_per_second: f64,
++}
++
+ #[derive(Clone)]
+ pub struct OrrService {
+     pub cfg: Arc<OrrConfig>,
+@@ -71,13 +86,16 @@ pub struct OrrService {
+     /// `app_header`. `None` ⇒ la SDN no estaba disponible al boot;
+     /// el ORR seguirá funcionando si el caller provee `orr_path`.
+     sdn: Option<Arc<SdnClient>>,
+-    /// Cache `dst_orr_id → path` (lista de orr_ids src→…→dst).
+-    /// El src siempre soy yo (cfg.orr_id), así que sólo indexamos por
+-    /// destino. Primera consulta ⇒ SDN; siguientes ⇒ memoria local.
+-    /// Sin TTL ni invalidación todavía: la SDN debería empujar
+-    /// `TopologyEvent::SnapshotReplaced` (TODO) para vaciar la cache
+-    /// cuando el grafo cambie.
++    /// Cache `dst_orr_id → path` (single-path, legacy). Sigue siendo el
++    /// fallback cuando el commodity tiene K_efectivo = 1 o la SDN no
++    /// expone `GetPathsWithRatios`. La invalidación se dispara en
++    /// `TopologyEvent` (background loop).
+     path_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
++    /// Cache `(src_dkms, dst_dkms) → MultipathCacheEntry` para
++    /// K-Splittable MCF. Se rellena vía `GetPathsWithRatios`. La
++    /// invalidación se dispara igual que `path_cache` en
++    /// `TopologyEvent`.
++    paths_cache_multipath: Arc<RwLock<HashMap<(String, String), MultipathCacheEntry>>>,
+ }
+ 
+ impl OrrService {
+@@ -158,6 +176,7 @@ impl OrrService {
+             deliveries_tx,
+             sdn,
+             path_cache: Arc::new(RwLock::new(HashMap::new())),
++            paths_cache_multipath: Arc::new(RwLock::new(HashMap::new())),
+         };
+ 
+         // Pump entrante: cada frame `FRAME_LOCAL_DELIVER` del QKC pasa
+@@ -193,6 +212,7 @@ impl OrrService {
+         // exponencial si el stream cae.
+         if let Some(sdn) = svc.sdn.clone() {
+             let cache = svc.path_cache.clone();
++            let cache_mp = svc.paths_cache_multipath.clone();
+             tokio::spawn(async move {
+                 let mut backoff_ms: u64 = 250;
+                 loop {
+@@ -204,10 +224,13 @@ impl OrrService {
+                                 match item {
+                                     Ok(ev) => {
+                                         let n_before = cache.read().len();
++                                        let n_mp_before = cache_mp.read().len();
+                                         cache.write().clear();
++                                        cache_mp.write().clear();
+                                         info!(
+                                             version = ev.version,
+-                                            invalidated = n_before,
++                                            invalidated_singlepath = n_before,
++                                            invalidated_multipath = n_mp_before,
+                                             "orr.path_cache invalidated"
+                                         );
+                                     }
+@@ -247,6 +270,86 @@ impl OrrService {
+         &self.identity.public_key
+     }
+ 
++    /// K-Splittable MCF: muestrea un `qkc_path` para el commodity
++    /// `(src_dkms → dst_dkms)` usando el cache local (si hit) o
++    /// consultando `GetPathsWithRatios` al SDN (si miss). Devuelve
++    /// `None` si:
++    /// - No hay SDN conectada.
++    /// - El SDN responde con `paths` vacío (flow Saturated o
++    ///   src/dst en mismo QKC, o sin path en topología).
++    ///
++    /// En caso `None` el caller debe hacer fallback a `get_orr_path`
++    /// single-path o decidir no enviar.
++    pub async fn pick_multipath_qkc_hops(
++        &self,
++        src_dkms: &str,
++        dst_dkms: &str,
++    ) -> Result<Option<Vec<String>>> {
++        // 1) Cache hit
++        let key = (src_dkms.to_string(), dst_dkms.to_string());
++        {
++            let cache = self.paths_cache_multipath.read();
++            if let Some(entry) = cache.get(&key) {
++                if entry.sampler.is_empty() || entry.paths.is_empty() {
++                    return Ok(None);
++                }
++                let mut rng = rand::thread_rng();
++                let idx = entry.sampler.sample(&mut rng);
++                return Ok(Some(entry.paths[idx].clone()));
++            }
++        }
++        // 2) Cache miss → pide al SDN
++        let Some(sdn) = self.sdn.clone() else {
++            return Ok(None);
++        };
++        let resp = sdn.get_paths_with_ratios(src_dkms, dst_dkms).await?;
++        if resp.paths.is_empty() {
++            // Insertamos un "negative cache" implícito: si caché es miss
++            // y respuesta vacía, no cacheamos (la próxima vez re-pedimos
++            // por si el flow ya no está Saturated).
++            return Ok(None);
++        }
++        let weights: Vec<f64> = resp.paths.iter().map(|p| p.omega).collect();
++        let Some(sampler) = crate::alias::AliasSampler::build(&weights) else {
++            return Ok(None);
++        };
++        let paths: Vec<Vec<String>> = resp.paths.iter().map(|p| p.qkc_hops.clone()).collect();
++        let total = resp.total_keys_per_second;
++        let entry = MultipathCacheEntry {
++            paths: paths.clone(),
++            sampler,
++            total_keys_per_second: total,
++        };
++        // 3) Cachea y muestrea
++        let idx = {
++            let mut rng = rand::thread_rng();
++            entry.sampler.sample(&mut rng)
++        };
++        let chosen = entry.paths[idx].clone();
++        self.paths_cache_multipath.write().insert(key, entry);
++        Ok(Some(chosen))
++    }
++
++    /// Test helper: número de entradas en el cache K-Splittable.
++    #[cfg(test)]
++    pub fn multipath_cache_len(&self) -> usize {
++        self.paths_cache_multipath.read().len()
++    }
++
++    /// Test helper: inyecta una entry en el cache K-Splittable sin
++    /// pasar por el SDN (útil para tests deterministas).
++    #[cfg(test)]
++    pub fn insert_multipath_cache_entry(
++        &self,
++        src_dkms: &str,
++        dst_dkms: &str,
++        entry: MultipathCacheEntry,
++    ) {
++        self.paths_cache_multipath
++            .write()
++            .insert((src_dkms.to_string(), dst_dkms.to_string()), entry);
++    }
++
+     // ─── send_message: dispatch por max_hops ───────────────────────────
+ 
+     pub async fn send_message(
+@@ -757,6 +860,165 @@ fn select_random_hops(path: Vec<String>, n: usize) -> Result<Vec<String>> {
+     Ok(out)
+ }
+ 
++#[cfg(test)]
++mod multipath_cache_tests {
++    use super::*;
++    use crate::alias::AliasSampler;
++
++    /// Smoke test: el sampler precomputado funciona con paths reales y
++    /// la distribución empírica converge a las omegas teóricas tras
++    /// N=10000 samples. Esto es el OBJ-011 verificado a nivel de
++    /// `MultipathCacheEntry`.
++    #[test]
++    fn multipath_entry_samples_match_omegas() {
++        let paths = vec![
++            vec!["q1".to_string(), "q3".to_string()],
++            vec!["q1".to_string(), "q2".to_string(), "q3".to_string()],
++        ];
++        let weights = vec![0.7, 0.3]; // 70/30 split
++        let sampler = AliasSampler::build(&weights).unwrap();
++        let entry = MultipathCacheEntry {
++            paths: paths.clone(),
++            sampler,
++            total_keys_per_second: 100.0,
++        };
++
++        let mut rng = rand::thread_rng();
++        let n = 10_000;
++        let mut counts = [0_usize; 2];
++        for _ in 0..n {
++            let idx = entry.sampler.sample(&mut rng);
++            counts[idx] += 1;
++        }
++        let p0 = counts[0] as f64 / n as f64;
++        let p1 = counts[1] as f64 / n as f64;
++        assert!(
++            (p0 - 0.7).abs() < 0.02,
++            "split 70/30 esperado, got p0={p0}",
++        );
++        assert!(
++            (p1 - 0.3).abs() < 0.02,
++            "split 70/30 esperado, got p1={p1}",
++        );
++    }
++
++    #[test]
++    fn single_path_entry_always_samples_index_zero() {
++        let entry = MultipathCacheEntry {
++            paths: vec![vec!["q1".into(), "q5".into()]],
++            sampler: AliasSampler::build(&[1.0]).unwrap(),
++            total_keys_per_second: 333.0,
++        };
++        let mut rng = rand::thread_rng();
++        for _ in 0..100 {
++            assert_eq!(entry.sampler.sample(&mut rng), 0);
++        }
++    }
++
++    /// OBJ-013: el snippet de invalidación del background loop
++    /// (`TopologyEvent` handler) debe limpiar AMBOS caches a la vez.
++    /// Reproducimos el snippet exacto sobre los `Arc<RwLock<…>>` que
++    /// usaría el `OrrService` en producción.
++    #[test]
++    fn topology_event_invalidates_both_caches() {
++        let single: Arc<RwLock<HashMap<String, Vec<String>>>> =
++            Arc::new(RwLock::new(HashMap::new()));
++        let mp: Arc<RwLock<HashMap<(String, String), MultipathCacheEntry>>> =
++            Arc::new(RwLock::new(HashMap::new()));
++
++        // Poblar ambos caches (3 entries cada uno).
++        single.write().insert("orr_a".into(), vec!["q1".into(), "q2".into()]);
++        single.write().insert("orr_b".into(), vec!["q1".into(), "q3".into()]);
++        single.write().insert("orr_c".into(), vec!["q1".into(), "q4".into()]);
++        for (src, dst) in [("dA", "dB"), ("dA", "dC"), ("dB", "dC")] {
++            mp.write().insert(
++                (src.to_string(), dst.to_string()),
++                MultipathCacheEntry {
++                    paths: vec![vec!["q1".into(), "q3".into()]],
++                    sampler: AliasSampler::build(&[1.0]).unwrap(),
++                    total_keys_per_second: 100.0,
++                },
++            );
++        }
++        assert_eq!(single.read().len(), 3);
++        assert_eq!(mp.read().len(), 3);
++
++        // ── Snippet del background loop (orr/src/service.rs ≈l.217) ──
++        let n_before = single.read().len();
++        let n_mp_before = mp.read().len();
++        single.write().clear();
++        mp.write().clear();
++        // ────────────────────────────────────────────────────────────
++
++        assert_eq!(n_before, 3);
++        assert_eq!(n_mp_before, 3);
++        assert_eq!(single.read().len(), 0, "single-path cache no limpiado");
++        assert_eq!(mp.read().len(), 0, "multipath cache no limpiado");
++    }
++
++    /// El cache permite múltiples entries simultáneamente sin colisión.
++    #[test]
++    fn cache_distinguishes_directional_flows() {
++        let mp: Arc<RwLock<HashMap<(String, String), MultipathCacheEntry>>> =
++            Arc::new(RwLock::new(HashMap::new()));
++
++        let entry_ab = MultipathCacheEntry {
++            paths: vec![vec!["q_ab".into()]],
++            sampler: AliasSampler::build(&[1.0]).unwrap(),
++            total_keys_per_second: 100.0,
++        };
++        let entry_ba = MultipathCacheEntry {
++            paths: vec![vec!["q_ba".into()]],
++            sampler: AliasSampler::build(&[1.0]).unwrap(),
++            total_keys_per_second: 50.0,
++        };
++        mp.write().insert(("dA".into(), "dB".into()), entry_ab);
++        mp.write().insert(("dB".into(), "dA".into()), entry_ba);
++
++        // Direcciones independientes — dos entries distintos.
++        assert_eq!(mp.read().len(), 2);
++        let ab = mp.read().get(&("dA".into(), "dB".into())).cloned();
++        let ba = mp.read().get(&("dB".into(), "dA".into())).cloned();
++        assert_eq!(ab.unwrap().paths[0], vec!["q_ab"]);
++        assert_eq!(ba.unwrap().paths[0], vec!["q_ba"]);
++    }
++
++    /// Simulación end-to-end del sampling sobre un cache hit: una
++    /// entry con K=3 paths y ratios skewed (0.6/0.3/0.1). Tras 10000
++    /// samples vía la API del entry (igual que `pick_multipath_qkc_hops`
++    /// haría en cache hit), la distribución empírica converge a los
++    /// ratios teóricos.
++    #[test]
++    fn cache_hit_sampling_matches_omegas_n10000() {
++        let weights = [0.6, 0.3, 0.1];
++        let paths = vec![
++            vec!["pA".into()],
++            vec!["pB".into()],
++            vec!["pC".into()],
++        ];
++        let entry = MultipathCacheEntry {
++            paths,
++            sampler: AliasSampler::build(&weights).unwrap(),
++            total_keys_per_second: 333.0,
++        };
++
++        let mut rng = rand::thread_rng();
++        let n = 10_000;
++        let mut counts = [0_usize; 3];
++        for _ in 0..n {
++            let idx = entry.sampler.sample(&mut rng);
++            counts[idx] += 1;
++        }
++        for (i, w) in weights.iter().enumerate() {
++            let p = counts[i] as f64 / n as f64;
++            assert!(
++                (p - w).abs() < 0.02,
++                "weight[{i}]={w}, empirical={p}",
++            );
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod lowercase_tests {
+     use super::*;

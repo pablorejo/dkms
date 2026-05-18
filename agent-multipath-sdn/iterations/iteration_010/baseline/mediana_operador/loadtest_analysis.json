@@ -1,0 +1,44 @@
+{
+  "totals": {
+    "requests": 2359.0,
+    "by_status": {
+      "200": 2359.0
+    }
+  },
+  "status_classes": {
+    "ok": 2359.0
+  },
+  "percentages": {
+    "ok": 100.0
+  },
+  "latency": {
+    "count": 2359.0,
+    "sum_seconds": 41.06629228591919,
+    "mean_seconds": 0.017408347726120894,
+    "percentiles_seconds": {
+      "p50": 0.028163801337153772,
+      "p90": 0.05579681274900397,
+      "p95": 0.07929282868525891,
+      "p99": 0.09808964143426292
+    }
+  },
+  "params": {
+    "start_saes": 5,
+    "end_saes": 50,
+    "step_saes": 5,
+    "interval_seconds": 15.0,
+    "warmup_seconds": 30.0,
+    "per_sae_lambda": 0.5,
+    "key_size_bits": 256,
+    "request_timeout_seconds": 60
+  },
+  "plots": [
+    "tests/results/20260518T160920Z-random-n20-d3.0-srnd/plots/requests_by_status.png",
+    "tests/results/20260518T160920Z-random-n20-d3.0-srnd/plots/latency_percentiles.png",
+    "tests/results/20260518T160920Z-random-n20-d3.0-srnd/plots/sae_status_over_time.png",
+    "tests/results/20260518T160920Z-random-n20-d3.0-srnd/plots/sae_latency_p95_over_time.png"
+  ],
+  "csvs": [
+    "tests/results/20260518T160920Z-random-n20-d3.0-srnd/data/loadtest_metrics.csv"
+  ]
+}
