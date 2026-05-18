@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dkms-topo"
+version = "0.1.0"
+description = "CLI to orchestrate DKMS simulations on EKS dkms1 and compare observed saturation against the max-min theoretical model"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "requests>=2.31",
+    "pydantic>=2.6",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+dkms-topo = "tests.cli.dkms_topo:app"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["."]
+python_files = "test_*.py"
+markers = [
+    "integration: tests that require EKS port-forwards (authz:18081, orchestator:18080) and the dkms1 cluster context; skipped by default",
+]
+addopts = "-ra"
+
+[tool.setuptools]
+packages = []
