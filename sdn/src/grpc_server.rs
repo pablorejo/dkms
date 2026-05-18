@@ -4,8 +4,9 @@ use common::proto::{
         sdn_control_server::{SdnControl, SdnControlServer},
         AdmissionRequest, AdmissionResponse, CapacityReport, ComputePathRequest,
         ComputePathResponse, DkmsMetric, GetOrrPathRequest, GetOrrPathResponse,
-        GetSaeBindingRequest, GetSaeBindingResponse, LinkUpdate, PathPolicy, StreamTopologyRequest,
-        Topology as ProtoTopology, TopologyEvent,
+        GetPathsWithRatiosRequest, GetPathsWithRatiosResponse, GetSaeBindingRequest,
+        GetSaeBindingResponse, LinkUpdate, PathPolicy, PathWithRatio,
+        StreamTopologyRequest, Topology as ProtoTopology, TopologyEvent,
     },
 };
 use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -193,6 +194,91 @@ impl SdnControl for SdnGrpc {
             .collect();
         Ok(Response::new(GetOrrPathResponse { orrs }))
     }
+
+    #[instrument(
+        skip_all,
+        fields(src = %req.get_ref().src_dkms, dst = %req.get_ref().dst_dkms)
+    )]
+    async fn get_paths_with_ratios(
+        &self,
+        req: Request<GetPathsWithRatiosRequest>,
+    ) -> std::result::Result<Response<GetPathsWithRatiosResponse>, Status> {
+        let m = req.into_inner();
+        if m.src_dkms.is_empty() || m.dst_dkms.is_empty() {
+            return Err(Status::invalid_argument("src_dkms and dst_dkms required"));
+        }
+        if m.src_dkms == m.dst_dkms {
+            return Ok(Response::new(GetPathsWithRatiosResponse {
+                paths: vec![],
+                total_keys_per_second: 0.0,
+            }));
+        }
+
+        let topo = self.svc.topology.load();
+        // Construir el commodity para acceder a sus paths Yen's
+        // filtrados — el orden de `Commodity.paths` es el que indexa
+        // `McfSnapshot.rates_per_path`.
+        let src_qkc = topo
+            .qkc_of_dkms(&m.src_dkms)
+            .ok_or_else(|| {
+                Status::not_found(format!("dkms {} no anclado a un QKC", m.src_dkms))
+            })?
+            .to_string();
+        let dst_qkc = topo
+            .qkc_of_dkms(&m.dst_dkms)
+            .ok_or_else(|| {
+                Status::not_found(format!("dkms {} no anclado a un QKC", m.dst_dkms))
+            })?
+            .to_string();
+        if src_qkc == dst_qkc {
+            // Mismo QKC físico — no hay path inter-QKC, el caller debe
+            // resolver localmente sin enviar por la red.
+            return Ok(Response::new(GetPathsWithRatiosResponse {
+                paths: vec![],
+                total_keys_per_second: 0.0,
+            }));
+        }
+
+        let raw = crate::mcf::k_shortest_paths(
+            &topo.graph,
+            &src_qkc,
+            &dst_qkc,
+            self.svc.solver.k_paths,
+        );
+        if raw.is_empty() {
+            return Err(Status::not_found(format!(
+                "no QKC path {src_qkc} → {dst_qkc}"
+            )));
+        }
+        let filtered = crate::mcf::filter_overlapping_paths(
+            &raw,
+            crate::mcf::DEFAULT_OVERLAP_THRESHOLD,
+        );
+
+        let snap = self.svc.mcf_snapshot.load_full();
+        let fid = crate::mcf::flow_id(&m.src_dkms, &m.dst_dkms);
+        let total = snap.rates.get(&fid).copied().unwrap_or(0.0);
+        let rpp = snap.rates_per_path.get(&fid).cloned().unwrap_or_default();
+
+        let mut paths_out: Vec<PathWithRatio> = Vec::new();
+        for (p_idx, p) in filtered.iter().enumerate() {
+            let r_p = rpp.get(p_idx).copied().unwrap_or(0.0);
+            if r_p <= 0.0 {
+                continue;
+            }
+            let omega = if total > 0.0 { r_p / total } else { 0.0 };
+            paths_out.push(PathWithRatio {
+                qkc_hops: p.clone(),
+                omega,
+                keys_per_second: r_p,
+            });
+        }
+
+        Ok(Response::new(GetPathsWithRatiosResponse {
+            paths: paths_out,
+            total_keys_per_second: total,
+        }))
+    }
 }
 
 pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
@@ -203,4 +289,73 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .serve(addr)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::tests::make_service_for_test;
+
+    #[tokio::test]
+    async fn get_paths_with_ratios_returns_paths_after_recompute() {
+        let svc = make_service_for_test();
+        svc.recompute_mcf();
+        let grpc = SdnGrpc { svc };
+
+        let req = Request::new(GetPathsWithRatiosRequest {
+            src_dkms: "dA".into(),
+            dst_dkms: "dB".into(),
+        });
+        let resp = grpc.get_paths_with_ratios(req).await.unwrap().into_inner();
+        // Hay rate (la pequeña topo de tests tiene capacidad > 0).
+        assert!(resp.total_keys_per_second > 0.0);
+        // Y al menos un path en el output.
+        assert!(!resp.paths.is_empty(), "se espera al menos un path");
+        // Σ omega ≈ 1.0 ± EPSILON.
+        let omega_sum: f64 = resp.paths.iter().map(|p| p.omega).sum();
+        assert!(
+            (omega_sum - 1.0).abs() < 1e-6,
+            "Σ omega debe ser 1.0; got {omega_sum}",
+        );
+        // Σ keys_per_second ≈ total_keys_per_second.
+        let kps_sum: f64 = resp.paths.iter().map(|p| p.keys_per_second).sum();
+        assert!((kps_sum - resp.total_keys_per_second).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn get_paths_with_ratios_empty_on_same_src_dst() {
+        let svc = make_service_for_test();
+        let grpc = SdnGrpc { svc };
+        let req = Request::new(GetPathsWithRatiosRequest {
+            src_dkms: "dA".into(),
+            dst_dkms: "dA".into(),
+        });
+        let resp = grpc.get_paths_with_ratios(req).await.unwrap().into_inner();
+        assert!(resp.paths.is_empty());
+        assert_eq!(resp.total_keys_per_second, 0.0);
+    }
+
+    #[tokio::test]
+    async fn get_paths_with_ratios_rejects_empty_args() {
+        let svc = make_service_for_test();
+        let grpc = SdnGrpc { svc };
+        let req = Request::new(GetPathsWithRatiosRequest {
+            src_dkms: "".into(),
+            dst_dkms: "dB".into(),
+        });
+        let err = grpc.get_paths_with_ratios(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_paths_with_ratios_404_on_unknown_dkms() {
+        let svc = make_service_for_test();
+        let grpc = SdnGrpc { svc };
+        let req = Request::new(GetPathsWithRatiosRequest {
+            src_dkms: "dXX".into(),
+            dst_dkms: "dB".into(),
+        });
+        let err = grpc.get_paths_with_ratios(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
 }

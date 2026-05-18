@@ -241,12 +241,90 @@ def build_random(
     return {"nodes": nodes, "links": links}
 
 
+def build_bridge(
+    cluster_n: int, cluster_count: int = 2, intra_degree: float | None = None
+) -> dict[str, Any]:
+    """``cluster_count`` clusters (rings by default) joined by single bridge edges.
+
+    Designed as the "obvious bottleneck" topology for multi-path testing.
+    Single-path routing forces inter-cluster traffic through one edge per
+    pair of clusters; multi-path can balance the intra-cluster flows but
+    cannot break the bridge min-cut — so the bridge becomes the
+    benchmark for measuring how well the splitting algorithm spreads
+    the load that *can* be diverted.
+
+    Layout: clusters are arranged horizontally. Cluster i is a ring of
+    ``cluster_n`` nodes; one node in cluster i is connected to one node
+    in cluster i+1 by a single "bridge" edge.
+
+    Requires ``cluster_n >= 3`` (ring requires ≥3) and
+    ``cluster_count >= 2``. ``intra_degree`` is reserved for future
+    densification within each cluster; ``None`` keeps each cluster as a
+    plain ring (degree 2).
+    """
+    if cluster_n < 3:
+        raise ValueError(f"bridge requires cluster_n >= 3, got {cluster_n}")
+    if cluster_count < 2:
+        raise ValueError(
+            f"bridge requires cluster_count >= 2, got {cluster_count}"
+        )
+    if intra_degree is not None and intra_degree < 2.0:
+        raise ValueError(
+            f"bridge intra_degree must be >= 2.0 if set, got {intra_degree}"
+        )
+
+    nodes: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    cluster_radius = 100.0
+    cluster_spacing = 2.4 * cluster_radius  # gap between cluster centres
+    base_y = 220.0
+    nid = 1
+    cluster_endpoints: list[tuple[str, str]] = []  # (left_uid, right_uid) per cluster
+
+    for ci in range(cluster_count):
+        cx = 150.0 + ci * cluster_spacing
+        cy = base_y
+        cluster_uids: list[str] = []
+        for k in range(cluster_n):
+            angle = (2.0 * math.pi * k) / cluster_n
+            x = cx + cluster_radius * math.cos(angle)
+            y = cy + cluster_radius * math.sin(angle)
+            nd = _node(nid, x, y)
+            nodes.append(nd)
+            cluster_uids.append(nd["uid"])
+            nid += 1
+        # Intra-cluster: ring.
+        for i in range(cluster_n):
+            links.append(_link(cluster_uids[i], cluster_uids[(i + 1) % cluster_n]))
+        # Endpoints used for bridges: leftmost (smallest angle ≈ rightmost node
+        # of previous cluster) and rightmost. Use index 0 as the "left port"
+        # and cluster_n // 2 as the "right port" so the bridge crosses the
+        # cluster diameter — visually clearer than picking adjacent nodes.
+        left_port = cluster_uids[0]
+        right_port = cluster_uids[cluster_n // 2]
+        cluster_endpoints.append((left_port, right_port))
+
+    # Bridge: connect cluster i's right_port to cluster i+1's left_port.
+    for ci in range(cluster_count - 1):
+        a = cluster_endpoints[ci][1]
+        b = cluster_endpoints[ci + 1][0]
+        links.append(_link(a, b))
+
+    if not _ensure_connected(nodes, links):
+        raise RuntimeError(
+            "bridge builder failed to produce a connected graph"
+        )
+    return {"nodes": nodes, "links": links}
+
+
 __all__ = [
     "build_ring",
     "build_line",
     "build_mesh",
     "build_star",
     "build_random",
+    "build_bridge",
     "DEFAULT_R0",
     "DEFAULT_ALPHA",
     "DEFAULT_DISTANCE_KM",

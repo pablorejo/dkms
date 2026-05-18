@@ -72,6 +72,7 @@ from tests.cli.topology_builders import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISTANCE_KM,
     DEFAULT_R0,
+    build_bridge,
     build_line,
     build_mesh,
     build_random,
@@ -168,6 +169,27 @@ def _add_global_flags(p: argparse.ArgumentParser) -> None:
         type=float,
         default=DEFAULT_SAT_THRESHOLD,
         help=f"saturation threshold as fraction of buffer (default {DEFAULT_SAT_THRESHOLD})",
+    )
+    p.add_argument(
+        "--no-plots",
+        dest="write_plots",
+        action="store_false",
+        default=True,
+        help=(
+            "skip writing PNG plots under <output_dir>/plots/. CSVs in "
+            "<output_dir>/data/ are still written (use --no-csv-export "
+            "to skip those too). Default: plots enabled."
+        ),
+    )
+    p.add_argument(
+        "--no-csv-export",
+        dest="write_csv",
+        action="store_false",
+        default=True,
+        help=(
+            "skip writing CSV exports under <output_dir>/data/. PNGs in "
+            "<output_dir>/plots/ are still written. Default: CSVs enabled."
+        ),
     )
     p.add_argument(
         "--effective-alpha",
@@ -339,6 +361,8 @@ def _auto_name(subcmd: str, args: argparse.Namespace) -> str:
     if subcmd == "random":
         seed = args.seed if args.seed is not None else "rnd"
         return f"random-n{args.n}-d{args.d}-s{seed}"
+    if subcmd == "bridge":
+        return f"bridge-c{args.cluster_count}-n{args.cluster_n}"
     return subcmd
 
 
@@ -353,6 +377,10 @@ def _build_topology(subcmd: str, args: argparse.Namespace) -> dict[str, Any]:
         return build_star(per_branch_n=args.p, branches=args.b)
     if subcmd == "random":
         return build_random(n=args.n, avg_degree=args.d, seed=args.seed)
+    if subcmd == "bridge":
+        return build_bridge(
+            cluster_n=args.cluster_n, cluster_count=args.cluster_count
+        )
     raise ValueError(f"unknown subcommand {subcmd!r}")
 
 
@@ -413,6 +441,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="random seed for reproducibility (default: nondeterministic)",
     )
     _add_global_flags(p_rand)
+
+    # ``bridge`` — multi-cluster topology with single-edge bridges between
+    # clusters. The "obvious bottleneck" case for multi-path testing.
+    p_bridge = sub.add_parser(
+        "bridge",
+        help=(
+            "clusters (rings) joined by single bridge edges — obvious cuello "
+            "topológico para tests de robustez de multi-path"
+        ),
+    )
+    p_bridge.add_argument(
+        "--cluster-n",
+        type=int,
+        required=True,
+        help="nodes per cluster (>=3, each cluster is a ring)",
+    )
+    p_bridge.add_argument(
+        "--cluster-count",
+        type=int,
+        default=2,
+        help="number of clusters (default 2, must be >=2)",
+    )
+    _add_global_flags(p_bridge)
+
+    # ``replot`` regenerates plots from the CSVs in an existing run dir
+    # — useful when iterating on plot styling without re-running EKS.
+    p_replot = sub.add_parser(
+        "replot",
+        help="re-render plots from CSVs of a previous run (no EKS needed)",
+    )
+    p_replot.add_argument(
+        "output_dir",
+        help="path to <run> directory containing data/ subdir from a previous run",
+    )
+    p_replot.add_argument(
+        "--buffer-enc-size",
+        type=int,
+        default=DEFAULT_BUFFER_SIZE,
+        help=f"per-peer ENC buffer capacity used to compute fill ratios (default {DEFAULT_BUFFER_SIZE})",
+    )
+    p_replot.add_argument(
+        "--sat-threshold",
+        type=float,
+        default=DEFAULT_SAT_THRESHOLD,
+        help=f"saturation threshold as fraction of buffer (default {DEFAULT_SAT_THRESHOLD})",
+    )
 
     return parser
 
@@ -828,12 +902,22 @@ def _stage_saturate(
         theory_rates=theory,
         sat_threshold=args.sat_threshold,
         src_resolver=_resolver,
+        write_csv=getattr(args, "write_csv", True),
+        write_plots=getattr(args, "write_plots", True),
     )
     s = result["summary"]
     sys.stderr.write(
         f"[dkms-topo] sat={s['saturated_count']}/{s['total_count']} "
         f"median_ratio={s.get('median_ratio')!r}\n"
     )
+    if result.get("csvs"):
+        sys.stderr.write(
+            f"[dkms-topo] wrote {len(result['csvs'])} CSVs to {output_dir}/data/\n"
+        )
+    if result.get("plots"):
+        sys.stderr.write(
+            f"[dkms-topo] wrote {len(result['plots'])} plots to {output_dir}/plots/\n"
+        )
     return rc
 
 
@@ -889,7 +973,15 @@ def _stage_sae_test(
         return 4
     text = Path(metrics_path).read_text(encoding="utf-8")
     metrics = parse_metrics(text)
-    summary = analyze_loadtest(metrics, params, output_dir=output_dir)
+    requests_csv = out.get("requests_csv")
+    summary = analyze_loadtest(
+        metrics,
+        params,
+        output_dir=output_dir,
+        write_csv=getattr(args, "write_csv", True),
+        write_plots=getattr(args, "write_plots", True),
+        requests_csv=requests_csv,
+    )
     total = summary["totals"]["requests"]
     pct = summary["percentages"]
     sys.stderr.write(
@@ -897,6 +989,18 @@ def _stage_sae_test(
         f"ok={pct.get('ok', 0):.1f}% throttled={pct.get('throttled', 0):.1f}% "
         f"errors={pct.get('client_error', 0) + pct.get('server_error', 0):.1f}%\n"
     )
+    if requests_csv is not None:
+        sys.stderr.write(
+            f"[dkms-topo] extracted requests.csv from loadtest pod → {requests_csv}\n"
+        )
+    if summary.get("csvs"):
+        sys.stderr.write(
+            f"[dkms-topo] wrote {len(summary['csvs'])} loadtest CSVs\n"
+        )
+    if summary.get("plots"):
+        sys.stderr.write(
+            f"[dkms-topo] wrote {len(summary['plots'])} loadtest plots\n"
+        )
     return 0
 
 
@@ -964,6 +1068,156 @@ def _run_eks_session(
     return rc
 
 
+def _run_replot(args: argparse.Namespace) -> int:
+    """Re-render saturation plots from the CSVs of a previous run.
+
+    Reads ``<output_dir>/data/{generator_state,per_commodity,theory_rates}.csv``,
+    reconstructs the in-memory structures, and calls the plot helpers.
+    """
+    import csv as _csv
+    from datetime import datetime as _datetime
+
+    from tests.cli.analyze import (
+        _plot_emit_rate,
+        _plot_enc_over_time,
+        _plot_rate_vs_theory,
+        _plot_saturation_ratios,
+    )
+
+    out_dir = Path(args.output_dir)
+    data_dir = out_dir / "data"
+    if not data_dir.exists():
+        sys.stderr.write(f"error: no data/ subdir found in {out_dir}\n")
+        return 1
+
+    gen_csv = data_dir / "generator_state.csv"
+    pc_csv = data_dir / "per_commodity.csv"
+    th_csv = data_dir / "theory_rates.csv"
+    if not gen_csv.exists():
+        sys.stderr.write(f"error: {gen_csv} missing\n")
+        return 1
+
+    # generator_state.csv -> events_by_src_peer + global t0
+    events_by_src_peer: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    t0: _datetime | None = None
+    with open(gen_csv, "r", encoding="utf-8") as fh:
+        for row in _csv.DictReader(fh):
+            t_iso = row.get("t_log_iso") or ""
+            try:
+                t_log = _datetime.fromisoformat(t_iso) if t_iso else None
+            except ValueError:
+                t_log = None
+            src = row.get("src") or ""
+            peer = row.get("peer") or ""
+            if not src or not peer:
+                continue
+
+            def _coerce_int(v: str | None) -> int | None:
+                if v is None or v == "":
+                    return None
+                try:
+                    return int(v)
+                except ValueError:
+                    return None
+
+            def _coerce_float(v: str | None) -> float | None:
+                if v is None or v == "":
+                    return None
+                try:
+                    return float(v)
+                except ValueError:
+                    return None
+
+            ev = {
+                "t_log": t_log,
+                "enc": _coerce_int(row.get("enc")),
+                "dec": _coerce_int(row.get("dec")),
+                "ack_pending": _coerce_int(row.get("ack_pending")),
+                "emit_total": _coerce_int(row.get("emit_total")),
+                "observed_keys_per_s": _coerce_float(row.get("observed_keys_per_s")),
+                "sdn_rate_keys_per_s": _coerce_float(row.get("sdn_rate_keys_per_s")),
+            }
+            events_by_src_peer.setdefault(src, {}).setdefault(peer, []).append(ev)
+            if t_log is not None and (t0 is None or t_log < t0):
+                t0 = t_log
+
+    # per_commodity.csv -> list of dicts (numeric fields coerced)
+    per_commodity: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {}
+    if pc_csv.exists():
+        with open(pc_csv, "r", encoding="utf-8") as fh:
+            for row in _csv.DictReader(fh):
+                parsed: dict[str, Any] = {}
+                for k, v in row.items():
+                    if v == "" or v is None:
+                        parsed[k] = None
+                    elif k in ("saturated",):
+                        parsed[k] = v.lower() in ("true", "1", "yes")
+                    else:
+                        try:
+                            parsed[k] = int(v)
+                        except ValueError:
+                            try:
+                                parsed[k] = float(v)
+                            except ValueError:
+                                parsed[k] = v
+                per_commodity.append(parsed)
+        ratios = [r["ratio"] for r in per_commodity if isinstance(r.get("ratio"), float)]
+        sats = [r for r in per_commodity if r.get("saturated")]
+        summary = {
+            "saturated_count": len(sats),
+            "total_count": len(per_commodity),
+            "ratio_count": len(ratios),
+        }
+        if ratios:
+            ratios_sorted = sorted(ratios)
+            mid = len(ratios_sorted) // 2
+            median = (
+                ratios_sorted[mid]
+                if len(ratios_sorted) % 2 == 1
+                else 0.5 * (ratios_sorted[mid - 1] + ratios_sorted[mid])
+            )
+            summary["median_ratio"] = median
+
+    # theory_rates.csv -> dict[commodity_id, rate]
+    theory_rates: dict[str, float] = {}
+    if th_csv.exists():
+        with open(th_csv, "r", encoding="utf-8") as fh:
+            for row in _csv.DictReader(fh):
+                cid = row.get("commodity_id") or ""
+                try:
+                    rate = float(row.get("theory_rate_kps") or 0.0)
+                except ValueError:
+                    continue
+                if cid:
+                    theory_rates[cid] = rate
+
+    plot_dir = out_dir / "plots"
+    written: list[str] = []
+    enc_plot = plot_dir / "sat_enc_over_time.png"
+    if _plot_enc_over_time(
+        events_by_src_peer, args.buffer_enc_size, args.sat_threshold, t0, enc_plot
+    ):
+        written.append(str(enc_plot))
+    ratio_plot = plot_dir / "sat_ratios.png"
+    if _plot_saturation_ratios(per_commodity, summary, ratio_plot):
+        written.append(str(ratio_plot))
+    rate_plot = plot_dir / "sat_emit_rate.png"
+    if _plot_emit_rate(events_by_src_peer, t0, rate_plot):
+        written.append(str(rate_plot))
+    rate_vs_theory_plot = plot_dir / "sat_rate_vs_theory.png"
+    if _plot_rate_vs_theory(per_commodity, theory_rates, rate_vs_theory_plot):
+        written.append(str(rate_vs_theory_plot))
+
+    sys.stderr.write(f"[dkms-topo] replot wrote {len(written)} plots under {plot_dir}\n")
+    for p in written:
+        sys.stderr.write(f"  - {p}\n")
+    if not written:
+        sys.stderr.write("warning: no plots produced (matplotlib missing or empty data)\n")
+        return 1
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     """Entry point usable as a function (returns an exit code).
 
@@ -974,6 +1228,9 @@ def run(argv: list[str] | None = None) -> int:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.topology == "replot":
+        return _run_replot(args)
 
     try:
         topo = _build_topology(args.topology, args)

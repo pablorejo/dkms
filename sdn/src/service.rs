@@ -471,9 +471,15 @@ fn recompute_mcf_inner(
 // ----------------------------------------------------------------- tests
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc};
+
+    /// Exposes the small-topo SdnService factory for use in other
+    /// modules' integration tests (e.g. `grpc_server::tests`).
+    pub fn make_service_for_test() -> SdnService {
+        make_service()
+    }
 
     fn host(id: i64) -> HostEndpoint {
         HostEndpoint {

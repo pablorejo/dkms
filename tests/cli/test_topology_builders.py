@@ -17,6 +17,7 @@ from tests.cli.topology_builders import (
     DEFAULT_DISTANCE_KM,
     DEFAULT_LINK_TYPE,
     DEFAULT_R0,
+    build_bridge,
     build_line,
     build_mesh,
     build_random,
@@ -293,3 +294,63 @@ def test_link_uid_is_canonical_ordering() -> None:
         a, b = ln["source_uid"], ln["target_uid"]
         assert a <= b, f"link uids not in canonical order: {a} > {b}"
         assert ln["uid"] == f"edge-{a}-{b}"
+
+
+# -----------------------------------------------------------------------------
+# Bridge (obvious bottleneck topology — multi-cluster joined by single edges)
+# -----------------------------------------------------------------------------
+
+
+def test_bridge_2_clusters_of_4_counts() -> None:
+    topo = build_bridge(cluster_n=4, cluster_count=2)
+    _assert_fields(topo)
+    # 2 rings of 4 nodes = 8 nodes total.
+    assert len(topo["nodes"]) == 8
+    # Each ring has 4 edges; plus 1 bridge edge between clusters.
+    assert len(topo["links"]) == 4 + 4 + 1
+    assert _is_connected(topo)
+
+
+def test_bridge_3_clusters_of_5_counts() -> None:
+    topo = build_bridge(cluster_n=5, cluster_count=3)
+    _assert_fields(topo)
+    assert len(topo["nodes"]) == 15
+    # 3 rings × 5 edges + 2 bridge edges between consecutive clusters.
+    assert len(topo["links"]) == 3 * 5 + 2
+    assert _is_connected(topo)
+
+
+def test_bridge_has_single_min_cut_edge_between_clusters() -> None:
+    """The bridge topology's defining property: removing the bridge edges
+    splits the graph into exactly ``cluster_count`` components."""
+    topo = build_bridge(cluster_n=4, cluster_count=2)
+    # The bridge edges are between clusters; identify them by the pair of
+    # node_ids straddling cluster_n boundaries. Cluster 1 has node_ids
+    # 1..cluster_n; cluster 2 has cluster_n+1..2*cluster_n; etc.
+    cluster_of = lambda nd: (nd["node_id"] - 1) // 4
+    uid_to_node = {nd["uid"]: nd for nd in topo["nodes"]}
+    inter_cluster = [
+        ln
+        for ln in topo["links"]
+        if cluster_of(uid_to_node[ln["source_uid"]])
+        != cluster_of(uid_to_node[ln["target_uid"]])
+    ]
+    # Exactly cluster_count - 1 = 1 bridge edge for 2 clusters.
+    assert len(inter_cluster) == 1
+
+
+def test_bridge_validation_errors() -> None:
+    with pytest.raises(ValueError):
+        build_bridge(cluster_n=2, cluster_count=2)  # ring requires ≥3
+    with pytest.raises(ValueError):
+        build_bridge(cluster_n=4, cluster_count=1)  # need ≥2 clusters
+    with pytest.raises(ValueError):
+        build_bridge(cluster_n=4, cluster_count=2, intra_degree=1.0)
+
+
+def test_bridge_uids_unique_and_sequential() -> None:
+    topo = build_bridge(cluster_n=4, cluster_count=3)
+    uids = [nd["uid"] for nd in topo["nodes"]]
+    assert len(uids) == len(set(uids))
+    node_ids = [nd["node_id"] for nd in topo["nodes"]]
+    assert node_ids == list(range(1, len(node_ids) + 1))
