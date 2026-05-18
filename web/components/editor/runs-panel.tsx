@@ -19,9 +19,10 @@ function statusVariant(status: SimulationRunDTO["status"]): BadgeProps["variant"
 interface Props {
   simulationId: number;
   refreshToken: number;
+  paused?: boolean;
 }
 
-export function RunsPanel({ simulationId, refreshToken }: Props) {
+export function RunsPanel({ simulationId, refreshToken, paused = false }: Props) {
   const [runs, setRuns] = useState<SimulationRunDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,12 +48,15 @@ export function RunsPanel({ simulationId, refreshToken }: Props) {
 
   useEffect(() => {
     void loadRuns();
+    if (paused) {
+      return;
+    }
     const timer = window.setInterval(() => {
       void loadRuns();
     }, 3000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [simulationId, refreshToken]);
+  }, [simulationId, refreshToken, paused]);
 
   return (
     <Card>

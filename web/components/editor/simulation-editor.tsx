@@ -205,6 +205,14 @@ function sameStringArray(left: string[], right: string[]): boolean {
   return true;
 }
 
+function normalizeSaeAdminStatus(raw: unknown): SaeAdminStatus {
+  const text = String(raw ?? "").trim().toLowerCase();
+  if (text === "active" || text === "revoked" || text === "expired") {
+    return text;
+  }
+  return "pending_cert";
+}
+
 function mapSaeRecords(payload: any): SaeAdminRecord[] {
   if (!Array.isArray(payload?.saes)) {
     return [];
@@ -214,7 +222,7 @@ function mapSaeRecords(payload: any): SaeAdminRecord[] {
     saeId: String(item.saeId ?? ""),
     displayName: item.displayName ?? null,
     dkmsId: Number.isFinite(Number(item.dkmsId)) && Number(item.dkmsId) > 0 ? Number(item.dkmsId) : null,
-    status: String(item.status ?? "pending_cert") as SaeAdminStatus,
+    status: normalizeSaeAdminStatus(item.status),
     certFingerprint: item.certFingerprint ?? null,
     certNotAfter: item.certNotAfter ?? null
   }));
@@ -1827,11 +1835,7 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     });
   };
 
-  async function handleActivateAllSaes() {
-    if (!isInfrastructureRunning || isInfrastructureTransitioning) {
-      setActionMessage("Activate all SAEs is only available while infrastructure is running.");
-      return;
-    }
+  async function performActivateAllSaes() {
     setBulkSaeActionPending(true);
     setActionMessage("Activating SAEs...");
     try {
@@ -1879,6 +1883,20 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     } finally {
       setBulkSaeActionPending(false);
     }
+  }
+
+  function handleActivateAllSaes() {
+    if (!isInfrastructureRunning || isInfrastructureTransitioning) {
+      setActionMessage("Activate all SAEs is only available while infrastructure is running.");
+      return;
+    }
+    requestConfirm({
+      title: "Activar todos los SAEs",
+      description:
+        "Se emitirá un certificado mTLS para cada SAE no activo de la simulación. La operación tarda más cuanto más SAEs haya.",
+      confirmLabel: "Activar todos",
+      onConfirm: () => performActivateAllSaes()
+    });
   }
 
   async function performStopAllSaes() {
@@ -1944,16 +1962,7 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     });
   }
 
-  async function handleActivateSelectedSaes() {
-    if (!isInfrastructureRunning || isInfrastructureTransitioning) {
-      setActionMessage("Activate selected SAEs is only available while infrastructure is running.");
-      return;
-    }
-    if (selectedSaeIds.length === 0) {
-      setActionMessage("Select SAE nodes with Ctrl/Cmd first.");
-      return;
-    }
-
+  async function performActivateSelectedSaes() {
     setBulkSaeActionPending(true);
     setActionMessage("Activating selected SAEs...");
     try {
@@ -2007,16 +2016,26 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     }
   }
 
-  async function handleStopSelectedSaes() {
+  function handleActivateSelectedSaes() {
     if (!isInfrastructureRunning || isInfrastructureTransitioning) {
-      setActionMessage("Stop selected SAEs is only available while infrastructure is running.");
+      setActionMessage("Activate selected SAEs is only available while infrastructure is running.");
       return;
     }
     if (selectedSaeIds.length === 0) {
       setActionMessage("Select SAE nodes with Ctrl/Cmd first.");
       return;
     }
+    const count = selectedSaeIds.length;
+    requestConfirm({
+      title: `Activar ${count} SAEs seleccionados`,
+      description:
+        "Se emitirá un certificado mTLS por cada SAE seleccionado que aún no esté activo. Los SAEs ya activos no se tocan.",
+      confirmLabel: "Activar",
+      onConfirm: () => performActivateSelectedSaes()
+    });
+  }
 
+  async function performStopSelectedSaes() {
     setBulkSaeActionPending(true);
     setActionMessage("Stopping selected SAEs...");
     try {
@@ -2065,19 +2084,27 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     }
   }
 
-  async function handleDkmsBatchAction(action: "start" | "stop") {
+  function handleStopSelectedSaes() {
     if (!isInfrastructureRunning || isInfrastructureTransitioning) {
-      setActionMessage("Selected DKMS actions are only available while infrastructure is running.");
+      setActionMessage("Stop selected SAEs is only available while infrastructure is running.");
       return;
     }
-    if (selectedDkmsNodeIds.length === 0) {
-      setActionMessage("Select DKMS nodes with Ctrl/Cmd first.");
+    if (selectedSaeIds.length === 0) {
+      setActionMessage("Select SAE nodes with Ctrl/Cmd first.");
       return;
     }
-    if (actionPending || dkmsActionPending) {
-      return;
-    }
+    const count = selectedSaeIds.length;
+    requestConfirm({
+      title: `Revocar ${count} SAEs seleccionados`,
+      description:
+        "Se revocarán los certificados de los SAEs activos seleccionados. Los SAEs tendrán que reactivarse manualmente.",
+      confirmLabel: "Revocar",
+      destructive: true,
+      onConfirm: () => performStopSelectedSaes()
+    });
+  }
 
+  async function performDkmsBatchAction(action: "start" | "stop") {
     const actionVerb = action === "start" ? "Starting" : "Stopping";
     const actionPast = action === "start" ? "started" : "stopped";
     const nextHealthState: EditorNodeData["healthState"] = action === "start" ? "up" : "down";
@@ -2131,6 +2158,35 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     } finally {
       setDkmsActionPending(false);
     }
+  }
+
+  function handleDkmsBatchAction(action: "start" | "stop") {
+    if (!isInfrastructureRunning || isInfrastructureTransitioning) {
+      setActionMessage("Selected DKMS actions are only available while infrastructure is running.");
+      return;
+    }
+    if (selectedDkmsNodeIds.length === 0) {
+      setActionMessage("Select DKMS nodes with Ctrl/Cmd first.");
+      return;
+    }
+    if (actionPending || dkmsActionPending) {
+      return;
+    }
+
+    const count = selectedDkmsNodeIds.length;
+    requestConfirm({
+      title:
+        action === "start"
+          ? `Iniciar ${count} DKMS seleccionados`
+          : `Detener ${count} DKMS seleccionados`,
+      description:
+        action === "start"
+          ? `Vas a arrancar ${count} pods DKMS. Operación experimental: los demás ORR pueden conservar master_secret obsoletos contra estos DKMS y dejar de procesar tráfico hasta que se haga Stop+Run de toda la simulación.`
+          : `Vas a detener ${count} pods DKMS. Operación experimental: cuando vuelvan a levantarse, los demás ORR pueden conservar master_secret obsoletos y dejar de procesar tráfico hasta que se haga Stop+Run de toda la simulación.`,
+      confirmLabel: action === "start" ? "Iniciar" : "Detener",
+      destructive: action === "stop",
+      onConfirm: () => performDkmsBatchAction(action)
+    });
   }
 
   async function handleDownloadAllActiveSaesZip() {
@@ -2372,20 +2428,8 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
     }
   }
 
-  const handleDkmsActionByNodeId = useCallback(
+  const performDkmsAction = useCallback(
     async (nodeId: number, action: "start" | "stop") => {
-      if (!Number.isFinite(nodeId) || nodeId <= 0) {
-        setActionMessage("Select a valid DKMS node first.");
-        return;
-      }
-      if (!infrastructureRunningRef.current || infrastructureTransitioningRef.current) {
-        setActionMessage("DKMS actions are only available while infrastructure is running.");
-        return;
-      }
-      if (actionPendingRef.current || dkmsActionPendingRef.current) {
-        return;
-      }
-
       const actionLabel = action === "start" ? "Starting" : "Stopping";
       setDkmsActionPending(true);
       setActionMessage(`${actionLabel} DKMS ${nodeId}...`);
@@ -2428,6 +2472,37 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
       }
     },
     [simulationId]
+  );
+
+  const handleDkmsActionByNodeId = useCallback(
+    async (nodeId: number, action: "start" | "stop") => {
+      if (!Number.isFinite(nodeId) || nodeId <= 0) {
+        setActionMessage("Select a valid DKMS node first.");
+        return;
+      }
+      if (!infrastructureRunningRef.current || infrastructureTransitioningRef.current) {
+        setActionMessage("DKMS actions are only available while infrastructure is running.");
+        return;
+      }
+      if (actionPendingRef.current || dkmsActionPendingRef.current) {
+        return;
+      }
+
+      // Conocido (CLAUDE.md "Bootstrap race during DKMS rolling restart"):
+      // reiniciar un solo DKMS deja a sus peers ORR con master_secret stale,
+      // hasta que se haga Stop+Run completo. Avisamos al usuario.
+      requestConfirm({
+        title: action === "start" ? `Iniciar DKMS ${nodeId}` : `Detener DKMS ${nodeId}`,
+        description:
+          action === "start"
+            ? `Vas a arrancar el pod del DKMS ${nodeId}. Operación experimental: los demás ORR pueden conservar master_secret obsoletos y dejar de procesar tráfico contra este DKMS hasta que se haga Stop+Run de toda la simulación.`
+            : `Vas a detener el pod del DKMS ${nodeId}. Operación experimental: cuando vuelva a levantarse, los demás ORR pueden conservar master_secret obsoletos y dejar de procesar tráfico contra él hasta que se haga Stop+Run de toda la simulación.`,
+        confirmLabel: action === "start" ? "Iniciar" : "Detener",
+        destructive: action === "stop",
+        onConfirm: () => performDkmsAction(nodeId, action)
+      });
+    },
+    [performDkmsAction, requestConfirm]
   );
 
   const handleStopDkmsByNodeId = useCallback(
@@ -2779,7 +2854,11 @@ export function SimulationEditor({ simulationId, ingressBaseUrl }: Props) {
               </div>
             </div>
           </div>
-          <RunsPanel simulationId={simulationId} refreshToken={runRefreshToken} />
+          <RunsPanel
+            simulationId={simulationId}
+            refreshToken={runRefreshToken}
+            paused={isInfrastructureTransitioning}
+          />
         </div>
 
         <div className="hidden lg:flex items-stretch justify-center">

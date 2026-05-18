@@ -50,6 +50,7 @@ export function SimulationsDashboard({ username }: Props) {
   );
   const [pendingDelete, setPendingDelete] = useState<SimulationSummaryDTO | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [pendingStop, setPendingStop] = useState<SimulationSummaryDTO | null>(null);
 
   async function loadSimulations() {
     setLoading(true);
@@ -114,12 +115,14 @@ export function SimulationsDashboard({ username }: Props) {
       await loadSimulations();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error inesperado");
+      // Dejamos pendingDelete intacto: el modal sigue abierto para reintentar
+      // y el error se muestra en el banner superior.
     } finally {
       setDeleting(false);
     }
   }
 
-  async function handleRunStop(simulation: SimulationSummaryDTO) {
+  async function executeRunStop(simulation: SimulationSummaryDTO) {
     const isRunning = simulation.status === "running";
     const action: "run" | "stop" = isRunning ? "stop" : "run";
     setSimulationAction((current) => ({ ...current, [simulation.id]: action }));
@@ -140,6 +143,14 @@ export function SimulationsDashboard({ username }: Props) {
     } finally {
       setSimulationAction((current) => ({ ...current, [simulation.id]: null }));
     }
+  }
+
+  function handleRunStop(simulation: SimulationSummaryDTO) {
+    if (simulation.status === "running") {
+      setPendingStop(simulation);
+      return;
+    }
+    void executeRunStop(simulation);
   }
 
   async function handleLogout() {
@@ -381,7 +392,7 @@ export function SimulationsDashboard({ username }: Props) {
       <ConfirmDialog
         open={Boolean(pendingDelete)}
         onOpenChange={(open) => {
-          if (!open) setPendingDelete(null);
+          if (!open && !deleting) setPendingDelete(null);
         }}
         title="Eliminar simulación"
         description={
@@ -397,6 +408,34 @@ export function SimulationsDashboard({ username }: Props) {
         destructive
         loading={deleting}
         onConfirm={performDelete}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingStop)}
+        onOpenChange={(open) => {
+          const busy = pendingStop ? simulationAction[pendingStop.id] === "stop" : false;
+          if (!open && !busy) setPendingStop(null);
+        }}
+        title="Detener simulación"
+        description={
+          pendingStop ? (
+            <>
+              Vas a detener <strong>{pendingStop.name}</strong>. El orquestador borrará el
+              namespace de la simulación y los pods de DKMS/ORR/QKC/SDN se reiniciarán desde
+              cero en el próximo run.
+            </>
+          ) : null
+        }
+        confirmLabel="Detener"
+        cancelLabel="Cancelar"
+        destructive
+        loading={pendingStop ? simulationAction[pendingStop.id] === "stop" : false}
+        onConfirm={async () => {
+          const target = pendingStop;
+          if (!target) return;
+          await executeRunStop(target);
+          setPendingStop(null);
+        }}
       />
     </>
   );

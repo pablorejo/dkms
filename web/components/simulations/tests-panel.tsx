@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -67,11 +68,13 @@ export function SimulationTestsPanel({ simulationId }: Props) {
   const [loading, setLoading] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [pendingStopTestId, setPendingStopTestId] = React.useState<string | null>(null);
+  const [stopping, setStopping] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(apiPath(`/simulations/${simulationId}/tests`), {
+      const res = await fetch(apiPath(`/api/simulations/${simulationId}/tests`), {
         cache: "no-store"
       });
       const data = await res.json();
@@ -100,7 +103,7 @@ export function SimulationTestsPanel({ simulationId }: Props) {
     setSubmitting(true);
     try {
       const offsetSeconds = form.offsetMultiplier * form.intervalSeconds;
-      const res = await fetch(apiPath(`/simulations/${simulationId}/tests`), {
+      const res = await fetch(apiPath(`/api/simulations/${simulationId}/tests`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -125,11 +128,15 @@ export function SimulationTestsPanel({ simulationId }: Props) {
     }
   }
 
-  async function onStop(testId: string) {
-    if (!window.confirm(`Stop test ${testId}?`)) return;
+  function requestStop(testId: string) {
+    setPendingStopTestId(testId);
+  }
+
+  async function performStop(testId: string): Promise<boolean> {
+    setStopping(true);
     try {
       const res = await fetch(
-        apiPath(`/simulations/${simulationId}/tests/${encodeURIComponent(testId)}`),
+        apiPath(`/api/simulations/${simulationId}/tests/${encodeURIComponent(testId)}`),
         { method: "DELETE" }
       );
       if (!res.ok) {
@@ -137,12 +144,17 @@ export function SimulationTestsPanel({ simulationId }: Props) {
         throw new Error((data as { error?: string })?.error || "Failed to stop");
       }
       void refresh();
+      return true;
     } catch (e: unknown) {
       setError((e as Error).message);
+      return false;
+    } finally {
+      setStopping(false);
     }
   }
 
   return (
+    <>
     <div className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
         <div>
@@ -223,7 +235,7 @@ export function SimulationTestsPanel({ simulationId }: Props) {
                         Open Grafana
                       </Button>
                     </a>
-                    <Button variant="destructive" size="sm" onClick={() => void onStop(t.testId)}>
+                    <Button variant="destructive" size="sm" onClick={() => requestStop(t.testId)}>
                       Stop
                     </Button>
                   </div>
@@ -234,5 +246,27 @@ export function SimulationTestsPanel({ simulationId }: Props) {
         </CardContent>
       </Card>
     </div>
+
+    <ConfirmDialog
+      open={pendingStopTestId !== null}
+      onOpenChange={(open) => {
+        if (!open && !stopping) setPendingStopTestId(null);
+      }}
+      title={pendingStopTestId ? `Detener test ${pendingStopTestId}` : "Detener test"}
+      description="El deployment del loadtest se eliminará del namespace de la simulación. No se puede reanudar."
+      confirmLabel="Detener"
+      cancelLabel="Cancelar"
+      destructive
+      loading={stopping}
+      onConfirm={async () => {
+        const target = pendingStopTestId;
+        if (!target) return;
+        const ok = await performStop(target);
+        if (ok) {
+          setPendingStopTestId(null);
+        }
+      }}
+    />
+    </>
   );
 }

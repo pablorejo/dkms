@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import type { FlowEdge, FlowNode } from "@/components/editor/types";
 import type { SimulationStatus } from "@/lib/topology/types";
+import { DEFAULT_QUDITTO_RATE_ALPHA, DEFAULT_QUDITTO_RATE_R0 } from "@/lib/topology/types";
 import { apiPath } from "@/lib/app-path";
 
 interface Props {
@@ -111,13 +112,21 @@ function normalizeLinkConfig(edge: FlowEdge): LinkConfig {
   const qudittoRateR0 =
     Number.isFinite(Number(edge.data?.qudittoRateR0)) && Number(edge.data?.qudittoRateR0) > 0
       ? Number(edge.data?.qudittoRateR0)
-      : 120;
+      : DEFAULT_QUDITTO_RATE_R0;
   const qudittoRateAlpha =
     Number.isFinite(Number(edge.data?.qudittoRateAlpha)) && Number(edge.data?.qudittoRateAlpha) >= 0
       ? Number(edge.data?.qudittoRateAlpha)
-      : 0.2;
+      : DEFAULT_QUDITTO_RATE_ALPHA;
 
   return { linkType, distanceKm, qudittoMaxBufferSize, qudittoRateR0, qudittoRateAlpha };
+}
+
+function normalizeSaeAdminStatus(raw: unknown): SaeAdminStatus {
+  const text = String(raw ?? "").trim().toLowerCase();
+  if (text === "active" || text === "revoked" || text === "expired") {
+    return text;
+  }
+  return "pending_cert";
 }
 
 function statusBadgeClass(status: SaeAdminStatus): string {
@@ -265,7 +274,7 @@ function LinkConfigEditor({ value, disabled, onChange }: LinkConfigEditorProps) 
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>R0 (keys/min)</Label>
+              <Label>R0 (keys/s)</Label>
               <Input
                 type="number"
                 min={0.0001}
@@ -318,13 +327,13 @@ function LinkConfigEditor({ value, disabled, onChange }: LinkConfigEditorProps) 
                 linkType: "QKD",
                 distanceKm: 10,
                 qudittoMaxBufferSize: 100,
-                qudittoRateR0: 120,
-                qudittoRateAlpha: 0.2
+                qudittoRateR0: DEFAULT_QUDITTO_RATE_R0,
+                qudittoRateAlpha: DEFAULT_QUDITTO_RATE_ALPHA
               })
             }
             disabled={disabled}
           >
-            Metro QKD · 10km · R0 120
+            {`Metro QKD · 10km · R0 ${DEFAULT_QUDITTO_RATE_R0} keys/s`}
           </Button>
           <Button
             type="button"
@@ -335,13 +344,13 @@ function LinkConfigEditor({ value, disabled, onChange }: LinkConfigEditorProps) 
                 linkType: "QKD",
                 distanceKm: 80,
                 qudittoMaxBufferSize: 180,
-                qudittoRateR0: 120,
-                qudittoRateAlpha: 0.2
+                qudittoRateR0: DEFAULT_QUDITTO_RATE_R0,
+                qudittoRateAlpha: DEFAULT_QUDITTO_RATE_ALPHA
               })
             }
             disabled={disabled}
           >
-            Long QKD · 80km · alpha 0.2
+            {`Long QKD · 80km · alpha ${DEFAULT_QUDITTO_RATE_ALPHA}`}
           </Button>
           <Button
             type="button"
@@ -352,8 +361,8 @@ function LinkConfigEditor({ value, disabled, onChange }: LinkConfigEditorProps) 
                 linkType: "PQC",
                 distanceKm: 0,
                 qudittoMaxBufferSize: 100,
-                qudittoRateR0: 120,
-                qudittoRateAlpha: 0.2
+                qudittoRateR0: DEFAULT_QUDITTO_RATE_R0,
+                qudittoRateAlpha: DEFAULT_QUDITTO_RATE_ALPHA
               })
             }
             disabled={disabled}
@@ -369,13 +378,13 @@ function LinkConfigEditor({ value, disabled, onChange }: LinkConfigEditorProps) 
                 linkType: "HYBRID",
                 distanceKm: 30,
                 qudittoMaxBufferSize: 128,
-                qudittoRateR0: 120,
-                qudittoRateAlpha: 0.2
+                qudittoRateR0: DEFAULT_QUDITTO_RATE_R0,
+                qudittoRateAlpha: DEFAULT_QUDITTO_RATE_ALPHA
               })
             }
             disabled={disabled}
           >
-            HYBRID · 30km · R0 120
+            {`HYBRID · 30km · R0 ${DEFAULT_QUDITTO_RATE_R0} keys/s`}
           </Button>
         </div>
       </div>
@@ -410,6 +419,7 @@ export function Inspector({
   const [newSaeId, setNewSaeId] = useState("");
   const [newSaeDisplayName, setNewSaeDisplayName] = useState("");
   const [dkmsRuntimeMap, setDkmsRuntimeMap] = useState<Record<string, DkmsRuntimeInfo>>({});
+  const [dkmsRuntimeError, setDkmsRuntimeError] = useState<string | null>(null);
   const [pendingDeleteSaeId, setPendingDeleteSaeId] = useState<string | null>(null);
 
   const saveLabel = savingState === "saving" ? "Autosaving..." : savingState === "error" ? "Save failed" : "Saved";
@@ -437,7 +447,7 @@ export function Inspector({
             Number.isFinite(Number(item.dkmsId)) && Number(item.dkmsId) > 0
               ? Number(item.dkmsId)
               : null,
-          status: String(item.status ?? "pending_cert") as SaeAdminStatus,
+          status: normalizeSaeAdminStatus(item.status),
           certFingerprint: item.certFingerprint ?? null,
           certNotAfter: item.certNotAfter ?? null,
           certSubject: item.certSubject ?? null,
@@ -481,6 +491,7 @@ export function Inspector({
             return;
           }
           const detail = String(payload?.error ?? "Failed to load DKMS runtime map");
+          setDkmsRuntimeError(detail);
           setSaeError((current) => current ?? detail);
           return;
         }
@@ -511,11 +522,13 @@ export function Inspector({
           return;
         }
         setDkmsRuntimeMap(parsed);
-      } catch {
+        setDkmsRuntimeError(null);
+      } catch (error) {
         if (!alive) {
           return;
         }
         setDkmsRuntimeMap({});
+        setDkmsRuntimeError(error instanceof Error ? error.message : "Could not reach DKMS runtime endpoint");
       }
     };
 
@@ -883,7 +896,7 @@ export function Inspector({
     }
   };
 
-  const performDeleteSae = async (saeId: string) => {
+  const performDeleteSae = async (saeId: string): Promise<boolean> => {
     try {
       setSaeBusy(true);
       setSaeError(null);
@@ -896,8 +909,10 @@ export function Inspector({
       }
       await refreshSaes();
       onSaeUpdated?.();
+      return true;
     } catch (error) {
       setSaeError(error instanceof Error ? error.message : "Failed to delete SAE");
+      return false;
     } finally {
       setSaeBusy(false);
     }
@@ -1055,7 +1070,21 @@ export function Inspector({
                       </div>
                     </div>
                   ) : (
-                    <p className="text-xs text-muted-foreground">DKMS Runtime URL: Unavailable</p>
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                      <p className="font-medium">DKMS Runtime URL: Unavailable</p>
+                      {dkmsRuntimeError ? (
+                        <p className="mt-1 text-amber-700">{dkmsRuntimeError}</p>
+                      ) : Object.keys(dkmsRuntimeMap).length === 0 ? (
+                        <p className="mt-1 text-amber-700">
+                          The orchestrator did not return any DKMS runtime mapping yet. Wait until the
+                          infrastructure is fully running.
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-amber-700">
+                          {`No runtime registered for node_id=${selectedDkmsId}. The DKMS may still be booting.`}
+                        </p>
+                      )}
+                    </div>
                   )}
                   <div className="rounded-md border border-border bg-muted/20 p-2">
                     <Label className="text-xs">Create SAE</Label>
@@ -1172,7 +1201,7 @@ export function Inspector({
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Status</p>
-                  <span className={`rounded border px-2 py-0.5 text-xs ${statusBadgeClass((selectedNode.data.saeStatus ?? "pending_cert") as SaeAdminStatus)}`}>
+                  <span className={`rounded border px-2 py-0.5 text-xs ${statusBadgeClass(normalizeSaeAdminStatus(selectedNode.data.saeStatus))}`}>
                     {selectedNode.data.saeStatus ?? "pending_cert"}
                   </span>
                 </div>
@@ -1304,8 +1333,10 @@ export function Inspector({
         onConfirm={async () => {
           const target = pendingDeleteSaeId;
           if (!target) return;
-          await performDeleteSae(target);
-          setPendingDeleteSaeId(null);
+          const ok = await performDeleteSae(target);
+          if (ok) {
+            setPendingDeleteSaeId(null);
+          }
         }}
       />
     </Card>
