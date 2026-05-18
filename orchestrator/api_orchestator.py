@@ -2587,6 +2587,54 @@ def _loadtest_service_login() -> str:
     return token
 
 
+def _list_dkms_internal_endpoints_json(simulation_id: int) -> str:
+    """Build the JSON env (``LOADTEST_DKMS_ENDPOINTS``) of intra-cluster
+    DKMS endpoints for the loadtest pod.
+
+    Each entry maps the DKMS BD id to its ClusterIP Service DNS:
+    ``dkms-<bd_id>.<sim_id>.svc.cluster.local:<sae_port>``. This lets the
+    loadtest skip the SDN ``/sdn/dkms/`` lookup (which goes via the public
+    ingress and returns 403 for non-config_user owners — see CLAUDE.md
+    "SAE → ingress → DKMS path").
+
+    Returns ``"[]"`` on any failure so the loadtest falls back to its
+    existing resolution paths.
+    """
+    try:
+        from persistence.sqlalchemy.data import DKMS as DKMSEntity
+        from persistence.sqlalchemy.data import Host as HostEntity
+
+        with _sqlalchemy_uow_session() as (_uow, session):
+            rows = (
+                session.query(DKMSEntity)
+                .join(HostEntity, DKMSEntity.id_host == HostEntity.id)
+                .filter(HostEntity.id_simulation == int(simulation_id))
+                .all()
+            )
+            items: list[dict[str, Any]] = []
+            for dkms in rows:
+                dkms_id_bd = int(getattr(dkms, "id", 0) or 0)
+                host = getattr(dkms, "host", None)
+                host_id = int(getattr(host, "id", 0) or 0) if host else 0
+                port = int(getattr(host, "port", 0) or 0) if host else 0
+                # Service name is `dkms-<host.id>` (see pods.py:437
+                # `runtime_service_name = f"dkms-{int(local_host_id)}"`),
+                # NOT `dkms-<dkms.id>`.
+                if dkms_id_bd <= 0 or host_id <= 0 or port <= 0:
+                    continue
+                items.append(
+                    {
+                        "dkms_id": dkms_id_bd,
+                        "ingress_id": dkms_id_bd,
+                        "ip": f"dkms-{host_id}.{int(simulation_id)}.svc.cluster.local",
+                        "port": port,
+                    }
+                )
+            return json.dumps(items)
+    except Exception:  # noqa: BLE001
+        return "[]"
+
+
 def _build_loadtest_env(
     *,
     simulation_id: int,
@@ -2599,7 +2647,9 @@ def _build_loadtest_env(
         "LOADTEST_ORCH_INTERNAL_URL",
         "http://orchestator.dkms-main-ns.svc.cluster.local:8080",
     )
+    dkms_endpoints_json = _list_dkms_internal_endpoints_json(simulation_id)
     return {
+        "LOADTEST_DKMS_ENDPOINTS": dkms_endpoints_json,
         "TEST_ORCH_INTERNAL_URL": orch_internal,
         "TEST_ID": test_id,
         "SIM_ID": str(int(simulation_id)),

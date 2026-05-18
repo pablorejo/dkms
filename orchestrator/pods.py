@@ -3602,6 +3602,8 @@ class PodDKMS(Pod):
 
     _DKMS_CA_SECRET_NAME = "dkms-rust-sim-ca"
     _DKMS_CA_VOLUME_NAME = "dkms-rust-ca-material"
+    _SAE_CA_SECRET_NAME = "sae-runtime-ca"
+    _SAE_CA_VOLUME_NAME = "sae-rust-ca-material"
 
     def _ensure_dkms_ca_secret(self) -> None:
         """Generates ONE shared CA per simulation namespace (idempotent).
@@ -3679,10 +3681,28 @@ class PodDKMS(Pod):
         # Subjective Alt Name list: this DKMS service + localhost + the
         # short service name pattern. We include "*.<namespace>" via a
         # subjectAltName=DNS:* trick (rustls accepts wildcard in SAN).
+        # ``ca.crt`` is consumed by DKMS Rust as both ``sae_client_ca``
+        # and ``peer_dkms_ca``. We concatenate the runtime CA (signs
+        # the ingress-proxy cert and the DKMS server cert) with the
+        # SAE CA (signs SAE client certs issued by the orchestator) so
+        # that mTLS works for BOTH paths:
+        #
+        #   * SAE → nginx → DKMS: nginx presents an "ingress-proxy"
+        #     cert signed by the runtime CA. The real SAE cert travels
+        #     in the `ssl-client-cert` header.
+        #   * SAE → DKMS (direct, intra-cluster, e.g. loadtest pod):
+        #     the client presents its real SAE cert signed by the SAE
+        #     CA; the DKMS rejects with TLSV1_ALERT_UNKNOWN_CA unless
+        #     the SAE CA is in the trust bundle.
+        #
+        # rustls accepts a multi-cert PEM bundle for client-auth roots.
         script = (
             'set -e\n'
             'cd /app/certs\n'
             'cp /ca-material/ca.crt ca.crt\n'
+            'if [ -f /sae-ca-material/ca.crt ]; then\n'
+            '  cat /sae-ca-material/ca.crt >> ca.crt\n'
+            'fi\n'
             'openssl genrsa -out server.key 2048\n'
             'cat > /tmp/san.cnf <<EOF\n'
             '[req]\n'
@@ -3715,6 +3735,17 @@ class PodDKMS(Pod):
                 client.V1VolumeMount(
                     name=self._DKMS_CA_VOLUME_NAME,
                     mount_path="/ca-material",
+                    read_only=True,
+                ),
+                # Optional: when ``sae-runtime-ca`` is provisioned in the
+                # sim namespace (by the SAE certs flow), expose it so the
+                # init script can append it to the trust bundle. The
+                # secret is created by the orchestator on first SAE
+                # issuance; mount uses `optional=true` so pods without it
+                # still boot.
+                client.V1VolumeMount(
+                    name=self._SAE_CA_VOLUME_NAME,
+                    mount_path="/sae-ca-material",
                     read_only=True,
                 ),
             ],
@@ -4131,6 +4162,16 @@ class PodDKMS(Pod):
                     secret=client.V1SecretVolumeSource(
                         secret_name=self._DKMS_CA_SECRET_NAME,
                         default_mode=0o400,
+                    ),
+                )
+            )
+            volumes.append(
+                client.V1Volume(
+                    name=self._SAE_CA_VOLUME_NAME,
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=self._SAE_CA_SECRET_NAME,
+                        default_mode=0o400,
+                        optional=True,
                     ),
                 )
             )
