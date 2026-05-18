@@ -179,3 +179,22 @@ verify: ## smoke checks against the live deployment
 	@echo "── HTTP smoke ──"
 	@curl -s -o /dev/null -w "web /web/login   → %{http_code}\n" https://dkms2.pablopiorejoiglesias.es/web/login || true
 	@curl -s -o /dev/null -w "orch /orch/health → %{http_code}\n" https://dkms2.pablopiorejoiglesias.es/orch/health || true
+
+# ──────────────────────────────────────────────────────────────────────
+# dkms-topo CLI (tests/cli/) — local Python CLI for EKS smoke tests.
+# Append-only block added by agent-dkms-topo-cli iter 024 (2026-05-18).
+# ──────────────────────────────────────────────────────────────────────
+
+.PHONY: topo-cli-install topo-cli-test topo-cli-test-integration
+
+topo-cli-install: ## create tests/cli/.venv and install Python deps
+	@python3 -m venv tests/cli/.venv
+	@tests/cli/.venv/bin/pip install -U pip
+	@tests/cli/.venv/bin/pip install -r tests/cli/requirements.txt
+	@echo "[topo-cli-install] venv ready at tests/cli/.venv/"
+
+topo-cli-test: ## run dkms-topo unit tests (no EKS, no port-forwards)
+	@python3 -m pytest tests/cli/
+
+topo-cli-test-integration: ## run dkms-topo integration tests (needs EKS port-forwards)
+	@python3 -m pytest tests/cli/ -m integration
