@@ -17,6 +17,7 @@ headless. Plots are skipped silently if matplotlib is unavailable.
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +28,9 @@ REQUESTS_TOTAL = "loadtest_requests_total"
 DURATION_HISTOGRAM = "loadtest_request_duration_seconds"
 
 DEFAULT_PERCENTILES: tuple[float, ...] = (0.5, 0.9, 0.95, 0.99)
+
+# Time-series window for "over-time" plots derived from requests.csv.
+_WINDOW_SECONDS_DEFAULT: float = 5.0
 
 
 def _counts_by_status(counters: dict[str, Any]) -> dict[str, float]:
@@ -189,6 +193,258 @@ def _plot_latency_cdf(
     return True
 
 
+def _plot_errors_by_reason(
+    counters: dict[str, Any], output_path: Path
+) -> bool:
+    """Bar chart of ``loadtest_errors_total`` grouped by ``reason``."""
+    try:
+        import matplotlib  # type: ignore
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception:
+        return False
+    entries = counters.get("loadtest_errors_total", [])
+    if not entries:
+        return False
+    reasons: dict[str, float] = {}
+    for e in entries:
+        reason = e["labels"].get("reason", "unknown")
+        reasons[reason] = reasons.get(reason, 0.0) + e["value"]
+    if not reasons:
+        return False
+    items = sorted(reasons.items(), key=lambda kv: -kv[1])
+    labels = [r for r, _ in items]
+    values = [v for _, v in items]
+    fig, ax = plt.subplots(figsize=(7, max(3, 0.4 * len(items))))
+    color_for = {
+        "ok": "#2ecc71",
+        "http_429": "#e67e22",
+        "429_other": "#e67e22",
+        "http_503": "#9b59b6",
+        "503_other": "#9b59b6",
+    }
+    bars = ax.barh(
+        range(len(items)),
+        values,
+        color=[color_for.get(r, "#e74c3c") for r in labels],
+    )
+    ax.set_yticks(range(len(items)))
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("requests")
+    ax.set_title("loadtest errors by reason")
+    for i, v in enumerate(values):
+        ax.text(v, i, f" {int(v)}", va="center", fontsize=8)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+    return True
+
+
+def _read_requests_csv(csv_path: Path) -> list[dict[str, Any]]:
+    """Parse the per-request CSV emitted by the loadtest runner.
+
+    Columns we use: ``emitted_at_epoch`` (float), ``elapsed_seconds``
+    (float), ``status_code`` (int). Unparseable rows are skipped.
+    """
+    rows: list[dict[str, Any]] = []
+    if not csv_path.exists():
+        return rows
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="replace") as fh:
+            reader = csv.DictReader(fh)
+            for raw in reader:
+                try:
+                    emitted = float(raw.get("emitted_at_epoch") or 0.0)
+                    elapsed = float(raw.get("elapsed_seconds") or 0.0)
+                    sc = int(raw.get("status_code") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if emitted <= 0:
+                    continue
+                rows.append({"emitted": emitted, "elapsed": elapsed, "status": sc})
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
+
+
+def _window_buckets(
+    requests: list[dict[str, Any]], window_s: float
+) -> list[dict[str, Any]]:
+    """Group requests by floor((emitted - t0) / window_s).
+
+    Returns one dict per bucket with: t_center (s since t0), n,
+    by_status, latencies (sorted), p95.
+    """
+    if not requests:
+        return []
+    t0 = min(r["emitted"] for r in requests)
+    bucket_map: dict[int, dict[str, Any]] = {}
+    for r in requests:
+        rel = r["emitted"] - t0
+        idx = int(rel // window_s)
+        bucket = bucket_map.setdefault(
+            idx,
+            {"idx": idx, "n": 0, "by_status": {}, "latencies": []},
+        )
+        bucket["n"] += 1
+        sc = r["status"]
+        bucket["by_status"][sc] = bucket["by_status"].get(sc, 0) + 1
+        bucket["latencies"].append(r["elapsed"])
+    out: list[dict[str, Any]] = []
+    for idx in sorted(bucket_map.keys()):
+        b = bucket_map[idx]
+        lat = sorted(b["latencies"])
+        b["t_center"] = (idx + 0.5) * window_s
+        if lat:
+            p95_idx = max(0, int(0.95 * (len(lat) - 1)))
+            b["p95"] = lat[p95_idx]
+        else:
+            b["p95"] = 0.0
+        out.append(b)
+    return out
+
+
+def _plot_status_over_time(
+    requests_csv: Path, output_path: Path, window_s: float = _WINDOW_SECONDS_DEFAULT
+) -> bool:
+    """Stacked area of % requests per status code over time windows."""
+    try:
+        import matplotlib  # type: ignore
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception:
+        return False
+    rows = _read_requests_csv(requests_csv)
+    buckets = _window_buckets(rows, window_s)
+    if not buckets:
+        return False
+    # Collect the union of status codes; classify into groups for color stability.
+    groups: list[tuple[str, list[int], str]] = [
+        ("2xx", list(range(200, 300)), "#2ecc71"),
+        ("429", [429], "#e67e22"),
+        ("503", [503], "#9b59b6"),
+        ("4xx other", [c for c in range(400, 500) if c != 429], "#f1c40f"),
+        ("5xx other", [c for c in range(500, 600) if c != 503], "#e74c3c"),
+        ("conn err", [0], "#7f8c8d"),
+    ]
+    xs = [b["t_center"] for b in buckets]
+    series: list[tuple[str, str, list[float]]] = []
+    for name, codes, color in groups:
+        ys: list[float] = []
+        for b in buckets:
+            n_in_group = sum(b["by_status"].get(c, 0) for c in codes)
+            pct = (n_in_group / b["n"] * 100.0) if b["n"] > 0 else 0.0
+            ys.append(pct)
+        if any(y > 0 for y in ys):
+            series.append((name, color, ys))
+    if not series:
+        return False
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.stackplot(
+        xs,
+        *[s[2] for s in series],
+        labels=[s[0] for s in series],
+        colors=[s[1] for s in series],
+        alpha=0.85,
+    )
+    ax.set_xlabel(f"seconds since first request (window={int(window_s)}s)")
+    ax.set_ylabel("% of requests in window")
+    ax.set_ylim(0, 100)
+    ax.set_title("status code distribution over time")
+    ax.legend(loc="lower right", fontsize=8, ncol=2)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+    return True
+
+
+def _plot_latency_p95_over_time(
+    requests_csv: Path,
+    output_path: Path,
+    window_s: float = _WINDOW_SECONDS_DEFAULT,
+) -> bool:
+    """Line of p95 latency per window. Overlays median and request rate."""
+    try:
+        import matplotlib  # type: ignore
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception:
+        return False
+    rows = _read_requests_csv(requests_csv)
+    buckets = _window_buckets(rows, window_s)
+    if not buckets:
+        return False
+    xs = [b["t_center"] for b in buckets]
+    p95 = [b["p95"] * 1000.0 for b in buckets]  # ms
+    rate = [b["n"] / window_s for b in buckets]
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    ax1.plot(xs, p95, color="#c0392b", linewidth=1.5, label="p95 latency (ms)")
+    ax1.set_xlabel(f"seconds since first request (window={int(window_s)}s)")
+    ax1.set_ylabel("p95 latency (ms)", color="#c0392b")
+    ax1.tick_params(axis="y", labelcolor="#c0392b")
+    ax1.set_ylim(bottom=0)
+    ax2 = ax1.twinx()
+    ax2.plot(xs, rate, color="#2980b9", linewidth=1.0, linestyle="--", label="req/s")
+    ax2.set_ylabel("request rate (req/s)", color="#2980b9")
+    ax2.tick_params(axis="y", labelcolor="#2980b9")
+    ax2.set_ylim(bottom=0)
+    ax1.set_title("p95 latency over time vs request rate")
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labels + labels2, loc="upper left", fontsize=8)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+    return True
+
+
+def _write_loadtest_metrics_csv(
+    metrics: dict[str, Any], output_path: Path
+) -> bool:
+    """Flatten counters + histogram-summary to a single tabular CSV.
+
+    Rows: one per (metric_name, status_code, result/reason) for
+    counters, plus one row per histogram bucket. Useful for diffing
+    runs at a glance without `prom_parser.parse_metrics`.
+    """
+    counters = metrics.get("counters", {})
+    histograms = metrics.get("histograms", {})
+    if not counters and not histograms:
+        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["metric", "label_key", "label_value", "value"])
+        for name in sorted(counters.keys()):
+            for entry in counters[name]:
+                if entry["labels"]:
+                    for k in sorted(entry["labels"].keys()):
+                        w.writerow([name, k, entry["labels"][k], entry["value"]])
+                    # Also write a summary row keyed by combined labels.
+                    combined = "|".join(
+                        f"{k}={entry['labels'][k]}" for k in sorted(entry["labels"].keys())
+                    )
+                    w.writerow([name, "_all_labels", combined, entry["value"]])
+                else:
+                    w.writerow([name, "", "", entry["value"]])
+        for base in sorted(histograms.keys()):
+            h = histograms[base]
+            for le, count in h.get("buckets", []):
+                w.writerow([f"{base}_bucket", "le", str(le), count])
+            if h.get("count") is not None:
+                w.writerow([f"{base}_count", "", "", h["count"]])
+            if h.get("sum") is not None:
+                w.writerow([f"{base}_sum", "", "", h["sum"]])
+    return True
+
+
 def analyze_loadtest(
     metrics: dict[str, Any],
     params: dict[str, Any] | None = None,
@@ -196,6 +452,8 @@ def analyze_loadtest(
     output_dir: str | Path | None = None,
     percentiles: Iterable[float] = DEFAULT_PERCENTILES,
     write_plots: bool = True,
+    write_csv: bool = True,
+    requests_csv: Path | None = None,
 ) -> dict[str, Any]:
     """Summarize a parsed Prometheus metrics dict.
 
@@ -240,15 +498,24 @@ def analyze_loadtest(
         "latency": latency,
         "params": dict(params) if params is not None else None,
         "plots": [],
+        "csvs": [],
     }
 
     if output_dir is not None:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        if write_csv:
+            data_dir = out_dir / "data"
+            metrics_csv = data_dir / "loadtest_metrics.csv"
+            if _write_loadtest_metrics_csv(metrics, metrics_csv):
+                result["csvs"].append(str(metrics_csv))
         if write_plots:
             plot_dir = out_dir / "plots"
             req_plot = plot_dir / "requests_by_status.png"
             lat_plot = plot_dir / "latency_percentiles.png"
+            err_plot = plot_dir / "sae_errors_by_reason.png"
+            status_time_plot = plot_dir / "sae_status_over_time.png"
+            p95_time_plot = plot_dir / "sae_latency_p95_over_time.png"
             if _plot_requests_by_status(status_counts, req_plot):
                 result["plots"].append(str(req_plot))
             if _plot_latency_cdf(
@@ -258,6 +525,16 @@ def analyze_loadtest(
                 lat_plot,
             ):
                 result["plots"].append(str(lat_plot))
+            if _plot_errors_by_reason(metrics.get("counters", {}), err_plot):
+                result["plots"].append(str(err_plot))
+            # Time-series plots need the per-request CSV — only fired
+            # when the caller passed its path.
+            if requests_csv is not None:
+                rcsv = Path(requests_csv)
+                if _plot_status_over_time(rcsv, status_time_plot):
+                    result["plots"].append(str(status_time_plot))
+                if _plot_latency_p95_over_time(rcsv, p95_time_plot):
+                    result["plots"].append(str(p95_time_plot))
         with open(out_dir / "loadtest_analysis.json", "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2, default=str)
 

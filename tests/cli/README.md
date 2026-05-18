@@ -86,6 +86,7 @@ desde la raíz del repo.
 | `mesh`  | `-n N -m M` (n,m ≥ 2)       | N·M             |
 | `star`  | `-p PER -b BRANCHES`        | 1 + B·P         |
 | `random`| `-n N -d AVG_DEGREE [--seed S]` | N           |
+| `replot`| `OUTPUT_DIR [--buffer-enc-size N] [--sat-threshold F]` | (none — offline) |
 
 ### Flags globales (todos los subcomandos)
 
@@ -106,6 +107,8 @@ desde la raíz del repo.
 | `--output-dir PATH`          | `tests/results/<utc>-<topo>/` | Directorio para outputs |
 | `--saturation-timeout SEC`   | 600     | Timeout absoluto para alcanzar saturación |
 | `--sat-threshold FRAC`       | 0.95    | enc ≥ frac × buffer → saturado |
+| `--no-csv-export`            | off     | No vuelca `data/*.csv` (sólo `sat_analysis.json`) |
+| `--no-plots`                 | off     | No renderiza `plots/*.png` |
 | `--authz-url URL`            | http://127.0.0.1:18081 | URL del port-forward de authz |
 | `--orch-url URL`             | http://127.0.0.1:18080 | URL del port-forward del orchestator |
 | `--username STR`             | config_user | Username authz |
@@ -186,20 +189,75 @@ Cada corrida produce un directorio (defecto
 
 ```
 tests/results/2026-05-18T20-15-30-ring-n4/
-├── payload.json                # body enviado a /orch/web/simulations
-├── dkms-3-9d87....log          # uno por pod DKMS (kubectl logs -f)
+├── payload.json                  # body enviado a /orch/web/simulations
+├── dkms-3-9d87....log            # uno por pod DKMS (kubectl logs -f)
 ├── ...
-├── sat_analysis.json           # output de analyze_saturation
-├── loadtest.log                # si --sae-test (kubectl logs deploy/loadtest)
-├── loadtest-metrics.txt        # si --sae-test (Prometheus text)
-├── loadtest_analysis.json      # si --sae-test (counts + percentiles)
+├── sat_analysis.json             # output de analyze_saturation
+├── loadtest.log                  # si --sae-test
+├── loadtest-metrics.txt          # si --sae-test (Prometheus text)
+├── loadtest_analysis.json        # si --sae-test (counts + percentiles)
+├── requests-<deploy>.csv         # si --sae-test (1 fila por request HTTP)
+├── sae-timeline-<deploy>.csv     # si --sae-test (snapshots de SAEs activos)
+├── data/                         # CSVs aplanados para pandas / R / Excel
+│   ├── generator_state.csv       # 1 fila por evento `generator.state`
+│   ├── per_commodity.csv         # 1 fila por commodity (src→peer)
+│   ├── theory_rates.csv          # rate teórico + t_saturate por commodity
+│   └── loadtest_metrics.csv      # si --sae-test (counters + buckets)
 └── plots/
-    ├── requests_by_status.png  # bar chart (sólo --sae-test)
-    └── latency_percentiles.png # CDF log-X con líneas p50/p90/p95/p99
+    ├── sat_enc_over_time.png         # ENC por commodity vs tiempo
+    ├── sat_ratios.png                # barra observed/teórico por commodity
+    ├── sat_emit_rate.png             # obs (sólido) vs SDN (dashed)
+    ├── sat_rate_vs_theory.png        # scatter teórico vs SDN end-of-run
+    ├── requests_by_status.png        # bar chart (sólo --sae-test)
+    ├── latency_percentiles.png       # CDF log-X con p50/p90/p95/p99
+    ├── sae_errors_by_reason.png      # sólo --sae-test
+    ├── sae_status_over_time.png      # sólo --sae-test (requiere requests CSV)
+    └── sae_latency_p95_over_time.png # sólo --sae-test (requiere requests CSV)
 ```
 
 `tests/results/` está en `.gitignore`. Los plots usan `matplotlib`
-con backend `Agg` (headless OK).
+con backend `Agg` (headless OK). Si `matplotlib` no está instalado,
+las gráficas se omiten silenciosamente y los CSVs se siguen
+escribiendo.
+
+### Columnas CSV
+
+| CSV | Columnas |
+|-----|----------|
+| `data/generator_state.csv` | `t_log_iso, t_seconds, src, peer, commodity_id, enc, dec, ack_pending, emit_total, observed_keys_per_s, sdn_rate_keys_per_s, fill_ratio` |
+| `data/per_commodity.csv` | `src, peer, commodity_id, saturated, t_observed_seconds, t_theoretical_seconds, ratio, enc_at_sat, max_enc, emit_total_at_sat, last_observed_keys_per_s, last_sdn_rate_keys_per_s, samples_count` |
+| `data/theory_rates.csv` | `commodity_id, src, peer, theory_rate_kps, theory_t_saturate_seconds` |
+| `data/loadtest_metrics.csv` | `metric, label_key, label_value, value` |
+| `requests-*.csv` | `emitted_at_epoch, elapsed_seconds, status_code, sae_uid, target_dkms, …` (lo emite el pod loadtest) |
+
+### Análisis local con pandas
+
+```python
+import pandas as pd
+gen   = pd.read_csv("tests/results/.../data/generator_state.csv", parse_dates=["t_log_iso"])
+pc    = pd.read_csv("tests/results/.../data/per_commodity.csv")
+theo  = pd.read_csv("tests/results/.../data/theory_rates.csv")
+
+# Fill medio en steady-state por commodity
+steady = gen[gen.t_seconds > 60].groupby("commodity_id").enc.mean()
+
+# Comparar SDN vs teórico
+pc.merge(theo, on="commodity_id").assign(
+    rate_pct=lambda d: d.last_sdn_rate_keys_per_s / d.theory_rate_kps * 100
+)
+```
+
+### Re-renderizar plots sin volver a tocar EKS
+
+```bash
+# Por defecto cada corrida genera CSVs + plots. Si retocas un plot,
+# regéneralo localmente desde los CSVs (no necesita kubectl):
+python3 -m tests.cli.dkms_topo replot tests/results/2026-05-18T20-15-30-ring-n4
+
+# Desactivar generación CSV / plots durante el run (más rápido):
+python3 -m tests.cli.dkms_topo ring -n 4 --buffer-saturated --no-csv-export
+python3 -m tests.cli.dkms_topo ring -n 4 --buffer-saturated --no-plots
+```
 
 ## Códigos de salida
 

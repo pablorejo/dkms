@@ -68,6 +68,123 @@ def _kubectl_wait_available(
         )
 
 
+def _resolve_loadtest_pod(
+    namespace: str,
+    deployment_name: str,
+    *,
+    kubectl_runner: KubectlRunner,
+    kubectl_path: str,
+) -> str | None:
+    """Find a Pod backing the given Deployment in ``namespace``.
+
+    Returns the bare pod name (e.g. ``loadtest-ramp-x-abc-defgh``) or
+    ``None`` if no Pod was found (Deployment scaled to 0 or already
+    deleted).
+    """
+    args = [
+        kubectl_path,
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+        "-l",
+        f"app={deployment_name}",
+    ]
+    result = kubectl_runner(args)
+    if result.returncode != 0:
+        return None
+    names = result.stdout.split()
+    if not names:
+        # Fallback: filter by name prefix in case the Deployment's `app=`
+        # selector convention changes.
+        args2 = [
+            kubectl_path,
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ]
+        result2 = kubectl_runner(args2)
+        if result2.returncode != 0:
+            return None
+        for cand in result2.stdout.split():
+            if cand.startswith(deployment_name):
+                return cand
+        return None
+    return names[0]
+
+
+def _kubectl_cp_from_pod(
+    namespace: str,
+    pod: str,
+    remote_path: str,
+    local_path: Path,
+    *,
+    kubectl_runner: KubectlRunner,
+    kubectl_path: str,
+) -> bool:
+    """``kubectl cp <ns>/<pod>:<remote> <local>``. Returns False on failure."""
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    args = [
+        kubectl_path,
+        "cp",
+        f"{namespace}/{pod}:{remote_path}",
+        str(local_path),
+    ]
+    result = kubectl_runner(args)
+    if result.returncode != 0:
+        return False
+    return local_path.exists() and local_path.stat().st_size > 0
+
+
+def _try_extract_loadtest_outputs(
+    namespace: str,
+    deployment_name: str,
+    output_dir: Path,
+    *,
+    kubectl_runner: KubectlRunner,
+    kubectl_path: str,
+) -> dict[str, Path | None]:
+    """Best-effort copy of ``/var/loadtest-output/{requests,sae_timeline}.csv``
+    to ``<output_dir>/data/``.
+
+    The loadtest pod stays alive after its ramp finishes ("manteniendo
+    /metrics hasta SIGTERM" in the runner log), so as long as we call
+    this before the Deployment is deleted, ``kubectl cp`` works.
+
+    Returns ``{"requests_csv": Path or None, "sae_timeline_csv": Path or
+    None}`` — keys are always present, values are ``None`` for any file
+    that failed to copy (pod gone, file missing, kubectl error).
+    """
+    out: dict[str, Path | None] = {
+        "requests_csv": None,
+        "sae_timeline_csv": None,
+    }
+    pod = _resolve_loadtest_pod(
+        namespace, deployment_name,
+        kubectl_runner=kubectl_runner, kubectl_path=kubectl_path,
+    )
+    if pod is None:
+        return out
+    data_dir = output_dir / "data"
+    targets = [
+        ("requests_csv", "/var/loadtest-output/requests.csv", "loadtest_requests.csv"),
+        ("sae_timeline_csv", "/var/loadtest-output/sae_timeline.csv", "loadtest_sae_timeline.csv"),
+    ]
+    for key, remote, local_name in targets:
+        local = data_dir / local_name
+        if _kubectl_cp_from_pod(
+            namespace, pod, remote, local,
+            kubectl_runner=kubectl_runner, kubectl_path=kubectl_path,
+        ):
+            out[key] = local
+    return out
+
+
 def _scrape_metrics(
     namespace: str,
     deployment_name: str,
@@ -246,6 +363,10 @@ def submit_and_wait_loadtest(
     last_good_body: str | None = None
     scrape_error: str | None = None
     next_scrape = started + scrape_interval
+    extracted: dict[str, Path | None] = {
+        "requests_csv": None,
+        "sae_timeline_csv": None,
+    }
     try:
         while not event.is_set() and time.monotonic() < deadline:
             event.wait(timeout=1.0)
@@ -262,6 +383,23 @@ def submit_and_wait_loadtest(
                     scrape_error = None
                 except Exception as exc:  # noqa: BLE001
                     scrape_error = str(exc)
+                # Whenever a scrape succeeds the pod is reachable; this
+                # is also when ``kubectl cp`` can pull the per-request
+                # CSVs from /var/loadtest-output. We only attempt it
+                # once we have something to extract (after warmup +
+                # first ramp step), and only if we haven't got the file
+                # already.
+                if last_good_body is not None:
+                    fresh = _try_extract_loadtest_outputs(
+                        ns,
+                        deployment_name,
+                        Path(output_dir),
+                        kubectl_runner=runner,
+                        kubectl_path=kubectl_path,
+                    )
+                    for key, val in fresh.items():
+                        if val is not None:
+                            extracted[key] = val
                 next_scrape = time.monotonic() + scrape_interval
     finally:
         event.set()
@@ -284,6 +422,20 @@ def submit_and_wait_loadtest(
         if last_good_body is None:
             scrape_error = str(exc)
 
+    # Final cp attempt — the pod may still be alive (it waits for SIGTERM
+    # after the ramp finishes, before the orchestator stops the sim).
+    if last_good_body is not None:
+        fresh = _try_extract_loadtest_outputs(
+            ns,
+            deployment_name,
+            Path(output_dir),
+            kubectl_runner=runner,
+            kubectl_path=kubectl_path,
+        )
+        for key, val in fresh.items():
+            if val is not None:
+                extracted[key] = val
+
     scrape_ok = last_good_body is not None
     if scrape_ok:
         metrics_path.write_text(last_good_body or "", encoding="utf-8")
@@ -301,6 +453,8 @@ def submit_and_wait_loadtest(
         "scrape_ok": scrape_ok,
         "scrape_error": scrape_error,
         "elapsed_seconds": elapsed,
+        "requests_csv": extracted["requests_csv"],
+        "sae_timeline_csv": extracted["sae_timeline_csv"],
     }
 
 

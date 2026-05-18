@@ -288,3 +288,148 @@ def test_analyze_summary_quartiles_on_single_sample() -> None:
     assert s["ratio_count"] == 1
     # With one value, p25 == p75 == median
     assert s["median_ratio"] == s["p25_ratio"] == s["p75_ratio"]
+
+
+# -----------------------------------------------------------------------------
+# CSV exporters and write_csv/write_plots toggles
+# -----------------------------------------------------------------------------
+
+
+def _two_commodity_lines() -> list[str]:
+    return [
+        _state_line(
+            "2026-05-17T18:00:00Z", "node-2", enc=0, emit_total=0, observed=0.0, sdn=10.0
+        ),
+        _state_line(
+            "2026-05-17T18:00:01Z", "node-2", enc=99, emit_total=99, observed=10.0, sdn=10.0
+        ),
+        _state_line(
+            "2026-05-17T18:00:00Z", "node-3", enc=0, emit_total=0, observed=0.0, sdn=5.0
+        ),
+        _state_line(
+            "2026-05-17T18:00:01Z", "node-3", enc=49, emit_total=49, observed=5.0, sdn=5.0
+        ),
+    ]
+
+
+def test_analyze_writes_three_csvs_under_data_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        out = analyze_saturation(
+            log_dir,
+            buffer_size=100,
+            theory_rates={"node-1->node-2": 100.0, "node-1->node-3": 50.0},
+        )
+
+        data_dir = log_dir / "data"
+        gen = data_dir / "generator_state.csv"
+        pc = data_dir / "per_commodity.csv"
+        th = data_dir / "theory_rates.csv"
+        assert gen.exists() and pc.exists() and th.exists()
+        assert len(out["csvs"]) == 3
+        # Headers
+        assert gen.read_text().splitlines()[0].startswith("t_log_iso,t_seconds")
+        assert pc.read_text().splitlines()[0].startswith("src,peer,commodity_id")
+        assert th.read_text().splitlines()[0].startswith("commodity_id,src,peer")
+
+
+def test_analyze_write_csv_false_skips_csvs() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        out = analyze_saturation(
+            log_dir, 100, {"node-1->node-2": 100.0}, write_csv=False
+        )
+        assert out["csvs"] == []
+        assert not (log_dir / "data").exists()
+
+
+def test_analyze_write_plots_false_skips_plots() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        out = analyze_saturation(
+            log_dir, 100, {"node-1->node-2": 100.0}, write_plots=False
+        )
+        assert out["plots"] == []
+        assert not (log_dir / "plots").exists()
+
+
+def test_analyze_writes_plots_when_matplotlib_available() -> None:
+    pytest.importorskip("matplotlib")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        out = analyze_saturation(
+            log_dir,
+            100,
+            {"node-1->node-2": 100.0, "node-1->node-3": 50.0},
+        )
+        plot_dir = log_dir / "plots"
+        assert plot_dir.exists()
+        names = sorted(p.name for p in plot_dir.glob("*.png"))
+        assert "sat_enc_over_time.png" in names
+        assert "sat_ratios.png" in names
+        assert len(out["plots"]) == len(names)
+
+
+# -----------------------------------------------------------------------------
+# replot subcommand round-trip
+# -----------------------------------------------------------------------------
+
+
+def test_replot_regenerates_plots_from_csvs() -> None:
+    pytest.importorskip("matplotlib")
+    import argparse
+    from tests.cli.dkms_topo import _run_replot
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        analyze_saturation(
+            log_dir,
+            100,
+            {"node-1->node-2": 100.0, "node-1->node-3": 50.0},
+        )
+        plot_dir = log_dir / "plots"
+        for p in plot_dir.glob("*.png"):
+            p.unlink()
+        assert not list(plot_dir.glob("*.png"))
+
+        ns = argparse.Namespace(
+            output_dir=str(log_dir), buffer_enc_size=100, sat_threshold=0.95
+        )
+        rc = _run_replot(ns)
+        assert rc == 0
+        assert list(plot_dir.glob("*.png"))
+
+
+def test_replot_missing_data_dir_returns_error() -> None:
+    import argparse
+    from tests.cli.dkms_topo import _run_replot
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ns = argparse.Namespace(
+            output_dir=str(Path(tmpdir) / "empty"),
+            buffer_enc_size=100,
+            sat_threshold=0.95,
+        )
+        rc = _run_replot(ns)
+        assert rc == 1
+
+
+def test_replot_via_cli_run_dispatches() -> None:
+    pytest.importorskip("matplotlib")
+    from tests.cli.dkms_topo import run
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        _write_log(log_dir, "dkms-1.log", _two_commodity_lines())
+        analyze_saturation(
+            log_dir,
+            100,
+            {"node-1->node-2": 100.0, "node-1->node-3": 50.0},
+        )
+        rc = run(["replot", str(log_dir)])
+        assert rc == 0
