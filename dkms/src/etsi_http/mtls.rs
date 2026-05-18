@@ -82,13 +82,23 @@ pub async fn serve_mtls(
 
             let io = TokioIo::new(tls_stream);
             let mut builder = auto::Builder::new(TokioExecutor::new());
-            // `keep_alive_interval` requiere un timer global; sin él
-            // hyper 1.x panickea `"You must supply a timer."` la primera
-            // vez que el conexión llega al programador del keep-alive.
-            // El cliente DKMS↔DKMS (reqwest) viene con HTTP/2
-            // prior-knowledge, así que en la práctica el server entra por
-            // la rama `http2()`; conectamos el timer Tokio para que el
-            // keep-alive ping no rompa la conexión a mitad de request.
+            // Auto-detect HTTP/1.1 vs HTTP/2 from the stream prefix
+            // (or ALPN when present). Both branches need a timer:
+            //
+            // * The DKMS↔DKMS client (reqwest) negotiates HTTP/2
+            //   prior-knowledge — `http2().keep_alive_interval(...)`
+            //   requires `TokioTimer` or hyper 1.x panics.
+            // * The SAE plane is also hit by Python `requests` (used
+            //   by the loadtest pod when it talks directly to the
+            //   Service intra-cluster, bypassing the nginx-ingress
+            //   that does HTTP/1↔H2 translation). That client speaks
+            //   HTTP/1.1 over the same TLS port, so we keep h1 enabled
+            //   too. Without this the loadtest got status_code=0
+            //   connection errors (test_sae.runtime_dkms_base_url with
+            //   LOADTEST_DKMS_ENDPOINTS).
+            builder
+                .http1()
+                .timer(TokioTimer::new());
             builder
                 .http2()
                 .timer(TokioTimer::new())

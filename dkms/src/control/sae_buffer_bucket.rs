@@ -209,11 +209,46 @@ impl SaeBufferBuckets {
             let link_cap = rates_snap.get(peer.as_str()).copied().unwrap_or(0.0);
             let refill = (link_cap / *active as f64).max(0.0);
             let burst_floor = refill * self.observation_window.as_secs_f64();
-            let cap = burst_floor
+            // The model bound (max of refill×window, occupancy/N, min)
+            // is what the bucket can *grow to over time*. The instantaneous
+            // ceiling, however, is the **real buffer occupancy** — if the
+            // generator hasn't produced enough keys yet, the bucket must
+            // not promise more than what exists, or the caller pops an
+            // empty buffer and the response surfaces as 503
+            // (`TransportBufferEmpty`) when semantically it is 429
+            // (back-pressure: "rate-limited by buffer fill").
+            //
+            // We cap the bucket capacity at `occupancy` (real buffer
+            // level) so that consumes beyond the buffer never succeed
+            // here; instead they emit `RateLimited` → HTTP 429 like the
+            // user expects under sustained over-rate.
+            let cap_grow = burst_floor
                 .max(occupancy / *active as f64)
                 .max(self.min_capacity);
+            let cap = cap_grow.min(*occupancy);
             let bucket = Self::ensure_bucket(&mut state, peer, sae.as_str(), now);
             bucket.update_limits(now, refill, cap);
+            // Defensive pre-check: if the real buffer cannot service the
+            // requested cost right now, treat it as 429 directly. This
+            // matters when ``min_capacity > 0`` keeps the bucket alive
+            // with one stale token even though ``occupancy=0``.
+            if *occupancy < cost_per_peer {
+                for p in &consumed {
+                    if let Some(b) = state
+                        .buckets
+                        .get_mut(&(p.clone(), sae.as_str().to_string()))
+                    {
+                        b.refund(cost_per_peer);
+                    }
+                }
+                return Err(AdmitFailure {
+                    peer: peer.clone(),
+                    available: *occupancy,
+                    requested: cost_per_peer,
+                    active_sae_count: *active,
+                    capacity: cap,
+                });
+            }
             if let Err(available) = bucket.try_consume(now, cost_per_peer) {
                 // Rollback de buckets ya consumidos.
                 for p in &consumed {
