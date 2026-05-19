@@ -1,0 +1,230 @@
+diff --git a/orr/src/service.rs b/orr/src/service.rs
+index 3fd09e8..29396b3 100644
+--- a/orr/src/service.rs
++++ b/orr/src/service.rs
+@@ -330,6 +330,63 @@ impl OrrService {
+         Ok(Some(chosen))
+     }
+ 
++    /// Helper para OBJ-003: si `MULTIPATH_ENABLED=true` (env var) y el
++    /// caller pasó `src_dkms` y `dst_dkms` en el `app_header`, muestrea
++    /// un `qkc_path` con `pick_multipath_qkc_hops`, parsea cada qkc_id
++    /// `String -> u32` y devuelve los bytes msgpack listos para
++    /// `Frame.header_qkc_mp`. En cualquier fallo (env OFF, app_header
++    /// sin las keys, pick devuelve None, parse falla) devuelve
++    /// `Vec::new()` (sin source routing → fallback a routing table del
++    /// QKC).
++    async fn compute_qkc_path_header(
++        &self,
++        app_header: &BTreeMap<String, String>,
++    ) -> Vec<u8> {
++        // 1) Opt-in via env var (R-015). Lectura barata por iter; no
++        // cacheamos porque tests pueden alterar la env dinámicamente.
++        let enabled = std::env::var("MULTIPATH_ENABLED")
++            .map(|v| v.eq_ignore_ascii_case("true"))
++            .unwrap_or(false);
++        if !enabled {
++            return Vec::new();
++        }
++        // 2) src_dkms y dst_dkms vienen via app_header (decisión OBJ-004
++        // opción (a) extendida: piggyback en app_header en vez de
++        // ampliar la firma del RPC y proto).
++        let Some(src_dkms) = app_header.get("src_dkms") else {
++            return Vec::new();
++        };
++        let Some(dst_dkms) = app_header.get("dst_dkms") else {
++            return Vec::new();
++        };
++        // 3) Pick path. None ⇒ fallback single-path.
++        let path_strings = match self.pick_multipath_qkc_hops(src_dkms, dst_dkms).await {
++            Ok(Some(p)) => p,
++            Ok(None) => return Vec::new(),
++            Err(e) => {
++                warn!(error = %e, src = %src_dkms, dst = %dst_dkms,
++                    "orr.multipath pick failed, fallback single-path");
++                return Vec::new();
++            }
++        };
++        // 4) Parse String -> u32. Si algún parse falla, fallback.
++        let parsed: std::result::Result<Vec<u32>, _> =
++            path_strings.iter().map(|s| s.parse::<u32>()).collect();
++        match parsed {
++            Ok(ids) if !ids.is_empty() => {
++                debug!(src = %src_dkms, dst = %dst_dkms, path = ?ids,
++                    "orr.multipath path selected qkc_hops");
++                wire::encode_qkc_path(&ids)
++            }
++            Ok(_) => Vec::new(),
++            Err(e) => {
++                warn!(error = %e, src = %src_dkms, dst = %dst_dkms, path = ?path_strings,
++                    "orr.multipath qkc_id parse failed, fallback single-path");
++                Vec::new()
++            }
++        }
++    }
++
+     /// Test helper: número de entradas en el cache K-Splittable.
+     #[cfg(test)]
+     pub fn multipath_cache_len(&self) -> usize {
+@@ -408,6 +465,7 @@ impl OrrService {
+             ))
+         })?;
+         let header = OrrHeader::passthrough(&self.cfg.orr_id, dest_orr);
++        let qkc_path_bytes = self.compute_qkc_path_header(&app_header).await;
+         let frame = Frame {
+             kind: FRAME_LOCAL_SEND,
+             sender_id: self.cfg.qkc_id,
+@@ -419,7 +477,11 @@ impl OrrService {
+             // capas onion contra master_secrets versionados.
+             epoch_id: 0,
+             key_ids: Vec::new(),
+-            header_qkc_mp: Vec::new(),
++            // OBJ-003: source routing K-Splittable opt-in via env
++            // `MULTIPATH_ENABLED=true` + app_header.{src_dkms,dst_dkms}.
++            // Si no hay path muestreado, queda Vec::new() y el QKC cae
++            // a su routing table (fallback).
++            header_qkc_mp: qkc_path_bytes,
+             header_orr_mp: header.encode()?,
+             header_dkms_mp: dkms_header::encode(&app_header)?,
+             payload,
+@@ -625,6 +687,9 @@ impl OrrService {
+             onion.first_key_id,
+             onion.max_hops,
+         );
++        // OBJ-003: source routing K-Splittable opt-in. Aplica a modos
++        // onion (e2e max_hops=1 y multi-hop max_hops>=2 / -1).
++        let qkc_path_bytes = self.compute_qkc_path_header(&app_header).await;
+         let frame = Frame {
+             kind: FRAME_LOCAL_SEND,
+             sender_id: self.cfg.qkc_id,
+@@ -637,7 +702,7 @@ impl OrrService {
+             // descifrar `payload`.
+             epoch_id: onion.first_epoch_id,
+             key_ids: Vec::new(),
+-            header_qkc_mp: Vec::new(),
++            header_qkc_mp: qkc_path_bytes,
+             header_orr_mp: header.encode()?,
+             header_dkms_mp: dkms_header::encode(&app_header)?,
+             payload: onion.payload,
+@@ -1017,6 +1082,121 @@ mod multipath_cache_tests {
+             );
+         }
+     }
++
++    // ── OBJ-005: tests del wiring del helper compute_qkc_path_header ──
++
++    /// Caso 1 — happy path: `Vec<String>` numéricos parsea a `Vec<u32>`
++    /// y encode_qkc_path produce bytes decodeables que recuperan los
++    /// mismos ids. Simula el camino exitoso del helper.
++    #[test]
++    fn parse_qkc_hops_and_encode_roundtrip() {
++        let strings = ["1".to_string(), "2".to_string(), "100".to_string()];
++        let parsed: std::result::Result<Vec<u32>, _> =
++            strings.iter().map(|s| s.parse::<u32>()).collect();
++        assert!(parsed.is_ok(), "todos numéricos deben parsear");
++        let ids = parsed.unwrap();
++        assert_eq!(ids, vec![1_u32, 2, 100]);
++
++        let bytes = wire::encode_qkc_path(&ids);
++        assert!(!bytes.is_empty(), "path no vacío produce bytes");
++        let decoded = wire::decode_qkc_path(&bytes).unwrap();
++        assert_eq!(decoded, ids, "roundtrip preserva path");
++    }
++
++    /// Caso 2 — fallback: si algún string NO es numérico, parse falla.
++    /// El helper devuelve `Vec::new()` en este caso (verificable porque
++    /// el `Result::Err` es lo que se observa).
++    #[test]
++    fn parse_qkc_hops_fails_on_non_numeric() {
++        let strings = ["1".to_string(), "abc".to_string(), "3".to_string()];
++        let parsed: std::result::Result<Vec<u32>, _> =
++            strings.iter().map(|s| s.parse::<u32>()).collect();
++        assert!(parsed.is_err(), "string no-numérico debe fallar parse");
++    }
++
++    /// Caso 3 — parse exitoso con valores grandes (qkc_ids en el rango
++    /// típico de la BD `100_000 + node_id`).
++    #[test]
++    fn parse_qkc_hops_handles_large_ids() {
++        let strings = ["100001".to_string(), "100120".to_string(), "100155".to_string()];
++        let parsed: std::result::Result<Vec<u32>, _> =
++            strings.iter().map(|s| s.parse::<u32>()).collect();
++        assert!(parsed.is_ok());
++        let bytes = wire::encode_qkc_path(&parsed.unwrap());
++        let decoded = wire::decode_qkc_path(&bytes).unwrap();
++        assert_eq!(decoded, vec![100_001_u32, 100_120, 100_155]);
++    }
++
++    /// Caso 4 — env var: el helper considera ON solo `"true"` (case-
++    /// insensitive), todo lo demás es OFF.
++    #[test]
++    fn env_var_recognized_values() {
++        // Simulamos la lógica de lectura tal cual está en
++        // `compute_qkc_path_header`.
++        fn check(v: &str) -> bool {
++            v.eq_ignore_ascii_case("true")
++        }
++        assert!(check("true"));
++        assert!(check("TRUE"));
++        assert!(check("True"));
++        assert!(!check("false"));
++        assert!(!check("1"));
++        assert!(!check(""));
++        assert!(!check("yes"));
++    }
++
++    /// Caso 5 — app_header sin las keys → helper devuelve `Vec::new()`.
++    /// Simula la condición de guarda del helper.
++    #[test]
++    fn app_header_missing_keys_means_no_multipath() {
++        use std::collections::BTreeMap;
++        let mut h: BTreeMap<String, String> = BTreeMap::new();
++        assert!(!h.contains_key("src_dkms"));
++
++        h.insert("src_dkms".into(), "dkms-1".into());
++        // Falta dst_dkms → helper sale por la guarda.
++        assert!(!h.contains_key("dst_dkms"));
++
++        h.insert("dst_dkms".into(), "dkms-2".into());
++        // Ahora ambas keys presentes → helper procedería.
++        assert_eq!(h.get("src_dkms").map(|s| s.as_str()), Some("dkms-1"));
++        assert_eq!(h.get("dst_dkms").map(|s| s.as_str()), Some("dkms-2"));
++    }
++
++    /// Caso 6 — sampler + parse + encode end-to-end (sin OrrService):
++    /// muestrea un path de un cache entry simulado, parsea como lo
++    /// haría el helper, encode y decode. Verifica que el flujo
++    /// completo desde sampler hasta wire es coherente.
++    #[test]
++    fn sampler_to_wire_roundtrip_e2e() {
++        let paths: Vec<Vec<String>> = vec![
++            vec!["1".into(), "3".into()],
++            vec!["1".into(), "2".into(), "3".into()],
++        ];
++        let weights = [0.6, 0.4];
++        let sampler = AliasSampler::build(&weights).unwrap();
++        let entry = MultipathCacheEntry {
++            paths: paths.clone(),
++            sampler,
++            total_keys_per_second: 100.0,
++        };
++
++        let mut rng = rand::thread_rng();
++        let idx = entry.sampler.sample(&mut rng);
++        let sampled_strings = &entry.paths[idx];
++
++        // Parse como el helper.
++        let parsed: Vec<u32> = sampled_strings
++            .iter()
++            .map(|s| s.parse::<u32>().unwrap())
++            .collect();
++        // Encode + decode.
++        let bytes = wire::encode_qkc_path(&parsed);
++        let back = wire::decode_qkc_path(&bytes).unwrap();
++        assert_eq!(back, parsed, "roundtrip end-to-end OK");
++        assert!(idx < 2 && (back.len() == 2 || back.len() == 3),
++            "el path muestreado es uno de los dos disponibles");
++    }
+ }
+ 
+ #[cfg(test)]

@@ -1,0 +1,187 @@
+//! Helpers de encode/decode del `Frame.header_qkc_mp` cuando lleva un
+//! `qkc_path` (source routing K-Splittable MCF, opción 2).
+//!
+//! Formato msgpack:
+//!
+//! ```text
+//! {"qkc_path": [u32, u32, ...]}
+//! ```
+//!
+//! Convención: si el header_qkc_mp está vacío (`Vec::new()`), significa
+//! "no source routing" y el QKC enruta por su routing table normal por
+//! `dest_final`. Esto se distingue del path con array vacío (`[]`), que
+//! no tiene sentido semánticamente; este módulo NUNCA produce bytes
+//! para un path vacío — `encode_qkc_path(&[])` devuelve `Vec::new()`.
+//!
+//! Backwards-compat: un QKC que recibe `header_qkc_mp` con bytes
+//! desconocidos (no este formato) debe caer al fallback routing table.
+//! `decode_qkc_path` retorna `Err` en ese caso; el caller decide.
+
+use serde::{Deserialize, Serialize};
+
+/// Errores de codificación / decodificación.
+#[derive(Debug, thiserror::Error)]
+pub enum QkcPathError {
+    #[error("msgpack encode failed: {0}")]
+    Encode(String),
+    #[error("msgpack decode failed: {0}")]
+    Decode(String),
+    #[error("qkc_path is empty, cannot pop next hop")]
+    EmptyPath,
+}
+
+/// Wrapper interno para que serde produzca el map con la key `qkc_path`.
+/// `BTreeMap<String, Vec<u32>>` daría el mismo bytes pero más overhead;
+/// preferimos un struct con `#[serde(rename)]` para emitir exactamente
+/// lo declarado.
+#[derive(Serialize, Deserialize)]
+struct QkcPathFrame {
+    #[serde(rename = "qkc_path")]
+    qkc_path: Vec<u32>,
+}
+
+/// Encode un path como msgpack. Path vacío → `Vec::new()` (sin map, sin
+/// nada) — convención del módulo.
+pub fn encode_qkc_path(path: &[u32]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let frame = QkcPathFrame {
+        qkc_path: path.to_vec(),
+    };
+    // rmp_serde::to_vec produce un map fixmap; encoding determinístico.
+    rmp_serde::to_vec(&frame).unwrap_or_else(|_| Vec::new())
+}
+
+/// Decode msgpack a un `Vec<u32>`. Bytes vacíos → `Ok(vec![])` (no path,
+/// el caller hace fallback). Bytes con formato desconocido → `Err`.
+pub fn decode_qkc_path(bytes: &[u8]) -> Result<Vec<u32>, QkcPathError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let frame: QkcPathFrame = rmp_serde::from_slice(bytes)
+        .map_err(|e| QkcPathError::Decode(e.to_string()))?;
+    Ok(frame.qkc_path)
+}
+
+/// Pop el primer hop del path. Devuelve `(next_hop, encoded_rest)`. Si
+/// el resto del path queda vacío, `encoded_rest` es `Vec::new()` (la
+/// convención del módulo). Si los bytes están vacíos o el path interno
+/// está vacío, devuelve `EmptyPath`.
+///
+/// El caller (QKC) usa `next_hop` como destino del primer hop y
+/// reescribe `frame.header_qkc_mp = encoded_rest`.
+pub fn pop_qkc_path_next_hop(bytes: &[u8]) -> Result<(u32, Vec<u8>), QkcPathError> {
+    let path = decode_qkc_path(bytes)?;
+    if path.is_empty() {
+        return Err(QkcPathError::EmptyPath);
+    }
+    let next_hop = path[0];
+    let rest = &path[1..];
+    Ok((next_hop, encode_qkc_path(rest)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_empty_path_returns_empty_bytes() {
+        assert_eq!(encode_qkc_path(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn decode_empty_bytes_returns_empty_path() {
+        let got = decode_qkc_path(&[]).unwrap();
+        assert_eq!(got, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn roundtrip_single_hop() {
+        let path = vec![42_u32];
+        let bytes = encode_qkc_path(&path);
+        let back = decode_qkc_path(&bytes).unwrap();
+        assert_eq!(back, path);
+    }
+
+    #[test]
+    fn roundtrip_multi_hop() {
+        let path = vec![1_u32, 2, 3, 7, 100, 65535];
+        let bytes = encode_qkc_path(&path);
+        let back = decode_qkc_path(&bytes).unwrap();
+        assert_eq!(back, path);
+    }
+
+    #[test]
+    fn pop_single_hop_returns_empty_rest() {
+        let bytes = encode_qkc_path(&[42]);
+        let (next, rest_bytes) = pop_qkc_path_next_hop(&bytes).unwrap();
+        assert_eq!(next, 42);
+        assert!(rest_bytes.is_empty(), "rest debe ser vacío convención");
+        // Y decodear ese rest da Vec vacío.
+        assert_eq!(decode_qkc_path(&rest_bytes).unwrap(), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn pop_multi_hop_returns_rest() {
+        let bytes = encode_qkc_path(&[2, 3, 4]);
+        let (next, rest_bytes) = pop_qkc_path_next_hop(&bytes).unwrap();
+        assert_eq!(next, 2);
+        let rest = decode_qkc_path(&rest_bytes).unwrap();
+        assert_eq!(rest, vec![3_u32, 4]);
+    }
+
+    #[test]
+    fn pop_chained_consumes_all_hops() {
+        let mut bytes = encode_qkc_path(&[10, 20, 30, 40]);
+        let mut consumed: Vec<u32> = Vec::new();
+        loop {
+            match pop_qkc_path_next_hop(&bytes) {
+                Ok((hop, rest)) => {
+                    consumed.push(hop);
+                    bytes = rest;
+                }
+                Err(QkcPathError::EmptyPath) => break,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(consumed, vec![10, 20, 30, 40]);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn pop_empty_bytes_returns_empty_path_error() {
+        match pop_qkc_path_next_hop(&[]) {
+            Err(QkcPathError::EmptyPath) => {}
+            other => panic!("expected EmptyPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_garbage_returns_err() {
+        // Bytes no-msgpack o msgpack pero no de nuestro formato.
+        let garbage = vec![0xff, 0xff, 0xff, 0xff];
+        let r = decode_qkc_path(&garbage);
+        assert!(r.is_err(), "garbage debe ser Err, got {r:?}");
+    }
+
+    #[test]
+    fn decode_msgpack_with_wrong_schema_returns_err() {
+        // msgpack válido pero sin la key qkc_path → Err.
+        // Map vacío:
+        let empty_map: Vec<u8> = vec![0x80];
+        let r = decode_qkc_path(&empty_map);
+        assert!(r.is_err(), "map sin qkc_path debe ser Err");
+    }
+
+    #[test]
+    fn bytes_size_reasonable_for_typical_path() {
+        // Path típico 5 hops, qkc_ids u32 pequeños: bytes ≤ 30.
+        let bytes = encode_qkc_path(&[1, 2, 3, 4, 5]);
+        assert!(
+            bytes.len() <= 30,
+            "5 hops debería caber en ≤30 bytes, got {}",
+            bytes.len()
+        );
+    }
+}

@@ -1,0 +1,44 @@
+{
+  "totals": {
+    "requests": 2241.0,
+    "by_status": {
+      "200": 2241.0
+    }
+  },
+  "status_classes": {
+    "ok": 2241.0
+  },
+  "percentages": {
+    "ok": 100.0
+  },
+  "latency": {
+    "count": 2241.0,
+    "sum_seconds": 19.10789704322815,
+    "mean_seconds": 0.008526504704697969,
+    "percentiles_seconds": {
+      "p50": 0.0261921458625526,
+      "p90": 0.047145862552594675,
+      "p95": 0.04976507713884993,
+      "p99": 0.09325543478260878
+    }
+  },
+  "params": {
+    "start_saes": 5,
+    "end_saes": 50,
+    "step_saes": 5,
+    "interval_seconds": 15.0,
+    "warmup_seconds": 30.0,
+    "per_sae_lambda": 0.5,
+    "key_size_bits": 256,
+    "request_timeout_seconds": 60
+  },
+  "plots": [
+    "agent-multipath-opt2-deploy/iterations/iter_019/post/cuello_bridge/plots/requests_by_status.png",
+    "agent-multipath-opt2-deploy/iterations/iter_019/post/cuello_bridge/plots/latency_percentiles.png",
+    "agent-multipath-opt2-deploy/iterations/iter_019/post/cuello_bridge/plots/sae_status_over_time.png",
+    "agent-multipath-opt2-deploy/iterations/iter_019/post/cuello_bridge/plots/sae_latency_p95_over_time.png"
+  ],
+  "csvs": [
+    "agent-multipath-opt2-deploy/iterations/iter_019/post/cuello_bridge/data/loadtest_metrics.csv"
+  ]
+}

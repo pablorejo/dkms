@@ -1,0 +1,493 @@
+{
+  "name": "random-n20-d3.0-srnd",
+  "description": null,
+  "sdn": {
+    "ip": "172.30.0.2",
+    "port": 3000,
+    "type_http": "http"
+  },
+  "nodes": [
+    {
+      "uid": "node-132",
+      "node_id": 132,
+      "label": "DKMS 132",
+      "x": 580.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-133",
+      "node_id": 133,
+      "label": "DKMS 133",
+      "x": 567.27469423674,
+      "y": 300.3444185374863,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-134",
+      "node_id": 134,
+      "label": "DKMS 134",
+      "x": 530.3444185374864,
+      "y": 372.82416559604303,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-135",
+      "node_id": 135,
+      "label": "DKMS 135",
+      "x": 472.82416559604303,
+      "y": 430.3444185374864,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-136",
+      "node_id": 136,
+      "label": "DKMS 136",
+      "x": 400.3444185374863,
+      "y": 467.27469423673995,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-137",
+      "node_id": 137,
+      "label": "DKMS 137",
+      "x": 320.0,
+      "y": 480.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-138",
+      "node_id": 138,
+      "label": "DKMS 138",
+      "x": 239.65558146251368,
+      "y": 467.27469423673995,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-139",
+      "node_id": 139,
+      "label": "DKMS 139",
+      "x": 167.17583440395703,
+      "y": 430.3444185374864,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-140",
+      "node_id": 140,
+      "label": "DKMS 140",
+      "x": 109.65558146251368,
+      "y": 372.82416559604303,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-141",
+      "node_id": 141,
+      "label": "DKMS 141",
+      "x": 72.72530576326008,
+      "y": 300.3444185374864,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-142",
+      "node_id": 142,
+      "label": "DKMS 142",
+      "x": 60.0,
+      "y": 220.00000000000003,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-143",
+      "node_id": 143,
+      "label": "DKMS 143",
+      "x": 72.72530576326002,
+      "y": 139.6555814625138,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-144",
+      "node_id": 144,
+      "label": "DKMS 144",
+      "x": 109.65558146251362,
+      "y": 67.17583440395703,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-145",
+      "node_id": 145,
+      "label": "DKMS 145",
+      "x": 167.17583440395697,
+      "y": 9.65558146251368,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-146",
+      "node_id": 146,
+      "label": "DKMS 146",
+      "x": 239.65558146251362,
+      "y": -27.27469423673992,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-147",
+      "node_id": 147,
+      "label": "DKMS 147",
+      "x": 319.99999999999994,
+      "y": -40.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-148",
+      "node_id": 148,
+      "label": "DKMS 148",
+      "x": 400.34441853748626,
+      "y": -27.274694236739947,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-149",
+      "node_id": 149,
+      "label": "DKMS 149",
+      "x": 472.8241655960429,
+      "y": 9.655581462513624,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-150",
+      "node_id": 150,
+      "label": "DKMS 150",
+      "x": 530.3444185374863,
+      "y": 67.17583440395691,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-151",
+      "node_id": 151,
+      "label": "DKMS 151",
+      "x": 567.27469423674,
+      "y": 139.65558146251362,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    }
+  ],
+  "links": [
+    {
+      "uid": "edge-node-135-node-143",
+      "source_uid": "node-143",
+      "target_uid": "node-135",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-143",
+      "source_uid": "node-143",
+      "target_uid": "node-136",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-148",
+      "source_uid": "node-148",
+      "target_uid": "node-136",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-133-node-143",
+      "source_uid": "node-143",
+      "target_uid": "node-133",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-132-node-135",
+      "source_uid": "node-132",
+      "target_uid": "node-135",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-138",
+      "source_uid": "node-136",
+      "target_uid": "node-138",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-140",
+      "source_uid": "node-136",
+      "target_uid": "node-140",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-141",
+      "source_uid": "node-141",
+      "target_uid": "node-136",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-141-node-142",
+      "source_uid": "node-141",
+      "target_uid": "node-142",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-132-node-145",
+      "source_uid": "node-132",
+      "target_uid": "node-145",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-132-node-146",
+      "source_uid": "node-132",
+      "target_uid": "node-146",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-148-node-149",
+      "source_uid": "node-148",
+      "target_uid": "node-149",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-135-node-137",
+      "source_uid": "node-135",
+      "target_uid": "node-137",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-144-node-149",
+      "source_uid": "node-144",
+      "target_uid": "node-149",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-151",
+      "source_uid": "node-151",
+      "target_uid": "node-136",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-134-node-141",
+      "source_uid": "node-141",
+      "target_uid": "node-134",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-133-node-150",
+      "source_uid": "node-150",
+      "target_uid": "node-133",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-136-node-139",
+      "source_uid": "node-136",
+      "target_uid": "node-139",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-134-node-147",
+      "source_uid": "node-147",
+      "target_uid": "node-134",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-146-node-151",
+      "source_uid": "node-146",
+      "target_uid": "node-151",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-137-node-142",
+      "source_uid": "node-142",
+      "target_uid": "node-137",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-139-node-149",
+      "source_uid": "node-149",
+      "target_uid": "node-139",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-132-node-141",
+      "source_uid": "node-132",
+      "target_uid": "node-141",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-137-node-139",
+      "source_uid": "node-137",
+      "target_uid": "node-139",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-145-node-151",
+      "source_uid": "node-145",
+      "target_uid": "node-151",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-134-node-135",
+      "source_uid": "node-134",
+      "target_uid": "node-135",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-143-node-150",
+      "source_uid": "node-143",
+      "target_uid": "node-150",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-145-node-148",
+      "source_uid": "node-145",
+      "target_uid": "node-148",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-140-node-144",
+      "source_uid": "node-144",
+      "target_uid": "node-140",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-135-node-151",
+      "source_uid": "node-151",
+      "target_uid": "node-135",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    }
+  ]
+}

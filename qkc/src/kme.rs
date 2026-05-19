@@ -20,8 +20,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etsi::{
-    binary,
-    v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID, Etsi014KeyIDs},
+    v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID},
     Base64Bytes,
 };
 use reqwest::{
