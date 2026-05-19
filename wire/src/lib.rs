@@ -13,13 +13,11 @@
 //!   payload          ← qkc_crypt{ orr_crypt{ body_dkms } }
 //!   header_dkms_mp   ← cleartext, lo añade DKMS, nadie lo toca
 //!   header_orr_mp    ← cleartext, lo añade ORR, nadie lo toca
-//!   header_qkc_mp    ← cleartext, lo añade QKC, varía hop a hop
 //! ```
 //!
 //! El QKC propaga `header_orr_mp` y `header_dkms_mp` byte-a-byte sin
-//! parsearlos. Solo escribe/lee `header_qkc_mp`. El ORR equivalente con
-//! `header_orr_mp`. El DKMS pone los metadatos de la clave que está
-//! transportando en `header_dkms_mp`.
+//! parsearlos. El ORR escribe/lee `header_orr_mp`. El DKMS pone los
+//! metadatos de la clave que está transportando en `header_dkms_mp`.
 //!
 //! Confidencialidad del payload: la pone el OTP del enlace QKC↔QKC. Los
 //! frames LOCAL viajan en claro sobre TCP de localhost; el riesgo de
@@ -86,7 +84,7 @@ pub const FRAME_ACK: u8 = 0x03;
 /// cifrado del payload (OTP del enlace) y del routing".
 pub const FRAME_LOCAL_SEND: u8 = 0x10;
 /// QKC → ORR: "te entrego este payload que llegó dirigido a este
-/// nodo". `header_qkc_mp` ya está quitado (vacío) — el ORR solo ve
+/// nodo". El ORR solo ve
 /// `header_orr_mp`, `header_dkms_mp` y el payload.
 pub const FRAME_LOCAL_DELIVER: u8 = 0x11;
 
@@ -131,10 +129,6 @@ pub struct Frame {
     /// (compatibilidad con código legado antes del audit H-3).
     pub epoch_id: u32,
     pub key_ids: Vec<String>,
-    /// Header QKC en cleartext (msgpack). Lo escribe/lee solo el QKC.
-    /// Reservado para metadatos del propio QKC (priority, ttl, etc.);
-    /// hoy va vacío.
-    pub header_qkc_mp: Vec<u8>,
     /// Header ORR en cleartext (msgpack). Lo escribe el ORR origen y lo
     /// reescribe cada ORR que pela una capa onion. El QKC NO lo toca:
     /// lo propaga byte-a-byte.
@@ -158,7 +152,6 @@ impl Frame {
             key_size_bits: 0,
             epoch_id: 0,
             key_ids: Vec::new(),
-            header_qkc_mp: Vec::new(),
             header_orr_mp: Vec::new(),
             header_dkms_mp: Vec::new(),
             payload: Vec::new(),
@@ -183,8 +176,6 @@ impl Frame {
             + 1
             + (key_id_len as usize) * self.key_ids.len()
             + 2
-            + self.header_qkc_mp.len()
-            + 2
             + self.header_orr_mp.len()
             + 2
             + self.header_dkms_mp.len()
@@ -207,8 +198,6 @@ impl Frame {
         for k in &self.key_ids {
             buf.put_slice(k.as_bytes());
         }
-        buf.put_u16_le(self.header_qkc_mp.len() as u16);
-        buf.put_slice(&self.header_qkc_mp);
         buf.put_u16_le(self.header_orr_mp.len() as u16);
         buf.put_slice(&self.header_orr_mp);
         buf.put_u16_le(self.header_dkms_mp.len() as u16);
@@ -240,7 +229,6 @@ impl Frame {
             key_ids.push(String::from_utf8(buf).map_err(|_| WireError::Truncated("key_id utf-8"))?);
         }
 
-        let header_qkc_mp = read_lp16(&mut body, "header_qkc")?;
         let header_orr_mp = read_lp16(&mut body, "header_orr")?;
         let header_dkms_mp = read_lp16(&mut body, "header_dkms")?;
 
@@ -261,7 +249,6 @@ impl Frame {
             key_size_bits,
             epoch_id,
             key_ids,
-            header_qkc_mp,
             header_orr_mp,
             header_dkms_mp,
             payload,
@@ -364,7 +351,6 @@ mod tests {
             key_size_bits: 256,
             epoch_id: 0,
             key_ids: vec!["abcdefgh".into()],
-            header_qkc_mp: vec![0x80], // empty msgpack map
             header_orr_mp: vec![0x81, 0xa4, 0x66, 0x72, 0x6f, 0x6d, 0xa1, 0x41], // {"from":"A"}
             header_dkms_mp: vec![0x81, 0xa2, 0x69, 0x64, 0xa3, 0x6b, 0x33, 0x37], // {"id":"k37"}
             payload: vec![0xde, 0xad, 0xbe, 0xef],
@@ -378,7 +364,6 @@ mod tests {
         assert_eq!(f.key_size_bits, f2.key_size_bits);
         assert_eq!(f.epoch_id, f2.epoch_id);
         assert_eq!(f.key_ids, f2.key_ids);
-        assert_eq!(f.header_qkc_mp, f2.header_qkc_mp);
         assert_eq!(f.header_orr_mp, f2.header_orr_mp);
         assert_eq!(f.header_dkms_mp, f2.header_dkms_mp);
         assert_eq!(f.payload, f2.payload);
@@ -396,7 +381,6 @@ mod tests {
             key_size_bits: 0,
             epoch_id: 0,
             key_ids: vec![],
-            header_qkc_mp: vec![],
             header_orr_mp: vec![],
             header_dkms_mp: vec![],
             payload: vec![1, 2, 3, 4, 5],
@@ -404,7 +388,6 @@ mod tests {
         let buf = f.encode();
         let (_pref, body) = buf.split_at(FIXED_PREFIX);
         let f2 = Frame::decode_body(body).unwrap();
-        assert!(f2.header_qkc_mp.is_empty());
         assert!(f2.header_orr_mp.is_empty());
         assert!(f2.header_dkms_mp.is_empty());
         assert_eq!(f2.epoch_id, 0);
@@ -420,7 +403,6 @@ mod tests {
         assert_eq!(f2.sender_id, 0);
         assert_eq!(f2.payload.len(), 0);
         assert_eq!(f2.epoch_id, 0);
-        assert!(f2.header_qkc_mp.is_empty());
         assert!(f2.header_orr_mp.is_empty());
         assert!(f2.header_dkms_mp.is_empty());
     }
@@ -437,7 +419,6 @@ mod tests {
         buf.put_u32(0); // epoch_id (BE)
         buf.put_u8(0); // n_key_ids
         buf.put_u8(0); // key_id_len
-        buf.put_u16_le(0); // hdr_qkc len
         buf.put_u16_le(0); // hdr_orr len
                            // Cortamos antes de hdr_dkms len → Truncated.
         let err = Frame::decode_body(&buf).unwrap_err();
@@ -456,7 +437,6 @@ mod tests {
             key_size_bits: 0,
             epoch_id: 0xDEADBEEF,
             key_ids: vec![],
-            header_qkc_mp: vec![],
             header_orr_mp: vec![],
             header_dkms_mp: vec![],
             payload: vec![0xAA, 0xBB],

@@ -19,32 +19,11 @@ use tracing::debug;
 
 use common::proto::sdn::v1::{
     sdn_control_client::SdnControlClient, GetOrrPathRequest, GetOrrPathResponse,
-    GetPathsWithRatiosRequest, GetPathsWithRatiosResponse, StreamTopologyRequest,
-    TopologyEvent,
+    StreamTopologyRequest, TopologyEvent,
 };
 use tonic::Streaming;
 
 use crate::error::{OrrError, Result};
-
-/// Path con su ratio y rate absoluto, devuelto por el solver
-/// K-Splittable MCF del SDN. El campo `qkc_hops` es la lista
-/// `src_qkc → … → dst_qkc` (ambos extremos incluidos).
-#[derive(Debug, Clone)]
-pub struct PathWithRatio {
-    pub qkc_hops: Vec<String>,
-    pub omega: f64,
-    pub keys_per_second: f64,
-}
-
-/// Respuesta completa del RPC `GetPathsWithRatios`. Si `paths` está
-/// vacío y `total_keys_per_second == 0`, el flow está en Saturated o
-/// el commodity no existe — el caller debe hacer fallback a
-/// single-path (`get_orr_path`) o no enviar.
-#[derive(Debug, Clone, Default)]
-pub struct PathsWithRatios {
-    pub paths: Vec<PathWithRatio>,
-    pub total_keys_per_second: f64,
-}
 
 #[derive(Clone)]
 pub struct SdnClient {
@@ -105,48 +84,5 @@ impl SdnClient {
             .map_err(|s| OrrError::Relay(format!("sdn get_orr_path: {s}")))?
             .into_inner();
         Ok(resp.orrs)
-    }
-
-    /// K-Splittable MCF: pide al SDN los K paths (con ratios) para el
-    /// commodity `(src_dkms → dst_dkms)`. El caller los cachea y
-    /// muestrea por alias method en cada envío.
-    ///
-    /// La respuesta es vacía si:
-    /// - El flow está Saturated (rate=0 en el snapshot).
-    /// - `src_dkms == dst_dkms`.
-    /// - Ambos DKMS están anclados al mismo QKC físico.
-    ///
-    /// En esos casos el caller debe fallback a `get_orr_path` o no
-    /// enviar.
-    pub async fn get_paths_with_ratios(
-        &self,
-        src_dkms: &str,
-        dst_dkms: &str,
-    ) -> Result<PathsWithRatios> {
-        let mut c = SdnControlClient::new(self.channel.clone());
-        let req = tonic::Request::new(GetPathsWithRatiosRequest {
-            src_dkms: src_dkms.to_string(),
-            dst_dkms: dst_dkms.to_string(),
-        });
-        let resp: GetPathsWithRatiosResponse = tokio::time::timeout(
-            self.rpc_timeout,
-            c.get_paths_with_ratios(req),
-        )
-        .await
-        .map_err(|_| OrrError::Relay("sdn get_paths_with_ratios timeout".into()))?
-        .map_err(|s| OrrError::Relay(format!("sdn get_paths_with_ratios: {s}")))?
-        .into_inner();
-        Ok(PathsWithRatios {
-            paths: resp
-                .paths
-                .into_iter()
-                .map(|p| PathWithRatio {
-                    qkc_hops: p.qkc_hops,
-                    omega: p.omega,
-                    keys_per_second: p.keys_per_second,
-                })
-                .collect(),
-            total_keys_per_second: resp.total_keys_per_second,
-        })
     }
 }

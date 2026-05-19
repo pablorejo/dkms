@@ -29,10 +29,6 @@ pub struct SdnConfig {
     /// Debounce window for topology push events (ms).
     #[serde(default = "default_debounce")]
     pub push_debounce_ms: u64,
-
-    /// K used by the K-shortest-paths pre-computation in the MCF solver.
-    #[serde(default = "default_k_paths")]
-    pub mcf_k_paths: usize,
 }
 
 fn default_metrics() -> String {
@@ -46,7 +42,4 @@ fn default_mcf_period() -> u64 {
 }
 fn default_debounce() -> u64 {
     100
-}
-fn default_k_paths() -> usize {
-    3
 }

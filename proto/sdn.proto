@@ -42,17 +42,6 @@ service SdnControl {
   // sin que el cliente tenga que pasar `orr_path` en app_header.
   rpc GetOrrPath    (GetOrrPathRequest)    returns (GetOrrPathResponse);
 
-  // K-Splittable MCF: devuelve la lista de paths con sus ratios
-  // `omega` para el commodity (src_dkms → dst_dkms). El ORR origen
-  // muestrea uno por envío con prob ∝ omega (alias method).
-  //
-  // Si el flow no tiene rate (omega=0 en el snapshot actual o flow
-  // no encontrado), devuelve `paths` vacío — el caller debe fallback
-  // a `GetOrrPath` (single-path).
-  //
-  // Σ omega ≈ 1.0 ± EPSILON para flows con rate > 0.
-  rpc GetPathsWithRatios (GetPathsWithRatiosRequest)
-    returns (GetPathsWithRatiosResponse);
 }
 
 message GetSaeBindingRequest  { string sae_id = 1; }
@@ -69,35 +58,6 @@ message GetOrrPathResponse {
   // Orden src → … → dst (ambos incluidos). Vacío si el src == dst o
   // si no hay path en la topología.
   repeated string orrs = 1;
-}
-
-message GetPathsWithRatiosRequest {
-  string src_dkms = 1;
-  string dst_dkms = 2;
-}
-
-// Un path como secuencia de qkc_ids más el ratio omega del solver.
-message PathWithRatio {
-  // Sequence of qkc_ids src_qkc → … → dst_qkc (ambos incluidos).
-  repeated string qkc_hops = 1;
-  // omega_p ∈ (0, 1] — fracción del rate del commodity que pasa por
-  // este path. Suma sobre paths con rate > 0 ≈ 1.0 (±EPSILON).
-  double omega = 2;
-  // Rate absoluto en keys/s para este path (= omega × total_rate).
-  // Redundante con (omega, rates_for_flow), pero útil para
-  // observabilidad y para que el cliente decida si activar el path.
-  double keys_per_second = 3;
-}
-
-message GetPathsWithRatiosResponse {
-  // Paths ordenados como aparecen en `Commodity.paths` (Yen's
-  // ascending hop count, filtered by overlap). Si el flow no tiene
-  // rate (rate total = 0), devuelve lista vacía → cliente debe
-  // fallback a single-path o no enviar.
-  repeated PathWithRatio paths = 1;
-  // Rate total del commodity (Σ keys_per_second de paths con
-  // omega > 0). 0 si el flow está en estado Saturated.
-  double total_keys_per_second = 2;
 }
 
 message Topology {

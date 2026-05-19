@@ -179,8 +179,7 @@ async fn do_listen(
         }
         if print_headers {
             println!(
-                "[{n}] hdr_qkc={} hdr_orr={} hdr_dkms={}",
-                hex(&f.header_qkc_mp),
+                "[{n}] hdr_orr={} hdr_dkms={}",
                 hex(&f.header_orr_mp),
                 hex(&f.header_dkms_mp),
             );

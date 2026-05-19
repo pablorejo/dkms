@@ -32,7 +32,7 @@
 //! Converges in ~50–200 iterations for the sizes we care about. Pure
 //! arithmetic over `Vec<f64>` — no extra deps required.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use tracing::debug;
 
@@ -53,7 +53,7 @@ pub fn flow_id(src_dkms: &str, dst_dkms: &str) -> String {
     format!("{src_dkms}->{dst_dkms}")
 }
 
-/// One MCF commodity = an ordered DKMS pair plus its candidate paths
+/// One MCF commodity = an ordered DKMS pair plus its shortest path
 /// (already projected onto QKCs).
 #[derive(Debug, Clone)]
 pub struct Commodity {
@@ -61,7 +61,7 @@ pub struct Commodity {
     pub dst_dkms: String,
     pub src_qkc: String,
     pub dst_qkc: String,
-    pub paths: Vec<Path>,
+    pub path: Path,
 }
 
 impl Commodity {
@@ -77,9 +77,9 @@ pub struct McfSnapshot {
     /// `flow_id → r_f` (keys/s). Only flows with positive rate appear.
     pub rates: HashMap<String, f64>,
 
-    /// `qkc_id → flow_id → [(next_hop_qkc, omega)]`. With single-path
-    /// solving `omega = 1.0`; the structure is kept multi-path-ready.
-    pub forwarding: HashMap<String, HashMap<String, Vec<(String, f64)>>>,
+    /// `qkc_id → flow_id → next_hop_qkc`. Single-path: each flow has
+    /// exactly one next hop per intermediate QKC.
+    pub forwarding: HashMap<String, HashMap<String, String>>,
 
     /// `dkms_id → (peer_dkms, role) → r_f`. For a flow `A → B` with
     /// rate `r`:
@@ -89,13 +89,6 @@ pub struct McfSnapshot {
     ///
     /// Flows `A → B` and `B → A` are independent and may differ.
     pub rates_by_dkms: HashMap<String, HashMap<(String, BufferRole), f64>>,
-
-    /// `flow_id → Vec<rate_per_path>`. Vector indexado por `path_idx`
-    /// igual que `Commodity.paths`. Útil para reconstruir las
-    /// proporciones `omega_p = rate_per_path[p] / Σ rate_per_path` que
-    /// el ORR consume vía `GetPathsWithRatios`. Bajo single-path,
-    /// el vector tiene un solo elemento (igual a `rates[flow_id]`).
-    pub rates_per_path: HashMap<String, Vec<f64>>,
 }
 
 impl McfSnapshot {
@@ -119,137 +112,16 @@ impl McfSnapshot {
 // ---------------------------------------------------------------- K-shortest
 
 /// Up to `k` simple shortest paths from `src` to `dst` in `graph`, in
-/// non-decreasing number-of-hops order. Variant of Yen using BFS for
-/// the shortest-path subroutine, matching the Python implementation.
-pub fn k_shortest_paths(
+/// non-decreasing number-of-hops order.
+pub fn shortest_path(
     graph: &HashMap<String, HashSet<String>>,
     src: &str,
     dst: &str,
-    k: usize,
-) -> Vec<Path> {
-    if src == dst || !graph.contains_key(src) || !graph.contains_key(dst) || k == 0 {
-        return vec![];
+) -> Option<Path> {
+    if src == dst || !graph.contains_key(src) || !graph.contains_key(dst) {
+        return None;
     }
-
-    let first = match bfs_shortest(graph, &HashSet::new(), &HashSet::new(), src, dst) {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let mut shortest = vec![first];
-
-    // Candidate heap, ordered by (path_len, insertion_counter) — we
-    // want shortest first, with stable tie-breaking like the Python
-    // version's heapq.
-    let mut candidates: BTreeMap<(usize, usize), Path> = BTreeMap::new();
-    let mut counter: usize = 0;
-
-    while shortest.len() < k {
-        let prev_path = shortest.last().unwrap().clone();
-        for i in 0..prev_path.len().saturating_sub(1) {
-            let spur_node = &prev_path[i];
-            let root_path = &prev_path[..=i];
-
-            let mut excluded_edges: HashSet<EdgeKey> = HashSet::new();
-            let mut excluded_nodes: HashSet<String> = HashSet::new();
-            for n in &root_path[..root_path.len() - 1] {
-                excluded_nodes.insert(n.clone());
-            }
-            for p in &shortest {
-                if p.len() > i && &p[..=i] == root_path {
-                    excluded_edges.insert(edge_key(&p[i], &p[i + 1]));
-                }
-            }
-
-            let Some(spur_path) =
-                bfs_shortest(graph, &excluded_edges, &excluded_nodes, spur_node, dst)
-            else {
-                continue;
-            };
-
-            let mut full_path: Path = root_path[..root_path.len() - 1].to_vec();
-            full_path.extend(spur_path);
-
-            if shortest.iter().any(|p| p == &full_path)
-                || candidates.values().any(|p| p == &full_path)
-            {
-                continue;
-            }
-            candidates.insert((full_path.len(), counter), full_path);
-            counter += 1;
-        }
-        let Some((&key, _)) = candidates.iter().next() else {
-            break;
-        };
-        let next_path = candidates.remove(&key).unwrap();
-        shortest.push(next_path);
-    }
-
-    shortest
-}
-
-/// Threshold por defecto para [`filter_overlapping_paths`].
-///
-/// Un path se descarta si comparte > 70 % de sus edges con un path ya
-/// aceptado (mismo commodity). 70 % es heurístico — para topos típicas
-/// de operador con grado medio bajo (2–4) es un buen balance entre
-/// "los paths sean realmente distintos" y "no perder K_efectivo
-/// agresivamente".
-pub const DEFAULT_OVERLAP_THRESHOLD: f64 = 0.70;
-
-/// Descarta paths cuya fracción de edges compartidos con un path ya
-/// aceptado del mismo commodity excede `threshold`.
-///
-/// **No es un requisito de corrección** del solver multipath — el
-/// water-filling congela edges saturados naturalmente, así que dos
-/// paths idénticos producirían rates que suman lo mismo que un único
-/// path. Es una **optimización**:
-///
-/// 1. Reduce el número de pseudo-flujos (menos variables en
-///    `weighted_maxmin`).
-/// 2. Mejora la calidad del sampling en el ORR (evita que el alias
-///    method distribuya entre paths casi idénticos, lo cual sería
-///    desperdicio estadístico).
-/// 3. Acelera el solve.
-///
-/// Algoritmo:
-/// - Itera paths en orden recibido (Yen's devuelve ascending hop
-///   count → el primero es el "shortest", los demás son spurs).
-/// - Cada nuevo `p` se compara contra cada `k` ya aceptado:
-///   `|edges(p) ∩ edges(k)| / |edges(p)| > threshold` → descartar.
-/// - Resultado: `K_efectivo ∈ {1, 2, …, K}`. Topos con grado mínimo
-///   bajo o cuellos estructurales suelen quedarse en 1–2.
-///
-/// Edge case: paths con 0 edges (longitud 1, src == dst) — descartados
-/// implícitamente al inicio, no llegan aquí. Un path con 1 edge nunca
-/// puede tener overlap > 70 % con otro path distinto que también tenga
-/// 1 edge (serían el mismo edge → idénticos → descartados antes).
-pub fn filter_overlapping_paths(paths: &[Path], threshold: f64) -> Vec<Path> {
-    let mut kept: Vec<Path> = Vec::with_capacity(paths.len());
-    let mut kept_edges: Vec<HashSet<EdgeKey>> = Vec::with_capacity(paths.len());
-
-    for p in paths {
-        let edges: HashSet<EdgeKey> = path_edges(p).into_iter().collect();
-        if edges.is_empty() {
-            // Path degenerado (src == dst); el solver lo ignoraría
-            // igualmente. No lo añadimos para no inflar K_efectivo.
-            continue;
-        }
-        let mut redundant = false;
-        for kref in &kept_edges {
-            // Fracción de edges de `p` que también están en `kref`.
-            let shared = edges.iter().filter(|e| kref.contains(*e)).count() as f64;
-            let frac = shared / edges.len() as f64;
-            if frac > threshold {
-                redundant = true;
-                break;
-            }
-        }
-        if !redundant {
-            kept.push(p.clone());
-            kept_edges.push(edges);
-        }
-    }
-    kept
+    bfs_shortest(graph, &HashSet::new(), &HashSet::new(), src, dst)
 }
 
 fn bfs_shortest(
@@ -304,23 +176,13 @@ fn path_edges(path: &[String]) -> Vec<EdgeKey> {
 
 // ---------------------------------------------------------------- Solver
 
-/// SDN MCF solver. Stateless aside from the K-paths configuration.
-#[derive(Debug, Clone, Copy)]
-pub struct McfSolver {
-    pub k_paths: usize,
-}
-
-impl Default for McfSolver {
-    fn default() -> Self {
-        Self { k_paths: 3 }
-    }
-}
+/// SDN MCF solver. Stateless.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct McfSolver;
 
 impl McfSolver {
-    pub fn new(k_paths: usize) -> Self {
-        Self {
-            k_paths: k_paths.max(1),
-        }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Generate the full commodity set from a topology snapshot. Pairs
@@ -345,27 +207,15 @@ impl McfSolver {
                 if src_qkc == dst_qkc {
                     continue;
                 }
-                let raw_paths =
-                    k_shortest_paths(&topo.graph, &src_qkc, &dst_qkc, self.k_paths);
-                if raw_paths.is_empty() {
+                let Some(path) = shortest_path(&topo.graph, &src_qkc, &dst_qkc) else {
                     continue;
-                }
-                // K-Splittable MCF: filtramos paths casi-idénticos para
-                // reducir variables del solver y mejorar la calidad del
-                // sampling en el ORR cliente. NO es un requisito de
-                // corrección (el solver penaliza overlap naturalmente);
-                // es una optimización. Ver
-                // `memory/project_multipath_design.md` §5.4.
-                let paths = filter_overlapping_paths(&raw_paths, DEFAULT_OVERLAP_THRESHOLD);
-                if paths.is_empty() {
-                    continue;
-                }
+                };
                 out.push(Commodity {
                     src_dkms: s.into(),
                     dst_dkms: d.into(),
                     src_qkc,
                     dst_qkc,
-                    paths,
+                    path,
                 });
             }
         }
@@ -443,14 +293,8 @@ impl McfSolver {
     }
 
     /// Subtract flow rates from `remaining` along each commodity's
-    /// **active paths**, using the per-path rate split published in
-    /// `snap.rates_per_path`. K-Splittable variant of the original
-    /// single-path version.
-    ///
-    /// Invariante (testeado en `subtract_usage_respects_capacity`):
-    /// para cada edge `e`, la suma de `r_{c,p}` sobre todos los
-    /// `(c, p)` cuyo path cruza `e` no excede `capacities[e]`. El
-    /// `.max(0.0)` es defensivo contra ruido de coma flotante.
+    /// shortest path. Single-path: each flow consumes its rate from
+    /// every edge on its single path.
     fn subtract_usage(
         &self,
         remaining: &mut HashMap<EdgeKey, f64>,
@@ -459,20 +303,16 @@ impl McfSolver {
     ) {
         for c in commodities {
             let fid = c.flow_id();
-            // Si rates_per_path no tiene el flow (rate total 0), saltamos.
-            let Some(per_path) = snap.rates_per_path.get(&fid) else {
+            let Some(&r) = snap.rates.get(&fid) else {
                 continue;
             };
-            for (p_idx, p) in c.paths.iter().enumerate() {
-                let r_p = per_path.get(p_idx).copied().unwrap_or(0.0);
-                if r_p <= 0.0 {
-                    continue;
-                }
-                for (u, v) in p.iter().zip(p.iter().skip(1)) {
-                    let k = edge_key(u, v);
-                    if let Some(cap) = remaining.get_mut(&k) {
-                        *cap = (*cap - r_p).max(0.0);
-                    }
+            if r <= 0.0 {
+                continue;
+            }
+            for (u, v) in c.path.iter().zip(c.path.iter().skip(1)) {
+                let k = edge_key(u, v);
+                if let Some(cap) = remaining.get_mut(&k) {
+                    *cap = (*cap - r).max(0.0);
                 }
             }
         }
@@ -482,16 +322,13 @@ impl McfSolver {
         for (fid, r) in src.rates {
             dst.rates.insert(fid, r);
         }
-        for (fid, v) in src.rates_per_path {
-            dst.rates_per_path.insert(fid, v);
-        }
         for (dkms, m) in src.rates_by_dkms {
             dst.rates_by_dkms.entry(dkms).or_default().extend(m);
         }
         for (qkc, ft) in src.forwarding {
             let merged = dst.forwarding.entry(qkc).or_default();
-            for (fid, entries) in ft {
-                merged.insert(fid, entries);
+            for (fid, nxt) in ft {
+                merged.insert(fid, nxt);
             }
         }
     }
@@ -533,47 +370,29 @@ impl McfSolver {
             edge_list.iter().enumerate().map(|(i, k)| (k, i)).collect();
         let n_edges = edge_list.len();
 
-        // K-Splittable MCF: cada commodity puede aportar varios paths
-        // como "pseudo-flujos". Los pseudo-flujos comparten el peso de
-        // su commodity y son la unidad de iteración del water-filling.
-        //
-        // `pf_to_cidx[pf]` → índice de commodity al que pertenece el pf.
-        // `pf_to_pidx[pf]` → índice de path dentro de Commodity.paths.
-        // `pf_edges[pf]`   → lista de edge_idx del path (en `edge_list`).
-        // `pf_weights[pf]` → peso heredado del commodity.
-        let mut pf_to_cidx: Vec<usize> = Vec::new();
-        let mut pf_to_pidx: Vec<usize> = Vec::new();
-        let mut pf_edges: Vec<Vec<usize>> = Vec::new();
-        let mut pf_weights: Vec<f64> = Vec::new();
-
-        for (c_idx, c) in commodities.iter().enumerate() {
+        // Por commodity: lista de edge_idx del path + peso.
+        let mut c_edges: Vec<Vec<usize>> = Vec::with_capacity(commodities.len());
+        let mut c_weights: Vec<f64> = Vec::with_capacity(commodities.len());
+        for c in commodities {
             let w = weights.get(&c.flow_id()).copied().unwrap_or(1.0);
-            for (p_idx, p) in c.paths.iter().enumerate() {
-                let mut edges_in_subgraph: Vec<usize> = Vec::new();
-                for ek in path_edges(p) {
-                    if let Some(&e) = edge_idx.get(&ek) {
-                        edges_in_subgraph.push(e);
-                    }
+            let mut edges_in_subgraph: Vec<usize> = Vec::new();
+            for ek in path_edges(&c.path) {
+                if let Some(&e) = edge_idx.get(&ek) {
+                    edges_in_subgraph.push(e);
                 }
-                // Excluir paths sin edges en el subgrafo (degenerados).
-                if edges_in_subgraph.is_empty() {
-                    continue;
-                }
-                pf_to_cidx.push(c_idx);
-                pf_to_pidx.push(p_idx);
-                pf_edges.push(edges_in_subgraph);
-                pf_weights.push(w);
             }
+            c_edges.push(edges_in_subgraph);
+            c_weights.push(w);
         }
 
-        let n_pf = pf_edges.len();
+        let n_c = commodities.len();
         let caps: Vec<f64> = edge_list.iter().map(|k| capacities[k]).collect();
 
-        let mut pf_rates = vec![0.0_f64; n_pf];
+        let mut c_rates = vec![0.0_f64; n_c];
         let mut remaining = caps.clone();
-        // Active iff weight > 0 (paths sin edges ya excluidos arriba).
+        // Active iff weight > 0 AND has at least one edge in subgraph.
         let mut active: Vec<bool> =
-            (0..n_pf).map(|i| pf_weights[i] > 0.0).collect();
+            (0..n_c).map(|i| c_weights[i] > 0.0 && !c_edges[i].is_empty()).collect();
 
         const EPS: f64 = 1e-9;
         let mut guard = 0usize;
@@ -583,14 +402,14 @@ impl McfSolver {
                 debug!("weighted_maxmin: guard tripped at iter {guard}");
                 break;
             }
-            // Suma de pesos de pseudo-flujos activos que cruzan cada edge.
+            // Suma de pesos de commodities activos que cruzan cada edge.
             let mut edge_w: Vec<f64> = vec![0.0; n_edges];
-            for i in 0..n_pf {
+            for i in 0..n_c {
                 if !active[i] {
                     continue;
                 }
-                for &e in &pf_edges[i] {
-                    edge_w[e] += pf_weights[i];
+                for &e in &c_edges[i] {
+                    edge_w[e] += c_weights[i];
                 }
             }
             // Δ máximo admisible en cada edge.
@@ -606,10 +425,10 @@ impl McfSolver {
             if !delta.is_finite() || delta <= EPS {
                 break;
             }
-            // Crecer pseudo-flujos activos proporcional a su peso.
-            for i in 0..n_pf {
+            // Crecer commodities activos proporcional a su peso.
+            for i in 0..n_c {
                 if active[i] {
-                    pf_rates[i] += pf_weights[i] * delta;
+                    c_rates[i] += c_weights[i] * delta;
                 }
             }
             // Restar capacidad consumida en cada edge.
@@ -621,17 +440,17 @@ impl McfSolver {
                     }
                 }
             }
-            // Congelar pseudo-flujos cuyos paths cruzan algún edge saturado.
+            // Congelar commodities cuyos paths cruzan algún edge saturado.
             let saturated: Vec<usize> =
                 (0..n_edges).filter(|&e| remaining[e] <= EPS).collect();
             if saturated.is_empty() {
                 break;
             }
-            for i in 0..n_pf {
+            for i in 0..n_c {
                 if !active[i] {
                     continue;
                 }
-                if pf_edges[i].iter().any(|e| saturated.contains(e)) {
+                if c_edges[i].iter().any(|e| saturated.contains(e)) {
                     active[i] = false;
                 }
             }
@@ -640,64 +459,40 @@ impl McfSolver {
             }
         }
 
-        // Agregar pseudo-flujos por commodity → rate total + rates_per_path.
-        // rates_per_path[c_idx][p_idx] = rate alcanzado por ese path.
-        let mut rates_per_path_per_c: Vec<Vec<f64>> = commodities
-            .iter()
-            .map(|c| vec![0.0_f64; c.paths.len()])
-            .collect();
-        for i in 0..n_pf {
-            rates_per_path_per_c[pf_to_cidx[i]][pf_to_pidx[i]] = pf_rates[i];
-        }
-
         for (c_idx, c) in commodities.iter().enumerate() {
-            let total: f64 = rates_per_path_per_c[c_idx].iter().sum();
-            if total <= 0.0 {
+            let r = c_rates[c_idx];
+            if r <= 0.0 {
                 continue;
             }
             let fid = c.flow_id();
-            snap.rates.insert(fid.clone(), total);
-            snap.rates_per_path
-                .insert(fid.clone(), rates_per_path_per_c[c_idx].clone());
+            snap.rates.insert(fid.clone(), r);
 
-            // Forwarding: por cada path con rate > 0, propagar omega_p al
-            // forwarding del primer QKC del hop. Múltiples paths con
-            // mismo (u, nxt) acumulan sus omegas en la misma entry.
-            for (p_idx, p) in c.paths.iter().enumerate() {
-                let r_p = rates_per_path_per_c[c_idx][p_idx];
-                if r_p <= 0.0 {
-                    continue;
-                }
-                let omega_p = r_p / total;
-                for w in p.windows(2) {
-                    let u = &w[0];
-                    let nxt = &w[1];
-                    let qkc_ft = snap.forwarding.entry(u.clone()).or_default();
-                    let entries = qkc_ft.entry(fid.clone()).or_default();
-                    if let Some(slot) = entries.iter_mut().find(|(h, _)| h == nxt) {
-                        slot.1 += omega_p;
-                    } else {
-                        entries.push((nxt.clone(), omega_p));
-                    }
-                }
+            // Forwarding single-path: cada hop intermedio del path
+            // tiene un único next_hop para este flow.
+            for w in c.path.windows(2) {
+                let u = &w[0];
+                let nxt = &w[1];
+                snap.forwarding
+                    .entry(u.clone())
+                    .or_default()
+                    .insert(fid.clone(), nxt.clone());
             }
 
             snap.rates_by_dkms
                 .entry(c.src_dkms.clone())
                 .or_default()
-                .insert((c.dst_dkms.clone(), BufferRole::EncKeys), total);
+                .insert((c.dst_dkms.clone(), BufferRole::EncKeys), r);
             snap.rates_by_dkms
                 .entry(c.dst_dkms.clone())
                 .or_default()
-                .insert((c.src_dkms.clone(), BufferRole::DecKeys), total);
+                .insert((c.src_dkms.clone(), BufferRole::DecKeys), r);
         }
 
         debug!(
             commodities = commodities.len(),
-            pseudo_flows = n_pf,
             edges = n_edges,
             iters = guard,
-            "weighted_maxmin (K-splittable) done"
+            "weighted_maxmin done"
         );
         snap
     }
@@ -720,111 +515,22 @@ mod tests {
     }
 
     #[test]
-    fn k_shortest_picks_disjoint_alternatives() {
-        // Graph:
-        //   1 -- 2 -- 4
-        //   1 -- 3 -- 4
-        // Two equal-length paths of length 3.
-        let g = graph_from(&[("1", "2"), ("2", "4"), ("1", "3"), ("3", "4")]);
-        let paths = k_shortest_paths(&g, "1", "4", 2);
-        assert_eq!(paths.len(), 2);
-        assert!(paths.iter().all(|p| p.len() == 3));
-        assert_ne!(paths[0], paths[1]);
+    fn shortest_path_finds_short_route() {
+        // Graph 1 -- 2 -- 3 -- 4.
+        let g = graph_from(&[("1", "2"), ("2", "3"), ("3", "4")]);
+        let p = shortest_path(&g, "1", "4").unwrap();
+        assert_eq!(p, vec!["1", "2", "3", "4"]);
     }
 
     #[test]
-    fn k_shortest_empty_on_disconnected() {
+    fn shortest_path_none_on_disconnected() {
         let g = graph_from(&[("1", "2"), ("3", "4")]);
-        assert!(k_shortest_paths(&g, "1", "4", 3).is_empty());
+        assert!(shortest_path(&g, "1", "4").is_none());
     }
 
     // ----------------------------------------------------------------
     // filter_overlapping_paths
     // ----------------------------------------------------------------
-
-    fn path(ids: &[&str]) -> Path {
-        ids.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn filter_keeps_disjoint_paths() {
-        // Paths totalmente edge-disjoint: ambos deben mantenerse.
-        let p1 = path(&["A", "B", "C"]);
-        let p2 = path(&["A", "D", "C"]);
-        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.70);
-        assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0], p1);
-        assert_eq!(kept[1], p2);
-    }
-
-    #[test]
-    fn filter_drops_near_identical_path() {
-        // p1: A-B-C-D (3 edges). p2: A-B-C-E (3 edges, comparte 2 con p1).
-        // overlap = 2/3 ≈ 0.667 < 0.70 → mantener p2.
-        let p1 = path(&["A", "B", "C", "D"]);
-        let p2 = path(&["A", "B", "C", "E"]);
-        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.70);
-        assert_eq!(kept.len(), 2, "2/3 = 0.667 NO supera el umbral 0.70");
-
-        // p3 comparte 3/4 = 0.75 con p1 → descartado a 0.70.
-        let p1b = path(&["A", "B", "C", "D", "E"]);
-        let p3 = path(&["A", "B", "C", "D", "F"]);
-        let kept2 = filter_overlapping_paths(&[p1b.clone(), p3.clone()], 0.70);
-        assert_eq!(kept2.len(), 1, "3/4 = 0.75 supera el umbral 0.70");
-        assert_eq!(kept2[0], p1b);
-    }
-
-    #[test]
-    fn filter_threshold_configurable() {
-        // Mismo conjunto, distinto threshold → distinto resultado.
-        let p1 = path(&["A", "B", "C", "D"]);
-        let p2 = path(&["A", "B", "C", "E"]); // overlap = 2/3
-        // threshold 0.50 → 2/3 > 0.50 → descartar p2.
-        assert_eq!(
-            filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.50).len(),
-            1
-        );
-        // threshold 0.80 → 2/3 < 0.80 → mantener ambos.
-        assert_eq!(
-            filter_overlapping_paths(&[p1.clone(), p2.clone()], 0.80).len(),
-            2
-        );
-    }
-
-    #[test]
-    fn filter_three_paths_one_redundant() {
-        // p1: A-B-C-D (edges AB, BC, CD)
-        // p2: A-E-F-D (totalmente disjoint con p1)
-        // p3: A-B-C-D (idéntico a p1) — debe ser descartado
-        let p1 = path(&["A", "B", "C", "D"]);
-        let p2 = path(&["A", "E", "F", "D"]);
-        let p3 = path(&["A", "B", "C", "D"]);
-        let kept = filter_overlapping_paths(&[p1.clone(), p2.clone(), p3], 0.70);
-        assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0], p1);
-        assert_eq!(kept[1], p2);
-    }
-
-    #[test]
-    fn filter_drops_zero_edge_path() {
-        // Path con 1 nodo (src == dst) → 0 edges, descartado siempre.
-        let p_degenerate = path(&["A"]);
-        let p_real = path(&["A", "B"]);
-        let kept = filter_overlapping_paths(&[p_degenerate, p_real.clone()], 0.70);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0], p_real);
-    }
-
-    #[test]
-    fn filter_default_threshold_constant_is_0_70() {
-        assert_eq!(DEFAULT_OVERLAP_THRESHOLD, 0.70);
-    }
-
-    #[test]
-    fn filter_empty_input_returns_empty() {
-        let kept = filter_overlapping_paths(&[], 0.70);
-        assert!(kept.is_empty());
-    }
 
     fn host(id: i64) -> HostEndpoint {
         HostEndpoint {
@@ -893,7 +599,7 @@ mod tests {
     #[test]
     fn solver_assigns_rates_to_all_commodities() {
         let topo = small_topo();
-        let s = McfSolver::new(2);
+        let s = McfSolver::new();
         let coms = s.build_commodities(&topo);
         // dA→dB and dB→dA (different commodities, independent flows).
         assert_eq!(coms.len(), 2);
@@ -917,7 +623,7 @@ mod tests {
     #[test]
     fn solver_respects_capacity_bound() {
         let topo = small_topo();
-        let s = McfSolver::new(2);
+        let s = McfSolver::new();
         let coms = s.build_commodities(&topo);
         let caps = s.capacities(&topo);
         let snap = s.solve(&coms, &caps, &HashMap::new());
@@ -929,10 +635,8 @@ mod tests {
                 if r <= 0.0 {
                     continue;
                 }
-                if let Some(p) = c.paths.first() {
-                    if p.windows(2).any(|w| &edge_key(&w[0], &w[1]) == k) {
-                        usage += r;
-                    }
+                if c.path.windows(2).any(|w| &edge_key(&w[0], &w[1]) == k) {
+                    usage += r;
                 }
             }
             assert!(
@@ -1004,7 +708,7 @@ mod tests {
             orr_id: "o2".into(),
         });
 
-        let s = McfSolver::new(1);
+        let s = McfSolver::new();
         let coms = s.build_commodities(&t);
         let caps = s.capacities(&t);
         let mut weights = HashMap::new();
@@ -1065,7 +769,7 @@ mod tests {
                 orr_id: orr.into(),
             });
         }
-        let s = McfSolver::new(1);
+        let s = McfSolver::new();
         let coms = s.build_commodities(&t);
         let caps = s.capacities(&t);
         let mut weights = HashMap::new();
@@ -1089,306 +793,4 @@ mod tests {
         );
     }
 
-    // ----------------------------------------------------------------
-    // K-Splittable multi-path: weighted_maxmin con (commodity, path).
-    // OBJ-007 / OBJ-008 / OBJ-009.
-    // ----------------------------------------------------------------
-
-    /// Helper para construir un Commodity con paths arbitrarios sobre
-    /// una topología triangular A-B-C donde A=qkc1, B=qkc2, C=qkc3.
-    /// Devuelve la topología y un commodity dA→dC con K=2 paths
-    /// (directo y vía B).
-    fn triangle_topo_with_disjoint_paths() -> Topology {
-        let mut t = Topology::default();
-        for q in ["1", "2", "3"] {
-            t.upsert_qkc(Qkc {
-                id: q.into(),
-                host: host(q.parse().unwrap()),
-                kme_host: None,
-            });
-        }
-        // Triangle: 1-2, 2-3, 1-3, todos con la misma capacidad.
-        let edge_meta = EdgeMeta {
-            distance_km: 0,
-            r0_keys_per_second: 100.0,
-            alpha: 0.0, // sin decay, cap efectiva = R0 = 100
-            max_buffer_size: 10,
-        };
-        t.add_edge("1", "2", edge_meta.clone());
-        t.add_edge("2", "3", edge_meta.clone());
-        t.add_edge("1", "3", edge_meta);
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o3".into(), host: host(13), qkc_id: "3".into() });
-        t.upsert_dkms(Dkms {
-            id: "dA".into(),
-            host: host(21),
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dB".into(),
-            host: host(23),
-            tls_id: None,
-            orr_id: "o3".into(),
-        });
-        t
-    }
-
-    #[test]
-    fn multipath_one_commodity_two_disjoint_paths_balanced() {
-        // 1 commodity dA→dB con 2 paths edge-disjoint en triángulo.
-        // Nota: `build_commodities` también genera dB→dA con sus
-        // propios paths. Los 4 pseudo-flujos (2 commodities × 2 paths)
-        // comparten todos los edges del triángulo, así que el rate por
-        // commodity queda igual a single-path; pero CADA path recibe
-        // rate > 0, demostrando el splitting K-Splittable.
-        let topo = triangle_topo_with_disjoint_paths();
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        // rates_per_path: ambos paths del commodity tienen rate > 0
-        // (esto es el splitting que single-path no haría).
-        let rpp = snap
-            .rates_per_path
-            .get(&flow_id("dA", "dB"))
-            .expect("rates_per_path debe poblarse");
-        let nonzero = rpp.iter().filter(|r| **r > 0.0).count();
-        assert!(
-            nonzero >= 2,
-            "se esperaba que ambos paths usaran capacidad; got rpp={rpp:?}",
-        );
-        // Split equitativo (simétrico) en este caso, tolerancia generosa.
-        let max_r = rpp.iter().cloned().fold(0.0_f64, f64::max);
-        let min_r = rpp
-            .iter()
-            .filter(|r| **r > 0.0)
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
-        assert!(
-            max_r > 0.0 && min_r.is_finite() && (max_r - min_r) / max_r < 0.1,
-            "split debe ser ≈ equitativo en triángulo simétrico; rpp={rpp:?}",
-        );
-        // Suma de omegas en el forwarding del QKC origen "1" debe ≈ 1.0.
-        let ft_q1 = snap.forwarding.get("1").expect("forwarding qkc 1");
-        let entries = ft_q1.get(&flow_id("dA", "dB")).expect("flow en qkc 1");
-        let omega_sum: f64 = entries.iter().map(|(_, w)| w).sum();
-        assert!(
-            (omega_sum - 1.0).abs() < 1e-6,
-            "suma omegas en QKC origen debe ser 1.0; got {omega_sum}",
-        );
-    }
-
-    /// Topología en forma de mancuerna: dos triángulos conectados
-    /// solamente por un edge "puente". Genera cuello obvio en el puente.
-    fn dumbbell_topo() -> Topology {
-        let mut t = Topology::default();
-        for q in ["1", "2", "3", "4"] {
-            t.upsert_qkc(Qkc {
-                id: q.into(),
-                host: host(q.parse().unwrap()),
-                kme_host: None,
-            });
-        }
-        let edge_meta = EdgeMeta {
-            distance_km: 0,
-            r0_keys_per_second: 100.0,
-            alpha: 0.0,
-            max_buffer_size: 10,
-        };
-        // Linear chain: 1-2-3-4. No paths edge-disjoint posibles entre 1 y 4.
-        t.add_edge("1", "2", edge_meta.clone());
-        t.add_edge("2", "3", edge_meta.clone());
-        t.add_edge("3", "4", edge_meta);
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o4".into(), host: host(14), qkc_id: "4".into() });
-        t.upsert_dkms(Dkms {
-            id: "dA".into(),
-            host: host(21),
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dB".into(),
-            host: host(24),
-            tls_id: None,
-            orr_id: "o4".into(),
-        });
-        t
-    }
-
-    #[test]
-    fn multipath_single_useful_path_degrades_to_single_path() {
-        // En una cadena lineal 1-2-3-4 solo hay UN path posible entre
-        // los extremos. El solver multi-path debe comportarse como
-        // single-path (rate igual al edge más débil = 100).
-        let topo = dumbbell_topo();
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        let r_ab = snap.rate_for_flow("dA", "dB");
-        assert!(r_ab > 0.0);
-        // Solo 1 path con rate > 0 (los demás no existen tras Yen's).
-        let rpp = snap.rates_per_path.get(&flow_id("dA", "dB")).unwrap();
-        let nonzero = rpp.iter().filter(|r| **r > 0.0).count();
-        assert_eq!(nonzero, 1, "1 path único en topo lineal");
-    }
-
-    #[test]
-    fn multipath_two_commodities_sharing_bridge_balance_via_alternate() {
-        // Topología tipo Y/anillo donde 2 commodities compiten en
-        // edges parcialmente compartidos. Tras multi-path, esperamos
-        // que la suma de rates sea ≥ que single-path equivalente.
-        let topo = triangle_topo_with_disjoint_paths();
-        // Añadimos un segundo DKMS dC en QKC 2.
-        let mut t = topo;
-        t.upsert_dkms(Dkms {
-            id: "dC".into(),
-            host: host(22),
-            tls_id: None,
-            orr_id: "o1".into(), // anclado al QKC 1 vía orr_id (no importa)
-        });
-        // ORR para QKC 2 (necesario para que dC pueda anclarse en QKC 2).
-        // Para simplificar, lo dejamos compartiendo orr con dA — el solver
-        // solo mira el QKC del DKMS.
-        // Re-asignamos dC a un orr en QKC 2:
-        t.upsert_orr(Orr {
-            id: "o2".into(),
-            host: host(12),
-            qkc_id: "2".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dC".into(),
-            host: host(22),
-            tls_id: None,
-            orr_id: "o2".into(),
-        });
-
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&t);
-        let caps = s.capacities(&t);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        // Verificamos que todos los flows obtienen rate > 0 — el
-        // multi-path no debe matar ningún flow.
-        for c in &coms {
-            let r = snap.rate_for_flow(&c.src_dkms, &c.dst_dkms);
-            assert!(
-                r > 0.0,
-                "flow {}→{} sin rate (esperado > 0)",
-                c.src_dkms,
-                c.dst_dkms,
-            );
-        }
-        // Y la suma de omegas en cada QKC origen ≈ 1.0 (por flow).
-        for c in &coms {
-            let qkc_ft = snap
-                .forwarding
-                .get(&c.src_qkc)
-                .expect("forwarding del QKC origen del commodity");
-            let entries = qkc_ft.get(&c.flow_id()).expect("flow en QKC origen");
-            let sum: f64 = entries.iter().map(|(_, w)| *w).sum();
-            assert!(
-                (sum - 1.0).abs() < 1e-6,
-                "omega sum en QKC {} para {}: got {sum}",
-                c.src_qkc,
-                c.flow_id(),
-            );
-        }
-    }
-
-    #[test]
-    fn multipath_omega_entries_at_origin_sum_to_one() {
-        // Más estricto: para CUALQUIER commodity con rate > 0, la
-        // suma de omegas en su QKC origen debe ser 1.0 ± EPSILON.
-        // Esto es el invariante de OBJ-009.
-        let topo = triangle_topo_with_disjoint_paths();
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        for c in &coms {
-            let r = snap.rate_for_flow(&c.src_dkms, &c.dst_dkms);
-            if r <= 0.0 {
-                continue;
-            }
-            let qkc_ft = snap
-                .forwarding
-                .get(&c.src_qkc)
-                .expect("forwarding del QKC origen");
-            let entries = qkc_ft
-                .get(&c.flow_id())
-                .expect("flow_id en forwarding del QKC origen");
-            let sum: f64 = entries.iter().map(|(_, w)| *w).sum();
-            assert!(
-                (sum - 1.0).abs() < 1e-6,
-                "Invariante Σ omega = 1.0 violado en QKC {} para {}: got {sum} (entries={entries:?})",
-                c.src_qkc,
-                c.flow_id(),
-            );
-        }
-    }
-
-    #[test]
-    fn multipath_rates_per_path_consistent_with_total() {
-        // rates_per_path debe sumar exactamente rates[fid].
-        let topo = triangle_topo_with_disjoint_paths();
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        for c in &coms {
-            let fid = c.flow_id();
-            let total = snap.rates.get(&fid).copied().unwrap_or(0.0);
-            if total <= 0.0 {
-                continue;
-            }
-            let rpp = snap.rates_per_path.get(&fid).expect("rates_per_path");
-            let sum_rpp: f64 = rpp.iter().sum();
-            assert!(
-                (sum_rpp - total).abs() < 1e-6,
-                "rates_per_path sum {sum_rpp} != rates[{fid}] = {total}",
-            );
-        }
-    }
-
-    #[test]
-    fn subtract_usage_respects_capacity_invariant() {
-        // Tras hybrid solve, ningún edge debe haber sido sobrecargado.
-        // Test mantiene el invariante en multi-path: para cada edge,
-        // suma de r_{c,p} sobre paths que lo cruzan ≤ cap.
-        let topo = triangle_topo_with_disjoint_paths();
-        let s = McfSolver::new(3);
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-
-        for (ek, cap) in &caps {
-            let mut usage = 0.0;
-            for c in &coms {
-                let fid = c.flow_id();
-                let Some(rpp) = snap.rates_per_path.get(&fid) else {
-                    continue;
-                };
-                for (p_idx, p) in c.paths.iter().enumerate() {
-                    let r_p = rpp.get(p_idx).copied().unwrap_or(0.0);
-                    if r_p <= 0.0 {
-                        continue;
-                    }
-                    if p.windows(2).any(|w| &edge_key(&w[0], &w[1]) == ek) {
-                        usage += r_p;
-                    }
-                }
-            }
-            assert!(
-                usage <= cap * 1.01 + 1e-6,
-                "edge {ek:?} usage {usage} > cap {cap}",
-            );
-        }
-    }
 }

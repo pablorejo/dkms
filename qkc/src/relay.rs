@@ -67,7 +67,7 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
 
     // ¿Local-deliver o forward? En ambos casos el QKC NO toca
     // header_orr_mp ni header_dkms_mp — los propaga byte-a-byte. Solo
-    // recompone su header_qkc_mp (vacío al ORR; nuevo en el siguiente
+    // (el QKC no añade headers; sólo propaga orr_mp + dkms_mp en el siguiente
     // hop).
     if frame.dest_final == svc.qkc_id() {
         let mut out = Frame::empty(FRAME_LOCAL_DELIVER);
@@ -76,7 +76,6 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         out.dest_final = svc.qkc_id();
         out.key_size_bits = 0;
         out.key_ids = Vec::new();
-        // header_qkc_mp se desecha al entregar al ORR (vacío).
         out.header_orr_mp = frame.header_orr_mp;
         out.header_dkms_mp = frame.header_dkms_mp;
         out.payload = plaintext;
@@ -188,7 +187,6 @@ fn send_frame_to_peer(
     out.dest_final = dest_final;
     out.key_size_bits = out_link.cfg.key_size_bits as u16;
     out.key_ids = key_ids.iter().map(|u| u.to_string()).collect();
-    out.header_qkc_mp = Vec::new();
     out.header_orr_mp = header_orr_mp;
     out.header_dkms_mp = header_dkms_mp;
     out.payload = ciphertext;

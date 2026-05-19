@@ -61,7 +61,7 @@ impl SdnService {
             },
             None => Topology::default(),
         };
-        let solver = McfSolver::new(cfg.mcf_k_paths);
+        let solver = McfSolver::new();
         let svc = Self {
             cfg: Arc::new(cfg),
             topology: TopologyStore::new(initial),
@@ -475,12 +475,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc};
 
-    /// Exposes the small-topo SdnService factory for use in other
-    /// modules' integration tests (e.g. `grpc_server::tests`).
-    pub fn make_service_for_test() -> SdnService {
-        make_service()
-    }
-
     fn host(id: i64) -> HostEndpoint {
         HostEndpoint {
             id,
@@ -555,11 +549,10 @@ pub(crate) mod tests {
                 default_policy: "shortest_hops".into(),
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
-                mcf_k_paths: 3,
             }),
             topology: TopologyStore::new(small_topo()),
             priorities: Arc::new(BufferPriorityRegistry::new()),
-            solver: McfSolver::new(3),
+            solver: McfSolver::new(),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics: Metrics::new("sdn-test"),

@@ -21,7 +21,6 @@
 //! XOR-cipher ("OTP-style") por capa usando los secrets concatenados.
 //! Ver [`onion`] para el formato exacto.
 
-pub mod alias;
 pub mod bootstrap;
 pub mod config;
 pub mod dkms_header;
