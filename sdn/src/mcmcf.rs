@@ -195,6 +195,13 @@ const FLOW_EPSILON: f64 = 1e-6;
 /// fresh ones. Matches the SDN's default `mcf_period_ms = 5000`.
 const T_REPLAN_SECONDS: f64 = 5.0;
 
+/// Penalty multiplier on `Σ σ_k` in phase-1 LP. With `λ` in the
+/// range `[0, 10]` and `σ_k` in the range `[0, max_drain]` (≈ 1e3),
+/// a coefficient of 1e3 makes the LP minimise σ absolutely before
+/// touching λ — the strict lex order between "deliver δ" and
+/// "fill at λ" required by paper §6's relaxation.
+const LAMBDA_SLACK_PENALTY: f64 = 1e3;
+
 /// Lower-bound slack for phase 2's `λ ≥ λ*` constraint. microlp's
 /// simplex has solve-to-solve numerical drift; an exact equality
 /// `λ == λ*` would risk infeasibility when `λ*` came back as
@@ -402,8 +409,8 @@ impl McmcfSolver {
         // Both phases share the same arc/node setup; only the
         // variable set and objective change.
 
-        // ----- Phase 1: solve max λ --------------------------------------
-        let lambda_star =
+        // ----- Phase 1: solve max λ − M·Σ σ_k ---------------------------
+        let (lambda_star, sigmas) =
             match self.solve_lambda(&active, &arcs, &arc_idx, &node_set, &undirected, inputs) {
                 Some(v) => v,
                 None => return zero_rate_fallback(&active),
@@ -442,11 +449,19 @@ impl McmcfSolver {
         // ----- assemble final solution ------------------------------------
         let mut rates: HashMap<String, f64> = HashMap::with_capacity(active.len());
         let mut total_eta = 0.0;
+        let mut total_sigma = 0.0;
         for (k_idx, c) in active.iter().enumerate() {
             let eta_k = phase2.eta_values.get(k_idx).copied().unwrap_or(0.0);
+            let sigma_k = sigmas.get(k_idx).copied().unwrap_or(0.0);
             total_eta += eta_k;
-            // r_k = δ_k + λ·R_k + η_k  (paper §4 augmented rate).
-            let r_k = c.drain_rate + lambda_star * c.remaining() + eta_k;
+            total_sigma += sigma_k;
+            // Effective delivered rate (paper §4 + §6 slack):
+            //     r_k = (δ_k − σ_k) + λ·R_k + η_k
+            // The σ slack absorbs unmet drain — `r_k` is what the
+            // network can actually deliver, which is what the DKMS'
+            // SaeBufferBuckets uses as `link_capacity` for refill.
+            let delivered_drain = (c.drain_rate - sigma_k).max(0.0);
+            let r_k = delivered_drain + lambda_star * c.remaining() + eta_k;
             let fid = flow_id(&c.src_dkms, &c.dst_dkms);
             let r_k_clean = if r_k.abs() < FLOW_EPSILON { 0.0 } else { r_k };
             rates.insert(fid, r_k_clean);
@@ -457,6 +472,7 @@ impl McmcfSolver {
             n_arcs = arcs.len(),
             lambda = lambda_star,
             total_eta,
+            total_sigma,
             n_edge_flows = phase2.edge_flows.len(),
             "MCMCF-λ solved (two-phase)"
         );
@@ -468,9 +484,26 @@ impl McmcfSolver {
         }
     }
 
-    /// Phase 1 of the lex-refined solve: `max λ` with no `η_k`
-    /// variables. Returns `None` if the LP failed (numerical or
-    /// infeasibility) — the caller emits the zero-rate fallback.
+    /// Phase 1 of the lex-refined solve: `max λ − M·Σ σ_k` with per-
+    /// commodity *slack variables* `σ_k ∈ [0, δ_k]` that absorb any
+    /// `δ_k` the network cannot route (paper §6 — "Factibilidad").
+    ///
+    /// Without slack, the LP becomes Infeasible whenever the
+    /// aggregate SAE drain exceeds the min-cut capacity (typical of
+    /// any sustained over-rate scenario), and the SDN falls back to
+    /// `r_k = 0` for every commodity → buffers empty → cascade fail.
+    /// With slack, the LP always has a solution: it routes as much
+    /// as the network can, books the rest as unmet demand σ, and
+    /// the SAEs see graceful 429s via the DKMS-side bucket (refill
+    /// at the *deliverable* rate `δ_k − σ_k + λ·R_k`).
+    ///
+    /// Returns `(λ*, σ_k* per commodity)`. The caller computes the
+    /// effective delivered rate as
+    ///     `r_k = (δ_k − σ_k) + λ* · R_k`.
+    ///
+    /// Penalty `LAMBDA_SLACK_PENALTY` is chosen so even one unit of
+    /// `σ` dominates the entire feasible range of λ — the LP minimises
+    /// unmet demand absolutely first, then maximises λ.
     fn solve_lambda(
         &self,
         active: &[&CommodityDemand],
@@ -479,7 +512,7 @@ impl McmcfSolver {
         node_set: &HashSet<String>,
         undirected: &[((String, String), f64)],
         inputs: &McmcfInputs,
-    ) -> Option<f64> {
+    ) -> Option<(f64, Vec<f64>)> {
         let mut vars = ProblemVariables::new();
         let lambda = vars.add(variable().min(0.0));
         let x: Vec<Vec<Variable>> = active
@@ -490,12 +523,26 @@ impl McmcfSolver {
                     .collect()
             })
             .collect();
-        let mut problem = vars.maximise(lambda).using(good_lp::default_solver);
+        // σ_k ∈ [0, δ_k] — "unmet drain" per commodity. Active only
+        // for commodities with δ_k > 0 (a fill-only commodity can't
+        // have unmet drain).
+        let sigma: Vec<Variable> = active
+            .iter()
+            .map(|c| vars.add(variable().min(0.0).max(c.drain_rate.max(0.0))))
+            .collect();
+        // Build objective: λ − M·Σ σ_k.
+        let mut obj = Expression::with_capacity(1 + sigma.len());
+        obj += lambda;
+        for s in &sigma {
+            obj += LAMBDA_SLACK_PENALTY * -1.0 * *s;
+        }
+        let mut problem = vars.maximise(obj).using(good_lp::default_solver);
         for (k_idx, c) in active.iter().enumerate() {
             let src = inputs.dkms_to_qkc.get(c.src_dkms.as_str()).unwrap();
             let dst = inputs.dkms_to_qkc.get(c.dst_dkms.as_str()).unwrap();
             let r_k = c.remaining();
             let delta_k = c.drain_rate;
+            let sigma_k = sigma[k_idx];
             for node in node_set {
                 let mut expr = Expression::with_capacity(arcs.len());
                 for (a_idx, (a, b)) in arcs.iter().enumerate() {
@@ -506,10 +553,13 @@ impl McmcfSolver {
                         expr -= x[k_idx][a_idx];
                     }
                 }
+                // Conservation with σ slack at source/sink:
+                //   src: out - in - λ·R_k = δ_k - σ_k
+                //   dst: out - in + λ·R_k = -(δ_k - σ_k)
                 let c_node = if node == src {
-                    (expr - lambda * r_k).eq(delta_k)
+                    (expr - lambda * r_k + sigma_k).eq(delta_k)
                 } else if node == dst {
-                    (expr + lambda * r_k).eq(-delta_k)
+                    (expr + lambda * r_k - sigma_k).eq(-delta_k)
                 } else {
                     expr.eq(0.0)
                 };
@@ -527,7 +577,11 @@ impl McmcfSolver {
             problem = problem.with(expr.leq(*cap));
         }
         match problem.solve() {
-            Ok(sol) => Some(sol.value(lambda).max(0.0)),
+            Ok(sol) => {
+                let lambda_v = sol.value(lambda).max(0.0);
+                let sigmas: Vec<f64> = sigma.iter().map(|s| sol.value(*s).max(0.0)).collect();
+                Some((lambda_v, sigmas))
+            }
             Err(e) => {
                 warn!(error = %e, "MCMCF-λ phase-1 LP failed");
                 None
