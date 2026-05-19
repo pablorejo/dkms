@@ -18,10 +18,37 @@
 //! `enc_refill_loop` (ENC). No hay fallback HTTP porque sería inviable:
 //! el quditto ya entregó la clave al worker.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::atomic::Ordering,
+    time::Duration,
+};
 
 use uuid::Uuid;
 use wire::{Frame, FRAME_LOCAL_DELIVER, FRAME_RECV, FRAME_RELAY};
+
+/// Stable hash for a frame used as the bucket key into a WCMP next-hop
+/// entry. We pick fields that vary per-frame (so different keys hit
+/// different next-hops, spreading load) but are stable across hops
+/// (so the same logical frame keeps flow affinity at each relay).
+///
+/// `dest_final` + the two layered headers (`header_orr_mp`,
+/// `header_dkms_mp`) survive byte-for-byte across hops. `key_ids`
+/// change at every hop (we re-encrypt with fresh transport keys), so
+/// they're useful only when the WCMP entry sits *before* re-encryption
+/// — but folding them in is cheap and doesn't hurt flow affinity for
+/// frames where they happen to be empty.
+fn frame_hash(frame: &Frame) -> u64 {
+    let mut h = DefaultHasher::new();
+    frame.dest_final.hash(&mut h);
+    frame.header_orr_mp.hash(&mut h);
+    frame.header_dkms_mp.hash(&mut h);
+    for id in &frame.key_ids {
+        id.hash(&mut h);
+    }
+    h.finish()
+}
 
 use crate::{
     crypto::{decrypt, encrypt, num_chunks},
@@ -84,9 +111,10 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         return Ok(());
     }
 
+    let hash = frame_hash(&frame);
     let next_hop = svc
         .routing
-        .next_hop(frame.dest_final)
+        .next_hop(frame.dest_final, hash)
         .ok_or(QkcError::NoRoute(frame.dest_final))?;
     forward_plaintext(
         svc,
@@ -123,9 +151,10 @@ async fn handle_local_send_inner(svc: &QkcService, frame: Frame) -> Result<()> {
             "LOCAL_SEND con dest_final == my_id no tiene sentido".into(),
         ));
     }
+    let hash = frame_hash(&frame);
     let next_hop = svc
         .routing
-        .next_hop(dest)
+        .next_hop(dest, hash)
         .ok_or(QkcError::NoRoute(dest))?;
     forward_plaintext(
         svc,
@@ -273,5 +302,4 @@ mod tests {
         let strs = vec!["not-a-uuid".to_string()];
         assert!(parse_key_ids(&strs).is_err());
     }
-
 }

@@ -147,7 +147,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
         }
     };
     let bytes = s.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(());
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -286,10 +286,7 @@ where
 /// el proxy reverso (nginx-ingress) que valida `auth-tls-verify-client`
 /// contra la CA de simulación antes de fijar el header. Si el modelo de
 /// red cambia, hay que reevaluar.
-fn resolve_peer_identity(
-    extensions: &axum::http::Extensions,
-    headers: &HeaderMap,
-) -> PeerIdentity {
+fn resolve_peer_identity(extensions: &axum::http::Extensions, headers: &HeaderMap) -> PeerIdentity {
     if let Some(pid) = PeerIdentity::from_proxy_header(headers) {
         return pid;
     }

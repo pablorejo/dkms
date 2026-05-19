@@ -16,4 +16,6 @@ pub mod sdn_http;
 pub use orr::OrrClient;
 pub use qkc::QkcClient;
 pub use sdn::SdnClient;
-pub use sdn_http::{DkmsRatesResponse, PeerRate, PriorityApplied, PriorityUpdate, SdnHttpClient};
+pub use sdn_http::{
+    CommodityDemand, DemandApplied, DemandReport, DkmsRatesResponse, PeerRate, SdnHttpClient,
+};

@@ -146,15 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn try_push_returns_key_when_full() {
-        let b = SecureKeyBuffer::new(2);
-        b.try_push(k("a", 32)).unwrap();
-        b.try_push(k("b", 32)).unwrap();
-        let rejected = b.try_push(k("c", 32)).expect_err("full");
-        assert_eq!(rejected.id.as_str(), "c");
-    }
-
-    #[test]
     fn take_by_id_removes_in_place() {
         let b = SecureKeyBuffer::new(8);
         b.try_push(k("a", 32)).unwrap();

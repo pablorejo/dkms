@@ -16,12 +16,7 @@
 //! * Endpoint final: `{peer.endpoint}/kmapi/v1/ext_keys` (alineado con el
 //!   `Etsi020PostExtKeys::get_endpoint_url` del crate `etsi`).
 
-use std::{
-    fs,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use reqwest::{Certificate, Client, Identity};
@@ -53,12 +48,10 @@ impl PeerHttpClient {
         let cert_pem = fs::read(dkms_cert).map_err(|e| {
             DkmsError::Crypto(format!("read dkms cert {}: {e}", dkms_cert.display()))
         })?;
-        let key_pem = fs::read(dkms_key).map_err(|e| {
-            DkmsError::Crypto(format!("read dkms key {}: {e}", dkms_key.display()))
-        })?;
-        let ca_pem = fs::read(peer_ca).map_err(|e| {
-            DkmsError::Crypto(format!("read peer_ca {}: {e}", peer_ca.display()))
-        })?;
+        let key_pem = fs::read(dkms_key)
+            .map_err(|e| DkmsError::Crypto(format!("read dkms key {}: {e}", dkms_key.display())))?;
+        let ca_pem = fs::read(peer_ca)
+            .map_err(|e| DkmsError::Crypto(format!("read peer_ca {}: {e}", peer_ca.display())))?;
 
         // reqwest::Identity::from_pem espera cert+key concatenados.
         let mut bundle = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
@@ -68,9 +61,8 @@ impl PeerHttpClient {
         }
         bundle.extend_from_slice(&key_pem);
 
-        let identity = Identity::from_pem(&bundle).map_err(|e| {
-            DkmsError::Crypto(format!("identity from pem: {e}"))
-        })?;
+        let identity = Identity::from_pem(&bundle)
+            .map_err(|e| DkmsError::Crypto(format!("identity from pem: {e}")))?;
 
         let mut builder = Client::builder()
             .use_rustls_tls()
@@ -94,9 +86,7 @@ impl PeerHttpClient {
             builder = builder.add_root_certificate(ca_cert);
         }
 
-        let client = builder
-            .build()
-            .map_err(|e| DkmsError::Other(anyhow!(e)))?;
+        let client = builder.build().map_err(|e| DkmsError::Other(anyhow!(e)))?;
 
         debug!("peer http client ready (HTTP/2 + mTLS via reqwest::rustls)");
         Ok(Self {
@@ -150,17 +140,15 @@ impl PeerHttpClient {
 /// reqwest no acepta multi-PEM concatenado).
 fn parse_ca_bundle(pem: &[u8]) -> Result<Vec<Certificate>> {
     let mut out = Vec::new();
-    let text = std::str::from_utf8(pem).map_err(|e| {
-        DkmsError::Crypto(format!("peer_ca not valid utf-8: {e}"))
-    })?;
+    let text = std::str::from_utf8(pem)
+        .map_err(|e| DkmsError::Crypto(format!("peer_ca not valid utf-8: {e}")))?;
     let mut current = String::new();
     for line in text.lines() {
         current.push_str(line);
         current.push('\n');
         if line.starts_with("-----END CERTIFICATE-----") {
-            let cert = Certificate::from_pem(current.as_bytes()).map_err(|e| {
-                DkmsError::Crypto(format!("peer_ca cert parse: {e}"))
-            })?;
+            let cert = Certificate::from_pem(current.as_bytes())
+                .map_err(|e| DkmsError::Crypto(format!("peer_ca cert parse: {e}")))?;
             out.push(cert);
             current.clear();
         }

@@ -1,48 +1,36 @@
 //! Cross-cutting service state shared by the gRPC, HTTP, and background
-//! workers. This is the orchestration glue between [`TopologyStore`],
-//! [`BufferPriorityRegistry`], [`McfSolver`], and the live
-//! [`McfSnapshot`].
-//!
-//! The Python equivalent is the bag of state hanging off `app.state` in
-//! `code_dkms/src/SDN/main.py` plus the `Topology.recompute_mcf` method.
-//! We split it cleanly: `TopologyStore` keeps only graph/entities;
-//! `SdnService` keeps everything that's *driven by* the topology but
-//! lives at a different cadence (priorities, last MCF snapshot, the
-//! solver, etc.).
+//! workers. The orchestration glue between [`TopologyStore`], the
+//! [`DemandRegistry`], the [`crate::mcmcf::McmcfSolver`], and the
+//! live [`McfSnapshot`].
 
 use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use common::metrics::Metrics;
 use parking_lot::RwLock;
-use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::{
     config::SdnConfig,
     debounce::{estimate_timing, Debouncer},
+    demand::{DemandRegistry, SharedDemandRegistry},
     error::Result,
-    mcf::{Commodity, McfSnapshot, McfSolver},
-    priority::{BufferPriorityRegistry, BufferRole, TrafficPriority},
+    mcf::{BufferRole, McfSnapshot},
+    mcmcf::{McmcfInputs, McmcfSolver},
     push::Pushers,
     topology::{Topology, TopologyStore},
 };
-
-/// Cached commodity set, valid for a single topology version.
-type CommoditiesCache = RwLock<Option<(i64, Arc<Vec<Commodity>>)>>;
 
 #[derive(Clone)]
 pub struct SdnService {
     pub cfg: Arc<SdnConfig>,
     pub topology: TopologyStore,
-    pub priorities: Arc<BufferPriorityRegistry>,
-    pub solver: McfSolver,
     pub mcf_snapshot: Arc<ArcSwap<McfSnapshot>>,
     pub pushers: Arc<Pushers>,
     pub metrics: Metrics,
-    /// `(topology_version, commodities)`. Rebuilt whenever the
-    /// topology version differs from the cached one.
-    commodities: Arc<CommoditiesCache>,
+    /// Per-commodity demand reports POSTed by each DKMS via
+    /// `POST /demand`. Read by the MCMCF-λ solver on every recompute.
+    pub demand_registry: SharedDemandRegistry,
     /// Coalesces bursts of `request_recompute()` calls into one MCF
     /// solve. Built lazily — only constructed when there's a tokio
     /// runtime available (see `attach_debouncer`).
@@ -61,16 +49,13 @@ impl SdnService {
             },
             None => Topology::default(),
         };
-        let solver = McfSolver::new();
         let svc = Self {
             cfg: Arc::new(cfg),
             topology: TopologyStore::new(initial),
-            priorities: Arc::new(BufferPriorityRegistry::new()),
-            solver,
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics,
-            commodities: Arc::new(RwLock::new(None)),
+            demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
         };
         // Pre-warm the MCF snapshot so /rate, /forwarding-table, etc.
@@ -87,24 +72,11 @@ impl SdnService {
             .rate_for_buffer(dkms_id, peer_dkms_id, role)
     }
 
-    /// Re-run the MCF solve end-to-end and publish the resulting
-    /// snapshot. Mirrors `Topology.recompute_mcf` in the Python.
+    /// Re-run the MCMCF-λ solve end-to-end and publish the resulting
+    /// snapshot. Inputs are the topology snapshot + the
+    /// [`Self::demand_registry`] reported by DKMSs.
     pub fn recompute_mcf(&self) -> Arc<McfSnapshot> {
-        recompute_mcf_inner(
-            &self.topology,
-            &self.priorities,
-            self.solver,
-            &self.mcf_snapshot,
-            &self.commodities,
-        )
-    }
-
-    /// Force a rebuild of the commodity cache on the next call. Useful
-    /// when the topology mutated through paths that don't go via
-    /// [`TopologyStore::mutate`] (we shouldn't have any, but it's a
-    /// cheap escape hatch).
-    pub fn invalidate_commodities(&self) {
-        *self.commodities.write() = None;
+        recompute_mcf_inner(&self.topology, &self.demand_registry, &self.mcf_snapshot)
     }
 
     // ---------- debouncer wiring -----------------------------------------
@@ -130,12 +102,10 @@ impl SdnService {
         // Capture cloned handles (not `self`) so the closure has no
         // back-reference and the Drop chain doesn't form a cycle.
         let topo = self.topology.clone();
-        let prios = self.priorities.clone();
-        let solver = self.solver;
+        let demand = self.demand_registry.clone();
         let snap = self.mcf_snapshot.clone();
-        let cache = self.commodities.clone();
         let new_deb = Debouncer::new(window, max_wait, move || {
-            recompute_mcf_inner(&topo, &prios, solver, &snap, &cache);
+            recompute_mcf_inner(&topo, &demand, &snap);
         });
         info!(
             n_dkms = n,
@@ -194,32 +164,6 @@ impl SdnService {
         }
     }
 
-    /// Set a buffer's priority and either fire the recompute right
-    /// away or route through the debouncer.
-    ///
-    /// `Saturated` and `BestEffort` are "the buffer is full, please
-    /// slow down" signals — propagating them through a 2-8 s
-    /// debouncer means the sender keeps tipping keys into a peer
-    /// that doesn't want them during the entire grace period. So
-    /// those bypass and recompute immediately. Higher classes can be
-    /// coalesced safely.
-    pub fn set_priority_and_recompute(
-        &self,
-        dkms_id: &str,
-        peer_dkms_id: &str,
-        role: BufferRole,
-        priority: TrafficPriority,
-    ) -> Arc<McfSnapshot> {
-        self.priorities.set(dkms_id, peer_dkms_id, role, priority);
-        if priority == TrafficPriority::Saturated || priority == TrafficPriority::BestEffort {
-            return self.recompute_mcf();
-        }
-        self.request_recompute();
-        // The recompute may run later; in the meantime callers get the
-        // currently-published snapshot.
-        self.mcf_snapshot.load_full()
-    }
-
     /// Background loop: attaches the debouncer on the first tick and
     /// then ticks every `mcf_period_ms` as a heartbeat, asking for a
     /// recompute (which the debouncer will coalesce with whatever
@@ -238,16 +182,28 @@ impl SdnService {
         self.attach_debouncer(window_override, None);
 
         // Version watcher → broadcast TopologyEvent + push de forwarding
-        // tables a los QKCs. Cualquier mutación del grafo dispara:
-        //   1. Broadcast a subscribers (DKMS/ORR vacían cachés).
-        //   2. POST a `http://<qkc.host>/forwarding-table` con la tabla
-        //      `dst_qkc → next_hop` recalculada para cada QKC.
+        // tables a los QKCs. Dispara en dos eventos:
+        //   - cambio en `topology.version` (alta/baja de nodos, enlaces, ...)
+        //   - cambio en el `mcf_snapshot` publicado (LP recomputed con
+        //     nueva WCMP de la fase 4).
+        //
+        // Para cada QKC:
+        //   1. Si el `McfSnapshot` actual tiene una entrada WCMP en
+        //      `wcmp[qkc][dst]`, se POSTea verbatim como
+        //      `{dst: [{qkc_id, weight}, ...]}`.
+        //   2. Si no, se cae a `topology.next_hop_qkc(qkc, dst)`
+        //      (shortest-path) y se POSTea como single-hop
+        //      `[{qkc_id: nh, weight: 1}]`.
+        //
         // El push inicial (al arrancar SDN con `topology_dir` cargada)
-        // se dispara forzando un primer ciclo: arrancamos `last = -1`.
+        // se dispara forzando un primer ciclo: arrancamos
+        // `last_topo = -1`.
         {
             let topology = self.topology.clone();
+            let mcf_snap = self.mcf_snapshot.clone();
             let pushers = self.pushers.clone();
             tokio::spawn(async move {
+                use crate::mcf::WcmpNextHop;
                 use common::proto::sdn::v1::{
                     topology_event, Topology as ProtoTopology, TopologyEvent,
                 };
@@ -255,87 +211,111 @@ impl SdnService {
                     .timeout(Duration::from_millis(1500))
                     .build()
                     .expect("reqwest client");
-                let mut last: i64 = -1; // fuerza primer push al arrancar
+                let mut last_topo: i64 = -1; // fuerza primer push al arrancar
+                let mut last_snap_ptr: usize = 0;
                 let mut tick = tokio::time::interval(Duration::from_millis(200));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tick.tick().await;
                     let snap = topology.load();
-                    let now = snap.version;
-                    if now != last {
-                        // 1) Forwarding push: una POST por QKC. Concurrent
-                        //    via join_all para no serializar 9 QKCs.
-                        let mut futures = Vec::new();
-                        for (qkc_id, qkc) in &snap.qkcs {
-                            let mut table = std::collections::HashMap::<String, u32>::new();
-                            for other in snap.qkcs.keys() {
-                                if other == qkc_id {
-                                    continue;
-                                }
-                                if let Some(next) = snap.next_hop_qkc(qkc_id, other) {
-                                    if let Ok(nh) = next.parse::<u32>() {
-                                        table.insert(other.clone(), nh);
-                                    }
+                    let mcf = mcf_snap.load();
+                    let topo_v = snap.version;
+                    let snap_ptr = Arc::as_ptr(&mcf) as usize;
+                    if topo_v == last_topo && snap_ptr == last_snap_ptr {
+                        continue;
+                    }
+                    // 1) Forwarding push: una POST por QKC. Concurrent
+                    //    via join_all para no serializar 9 QKCs.
+                    let mut futures = Vec::new();
+                    for (qkc_id, qkc) in &snap.qkcs {
+                        let mut table: std::collections::HashMap<String, Vec<WcmpNextHop>> =
+                            std::collections::HashMap::new();
+                        let from_lp = mcf.wcmp.get(qkc_id);
+                        for other in snap.qkcs.keys() {
+                            if other == qkc_id {
+                                continue;
+                            }
+                            // Prefer LP-derived WCMP; fall back to
+                            // topology shortest-path. The QKC accepts
+                            // both wire shapes — single-element vec
+                            // with weight=1 is just a degenerate WCMP.
+                            if let Some(hops) = from_lp.and_then(|t| t.get(other)) {
+                                table.insert(other.clone(), hops.clone());
+                            } else if let Some(nh) = snap.next_hop_qkc(qkc_id, other) {
+                                if let Ok(qkc_id_num) = nh.parse::<u32>() {
+                                    table.insert(
+                                        other.clone(),
+                                        vec![WcmpNextHop {
+                                            qkc_id: qkc_id_num,
+                                            weight: 1,
+                                        }],
+                                    );
                                 }
                             }
-                            let url = format!(
-                                "http://{}:{}/forwarding-table",
-                                qkc.host.ip, qkc.host.port
-                            );
-                            let body = serde_json::json!({"replace": table});
-                            let client = http.clone();
-                            let qid = qkc_id.clone();
-                            futures.push(async move {
-                                match client.post(&url).json(&body).send().await {
-                                    Ok(r) if r.status().is_success() => Ok::<String, String>(qid),
-                                    Ok(r) => Err(format!("{qid}: HTTP {}", r.status())),
-                                    Err(e) => Err(format!("{qid}: {e}")),
-                                }
-                            });
                         }
-                        let results: Vec<std::result::Result<String, String>> =
-                            futures::future::join_all(futures).await;
-                        let (ok, err): (Vec<_>, Vec<_>) =
-                            results.into_iter().partition(|r| r.is_ok());
-                        info!(
-                            from = last,
-                            to = now,
-                            qkcs_ok = ok.len(),
-                            qkcs_err = err.len(),
-                            "forwarding push done"
-                        );
-                        for e in err.iter().take(3) {
-                            if let Err(s) = e {
-                                warn!(error = %s, "forwarding push failed");
+                        let url =
+                            format!("http://{}:{}/forwarding-table", qkc.host.ip, qkc.host.port);
+                        let body = serde_json::json!({"replace": table});
+                        let client = http.clone();
+                        let qid = qkc_id.clone();
+                        futures.push(async move {
+                            match client.post(&url).json(&body).send().await {
+                                Ok(r) if r.status().is_success() => Ok::<String, String>(qid),
+                                Ok(r) => Err(format!("{qid}: HTTP {}", r.status())),
+                                Err(e) => Err(format!("{qid}: {e}")),
                             }
+                        });
+                    }
+                    let results: Vec<std::result::Result<String, String>> =
+                        futures::future::join_all(futures).await;
+                    let (ok, err): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
+                    info!(
+                        topo_from = last_topo,
+                        topo_to = topo_v,
+                        qkcs_ok = ok.len(),
+                        qkcs_err = err.len(),
+                        snap_changed = (snap_ptr != last_snap_ptr),
+                        "forwarding push done"
+                    );
+                    for e in err.iter().take(3) {
+                        if let Err(s) = e {
+                            warn!(error = %s, "forwarding push failed");
                         }
+                    }
 
-                        // 2) Broadcast del evento (DKMS/ORR invalidan).
+                    // 2) Broadcast del evento de topology (sólo en
+                    //    bumps reales del grafo — el watcher de
+                    //    snapshot es interno de la fase 4).
+                    if topo_v != last_topo {
                         let ev = TopologyEvent {
                             event: Some(topology_event::Event::Snapshot(ProtoTopology {
                                 nodes: Vec::new(),
                                 links: Vec::new(),
-                                version: now,
+                                version: topo_v,
                             })),
-                            version: now,
+                            version: topo_v,
                         };
                         pushers.broadcast(ev).await;
-                        info!(from = last, to = now, "topology version changed; broadcast");
+                        info!(
+                            from = last_topo,
+                            to = topo_v,
+                            "topology version changed; broadcast"
+                        );
+                    }
 
-                        // SOLO marcamos esta versión como "ya empujada"
-                        // si TODOS los QKCs aceptaron el POST. Si alguno
-                        // falló (típicamente connection refused porque
-                        // el QKC todavía no levantó), no actualizamos
-                        // `last` para reintentar en el próximo tick.
-                        // Esto hace el orden de arranque irrelevante.
-                        if err.is_empty() {
-                            last = now;
-                        } else {
-                            warn!(
-                                qkcs_err = err.len(),
-                                "forwarding push partial; will retry next tick"
-                            );
-                        }
+                    // SOLO marcamos como "ya empujado" si TODOS los
+                    // QKCs aceptaron. Si alguno falló (typically
+                    // connection refused durante el race de arranque)
+                    // no avanzamos los `last_*` y reintentamos en el
+                    // siguiente tick.
+                    if err.is_empty() {
+                        last_topo = topo_v;
+                        last_snap_ptr = snap_ptr;
+                    } else {
+                        warn!(
+                            qkcs_err = err.len(),
+                            "forwarding push partial; will retry next tick"
+                        );
                     }
                 }
             });
@@ -349,120 +329,52 @@ impl SdnService {
             // and push deltas to DKMS/QKC.
         }
     }
-
-    /// Resolve the cached commodity set for the given topology
-    /// snapshot, rebuilding if the version has bumped. Exposed for
-    /// debug endpoints / tests that want to introspect what the
-    /// solver is operating on.
-    pub fn commodities_for(&self, topo: &Topology) -> Arc<Vec<Commodity>> {
-        get_or_build_commodities(&self.commodities, self.solver, topo)
-    }
 }
 
 // ---------------- free-function helpers shared with the debouncer closure ----
 
-/// Look up commodities for `topo`, rebuilding the cache if its
-/// version has bumped. Free function so the debouncer closure can
-/// call it with just the cache + solver references it captures.
-fn get_or_build_commodities(
-    cache: &CommoditiesCache,
-    solver: McfSolver,
-    topo: &Topology,
-) -> Arc<Vec<Commodity>> {
-    // Fast path: read lock, hope the cache matches the version.
-    {
-        let r = cache.read();
-        if let Some((v, c)) = r.as_ref() {
-            if *v == topo.version {
-                return c.clone();
-            }
-        }
-    }
-    // Slow path: take the write lock, double-check, build.
-    let mut w = cache.write();
-    if let Some((v, c)) = w.as_ref() {
-        if *v == topo.version {
-            return c.clone();
-        }
-    }
-    let built = Arc::new(solver.build_commodities(topo));
-    *w = Some((topo.version, built.clone()));
-    built
-}
-
-/// Full recompute pipeline. Free function because the debouncer
-/// closure captures these references directly — putting the body on
-/// `SdnService` would force the closure to capture `self`, creating
-/// a reference cycle through `SdnService::debouncer`.
+/// Full recompute pipeline — MCMCF-λ LP (phase 3).
+///
+/// Free function because the debouncer closure captures these
+/// references directly — putting the body on `SdnService` would
+/// force the closure to capture `self`, creating a reference cycle
+/// through `SdnService::debouncer`.
 ///
 /// Steps:
-///   1. Snapshot the topology + commodities (cached per version).
-///   2. Read per-flow weight from the priority registry, applying
-///      `min(ENC(src,dst), DEC(dst,src))`. Either endpoint being
-///      saturated drops the weight to 0 and excludes the flow.
-///   3. Run the solver on the *active* commodities only.
-///   4. Stitch explicit `rate=0` entries for the excluded flows so
-///      `/rate` returns 0 instead of "not found".
-///   5. Atomically publish the new snapshot via [`ArcSwap`].
+///   1. Snapshot the topology and the demand registry.
+///   2. Build [`McmcfInputs`] — every ordered DKMS pair with a valid
+///      QKC anchoring becomes a commodity. Unreported commodities
+///      get a synthetic `(L=0, B=DEFAULT, δ=0)` so the LP has work
+///      at SDN boot.
+///   3. Run the LP via [`McmcfSolver`].
+///   4. Adapt the solution to the legacy [`McfSnapshot`] shape so
+///      the `/rate` endpoint and the forwarding push loop stay
+///      unchanged.
+///   5. Atomically publish via [`ArcSwap`].
 fn recompute_mcf_inner(
     topo_store: &TopologyStore,
-    priorities: &Arc<BufferPriorityRegistry>,
-    solver: McfSolver,
+    demand_registry: &Arc<DemandRegistry>,
     snap_cell: &Arc<ArcSwap<McfSnapshot>>,
-    cache: &Arc<CommoditiesCache>,
 ) -> Arc<McfSnapshot> {
     let topo = topo_store.load();
-    let commodities = get_or_build_commodities(cache, solver, &topo);
+    let inputs = McmcfInputs::build(&topo, demand_registry);
+    let n_commodities = inputs.commodities.len();
+    let n_edges = inputs.edge_capacity.len();
+    let solution = McmcfSolver::new().solve(&inputs);
+    let lambda = solution.lambda;
+    let n_flows_positive = solution.rates.values().filter(|r| **r > 0.0).count();
+    let snap = solution.into_mcf_snapshot(&topo);
 
-    // ---- weights -----------------------------------------------------
-    let mut weights: HashMap<String, f64> = HashMap::with_capacity(commodities.len());
-    for c in commodities.iter() {
-        let enc = priorities.get(&c.src_dkms, &c.dst_dkms, BufferRole::EncKeys);
-        let dec = priorities.get(&c.dst_dkms, &c.src_dkms, BufferRole::DecKeys);
-        weights.insert(c.flow_id(), enc.weight().min(dec.weight()));
-    }
-
-    // ---- partition active / excluded ---------------------------------
-    let active: Vec<Commodity> = commodities
-        .iter()
-        .filter(|c| weights.get(&c.flow_id()).copied().unwrap_or(0.0) > 0.0)
-        .cloned()
-        .collect();
-    let active_weights: HashMap<String, f64> = active
-        .iter()
-        .map(|c| (c.flow_id(), weights[&c.flow_id()]))
-        .collect();
-    let excluded_count = commodities.len() - active.len();
-
-    // ---- solve --------------------------------------------------------
-    let caps = solver.capacities(&topo);
-    let mut snap = solver.solve(&active, &caps, &active_weights);
-
-    // ---- pin rate=0 for excluded flows --------------------------------
-    for c in commodities.iter() {
-        if weights.get(&c.flow_id()).copied().unwrap_or(0.0) > 0.0 {
-            continue;
-        }
-        snap.rates.entry(c.flow_id()).or_insert(0.0);
-        snap.rates_by_dkms
-            .entry(c.src_dkms.clone())
-            .or_default()
-            .insert((c.dst_dkms.clone(), BufferRole::EncKeys), 0.0);
-        snap.rates_by_dkms
-            .entry(c.dst_dkms.clone())
-            .or_default()
-            .insert((c.src_dkms.clone(), BufferRole::DecKeys), 0.0);
-    }
-
-    // ---- publish ------------------------------------------------------
     let arc = Arc::new(snap);
     snap_cell.store(arc.clone());
 
     info!(
-        commodities = commodities.len(),
-        excluded = excluded_count,
-        flows_with_rate = arc.rates.values().filter(|r| **r > 0.0).count(),
-        "mcf recomputed"
+        n_commodities,
+        n_edges,
+        lambda,
+        flows_with_rate = n_flows_positive,
+        registry_len = demand_registry.len(),
+        "MCMCF-λ recomputed"
     );
 
     arc
@@ -538,7 +450,7 @@ pub(crate) mod tests {
         t
     }
 
-    fn make_service() -> SdnService {
+    pub(crate) fn make_service() -> SdnService {
         SdnService {
             cfg: Arc::new(SdnConfig {
                 node_id: "test".into(),
@@ -551,12 +463,10 @@ pub(crate) mod tests {
                 push_debounce_ms: 100,
             }),
             topology: TopologyStore::new(small_topo()),
-            priorities: Arc::new(BufferPriorityRegistry::new()),
-            solver: McfSolver::new(),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics: Metrics::new("sdn-test"),
-            commodities: Arc::new(RwLock::new(None)),
+            demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
         }
     }
@@ -573,19 +483,36 @@ pub(crate) mod tests {
         assert!((live.rate_for_flow("dA", "dB") - snap.rate_for_flow("dA", "dB")).abs() < 1e-9);
     }
 
+    /// Helper: ingest a single-entry demand report into the service's
+    /// registry. Used by the post-MCMCF-λ tests below.
+    fn ingest_demand(svc: &SdnService, src: &str, dst: &str, level: f64, cap: f64, drain: f64) {
+        use crate::demand::{CommodityDemand, DemandReport};
+        svc.demand_registry.ingest(DemandReport {
+            dkms_id: src.into(),
+            entries: vec![CommodityDemand {
+                src_dkms: src.into(),
+                dst_dkms: dst.into(),
+                level,
+                capacity: cap,
+                drain_rate: drain,
+                timestamp_ms: 1,
+            }],
+        });
+    }
+
+    /// A buffer reported as full with zero drain produces r_k = 0
+    /// (the LP has nothing to do for that commodity). The opposite
+    /// direction still flows.
     #[test]
-    fn saturated_flow_is_pinned_to_zero() {
+    fn full_buffer_zero_drain_yields_zero_rate() {
         let svc = make_service();
-        // Mark the ENC side of dA→dB as Saturated. Weight collapses to 0.
-        svc.priorities
-            .set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated);
+        // dA→dB: full + no drain (R_k = 0, δ_k = 0).
+        // dB→dA: empty buffer (the default synthetic).
+        ingest_demand(&svc, "dA", "dB", 4096.0, 4096.0, 0.0);
         let snap = svc.recompute_mcf();
-        // The excluded flow appears in the snapshot at rate 0.
         assert!(snap.rates.contains_key("dA->dB"));
         assert_eq!(snap.rate_for_flow("dA", "dB"), 0.0);
-        // The opposite direction still flows.
         assert!(snap.rate_for_flow("dB", "dA") > 0.0);
-        // Buffer view also pinned.
         assert_eq!(
             snap.rates_by_dkms["dA"][&("dB".to_string(), BufferRole::EncKeys)],
             0.0,
@@ -596,142 +523,65 @@ pub(crate) mod tests {
         );
     }
 
+    /// Full buffer + positive drain → r_k = δ_k (drain compensation
+    /// only, no extra fill). Verifies the LP gives "just enough" to
+    /// keep level constant.
     #[test]
-    fn dec_side_saturation_also_excludes_flow() {
-        // The min(ENC, DEC) rule: saturating *either* endpoint should
-        // exclude the flow, not just the ENC side.
+    fn full_buffer_with_drain_returns_drain_rate() {
         let svc = make_service();
-        svc.priorities
-            .set("dB", "dA", BufferRole::DecKeys, TrafficPriority::Saturated);
+        // dA→dB: full + 25 kps drain. dB→dA: empty + 0 drain.
+        ingest_demand(&svc, "dA", "dB", 4096.0, 4096.0, 25.0);
         let snap = svc.recompute_mcf();
-        assert_eq!(snap.rate_for_flow("dA", "dB"), 0.0);
-    }
-
-    #[test]
-    fn commodities_cache_reuses_until_version_bumps() {
-        let svc = make_service();
-        let topo = svc.topology.load();
-        let v_before = topo.version;
-        let c1 = svc.commodities_for(&topo);
-        let c2 = svc.commodities_for(&topo);
-        assert!(Arc::ptr_eq(&c1, &c2), "same Arc returned within version");
-
-        // Mutate the topology — version bumps.
-        svc.topology.mutate(|t| {
-            t.upsert_qkc(Qkc {
-                id: "99".into(),
-                host: host(99),
-                kme_host: None,
-            });
-            true
-        });
-        let topo2 = svc.topology.load();
-        assert!(topo2.version > v_before);
-        let c3 = svc.commodities_for(&topo2);
-        assert!(!Arc::ptr_eq(&c1, &c3), "rebuilt after version bump");
-    }
-
-    #[test]
-    fn set_priority_and_recompute_returns_fresh_snapshot() {
-        let svc = make_service();
-        let _ = svc.recompute_mcf();
-        let before = svc.mcf_snapshot.load().rate_for_flow("dA", "dB");
-        assert!(before > 0.0);
-        let after_snap = svc.set_priority_and_recompute(
-            "dA",
-            "dB",
-            BufferRole::EncKeys,
-            TrafficPriority::Saturated,
+        let r_ab = snap.rate_for_flow("dA", "dB");
+        assert!(
+            (r_ab - 25.0).abs() < 0.5,
+            "r_ab should ≈ drain (25), got {r_ab}"
         );
-        assert_eq!(after_snap.rate_for_flow("dA", "dB"), 0.0);
     }
 
-    #[tokio::test]
-    async fn debouncer_attaches_and_coalesces_requests() {
+    /// Ingest a new demand report → recompute → snapshot reflects
+    /// the new commodity state. Verifies the demand registry ↔ LP
+    /// integration end-to-end.
+    #[test]
+    fn demand_update_then_recompute_changes_rate() {
         let svc = make_service();
-        // Pre-warm so the initial snapshot exists, then attach a fast
-        // debouncer for the test.
+        let before = svc.recompute_mcf().rate_for_flow("dA", "dB");
+        assert!(before > 0.0);
+        // Report the dA→dB buffer as full with no drain. The new
+        // recompute must drop its rate to zero.
+        ingest_demand(&svc, "dA", "dB", 4096.0, 4096.0, 0.0);
+        let after = svc.recompute_mcf();
+        assert_eq!(after.rate_for_flow("dA", "dB"), 0.0);
+        assert!(after.rate_for_flow("dB", "dA") > 0.0);
+    }
+
+    /// The debouncer coalesces a burst of `request_recompute` calls
+    /// into a single fire. Verifies via observable side-effect: an
+    /// in-flight demand registry change must be picked up by exactly
+    /// one (eventual) recompute, not 10 of them.
+    #[tokio::test]
+    async fn debouncer_coalesces_request_recomputes() {
+        let svc = make_service();
         svc.recompute_mcf();
         svc.attach_debouncer(
             Some(Duration::from_millis(40)),
             Some(Duration::from_secs(1)),
         );
-        // Pollute the registry, then fire a burst of requests. The
-        // debouncer should coalesce them into a single recompute.
-        svc.priorities
-            .set("dA", "dB", BufferRole::EncKeys, TrafficPriority::Saturated);
+        // Mutate the demand registry, then fire a burst of requests.
+        ingest_demand(&svc, "dA", "dB", 4096.0, 4096.0, 0.0);
         for _ in 0..10 {
             svc.request_recompute();
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        // Allow the window to elapse + a generous safety margin.
+        // Window elapses → exactly one recompute fires, picks up the
+        // new demand entry, snapshot reflects r_dA→dB = 0.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        // The debounced fire is async (spawn_blocking) — give it room.
         let mut tries = 0;
         while svc.mcf_snapshot.load().rate_for_flow("dA", "dB") != 0.0 && tries < 50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             tries += 1;
         }
         assert_eq!(svc.mcf_snapshot.load().rate_for_flow("dA", "dB"), 0.0);
-        svc.shutdown_debouncer();
-    }
-
-    #[tokio::test]
-    async fn saturated_signal_bypasses_debouncer() {
-        let svc = make_service();
-        svc.recompute_mcf();
-        svc.attach_debouncer(
-            Some(Duration::from_secs(60)), // huge window
-            Some(Duration::from_secs(600)),
-        );
-        // Even with a 60s window, the saturated signal should fire
-        // recompute synchronously and the snapshot should reflect the
-        // change immediately.
-        let snap = svc.set_priority_and_recompute(
-            "dA",
-            "dB",
-            BufferRole::EncKeys,
-            TrafficPriority::Saturated,
-        );
-        assert_eq!(snap.rate_for_flow("dA", "dB"), 0.0);
-        assert_eq!(svc.mcf_snapshot.load().rate_for_flow("dA", "dB"), 0.0);
-        svc.shutdown_debouncer();
-    }
-
-    #[tokio::test]
-    async fn priority_change_coalesces_through_debouncer() {
-        let svc = make_service();
-        svc.recompute_mcf();
-        svc.attach_debouncer(
-            Some(Duration::from_millis(40)),
-            Some(Duration::from_secs(1)),
-        );
-        // Setting Important is non-urgent → goes through the debouncer.
-        // The snapshot returned by the call is the *currently* published
-        // one (pre-change), since the recompute hasn't run yet.
-        let before = svc.mcf_snapshot.load().rate_for_flow("dA", "dB");
-        let returned = svc.set_priority_and_recompute(
-            "dA",
-            "dB",
-            BufferRole::EncKeys,
-            TrafficPriority::Important,
-        );
-        assert_eq!(returned.rate_for_flow("dA", "dB"), before);
-        // After the window elapses, the new weights have been applied.
-        // The fire is async (spawn_blocking) — give the snapshot room
-        // to settle.
-        let mut after = before;
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            after = svc.mcf_snapshot.load().rate_for_flow("dA", "dB");
-            if (after - before).abs() > f64::EPSILON {
-                break;
-            }
-        }
-        assert!(
-            (after - before).abs() > f64::EPSILON,
-            "rate should have changed after the debouncer fired (before={before}, after={after})",
-        );
         svc.shutdown_debouncer();
     }
 

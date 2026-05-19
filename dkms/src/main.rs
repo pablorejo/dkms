@@ -238,8 +238,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        if connected.is_none() && last_err.is_some() {
-            warn!(error = %last_err.unwrap(), endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable after 20 retries; continuing without it");
+        if let (None, Some(err)) = (&connected, &last_err) {
+            warn!(error = %err, endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable after 20 retries; continuing without it");
         }
         connected
     };
@@ -271,8 +271,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        if connected.is_none() && last_err.is_some() {
-            warn!(error = %last_err.unwrap(), "orr unreachable after 20 retries; continuing without it");
+        if let (None, Some(err)) = (&connected, &last_err) {
+            warn!(error = %err, "orr unreachable after 20 retries; continuing without it");
         }
         connected
     };
@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
     // buffers ENC compartidos contra cada peer.
     let mut ack_socket_addr: Option<std::net::SocketAddr> = cfg.generator.ack_socket_addr;
     let (generator_arc, ack_client_arc, sae_buf_buckets_arc) =
-        if orr.is_some() && cfg.generator.enabled {
+        if let (Some(orr_client), true) = (orr.as_ref(), cfg.generator.enabled) {
             // Derivar dirección de ACK socket: si no está explícita, usar
             // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
             if ack_socket_addr.is_none() {
@@ -318,10 +318,11 @@ async fn main() -> Result<()> {
             let ack_pending = Arc::new(AckPendingStore::new());
             let gen = Generator::new(
                 &cfg_with_addr,
-                orr.as_ref().unwrap().clone(),
+                orr_client.clone(),
                 sdn_http,
                 pool.clone(),
                 ack_pending.clone(),
+                svc.demand_tracker.clone(),
             );
             let gen_arc = gen.spawn_background();
 

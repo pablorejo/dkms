@@ -4,8 +4,8 @@ use common::proto::{
         sdn_control_server::{SdnControl, SdnControlServer},
         AdmissionRequest, AdmissionResponse, CapacityReport, ComputePathRequest,
         ComputePathResponse, DkmsMetric, GetOrrPathRequest, GetOrrPathResponse,
-        GetSaeBindingRequest, GetSaeBindingResponse, LinkUpdate, PathPolicy,
-        StreamTopologyRequest, Topology as ProtoTopology, TopologyEvent,
+        GetSaeBindingRequest, GetSaeBindingResponse, LinkUpdate, PathPolicy, StreamTopologyRequest,
+        Topology as ProtoTopology, TopologyEvent,
     },
 };
 use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -204,4 +204,3 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .await?;
     Ok(())
 }
-

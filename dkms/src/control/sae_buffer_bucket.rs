@@ -77,9 +77,7 @@ impl Bucket {
         self.refill(now);
         self.refill_rate = refill_rate;
         self.capacity = capacity;
-        if was_uninitialized {
-            self.tokens = capacity;
-        } else if self.tokens > capacity {
+        if was_uninitialized || self.tokens > capacity {
             self.tokens = capacity;
         }
     }

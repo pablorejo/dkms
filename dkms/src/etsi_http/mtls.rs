@@ -96,9 +96,7 @@ pub async fn serve_mtls(
             //   too. Without this the loadtest got status_code=0
             //   connection errors (test_sae.runtime_dkms_base_url with
             //   LOADTEST_DKMS_ENDPOINTS).
-            builder
-                .http1()
-                .timer(TokioTimer::new());
+            builder.http1().timer(TokioTimer::new());
             builder
                 .http2()
                 .timer(TokioTimer::new())

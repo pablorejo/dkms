@@ -124,7 +124,7 @@ impl AckClient {
         }
         let frame = AckFrame {
             from: self.my_dkms_id.clone(),
-            key_ids: key_ids.iter().cloned().collect(),
+            key_ids: key_ids.to_vec(),
         };
         let mut line = serde_json::to_string(&frame)?;
         line.push('\n');

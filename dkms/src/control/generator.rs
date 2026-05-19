@@ -36,13 +36,11 @@ use common::ids::KeyId;
 use crate::{
     config::{DkmsConfig, GeneratorCfg, PeerTransport},
     control::ack_pending::{AckPendingEntry, AckPendingStore},
-    control::priority::{classify, BufferQos},
     southbound::{
         orr::{
             HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_REQUEST_ID,
             HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
         },
-        sdn_http::PriorityUpdate,
         OrrClient, SdnHttpClient,
     },
     state::{buffer::TransportKey, BufferPool},
@@ -102,6 +100,15 @@ pub struct Generator {
     pub ack_pending: Arc<AckPendingStore>,
     orr: Arc<OrrClient>,
     sdn_http: Arc<SdnHttpClient>,
+    /// EWMA tracker shared with [`crate::service::DkmsService`].
+    /// The service updates it on every SAE request; the demand loop
+    /// here reads it to build the `POST /demand` payload sent to
+    /// the SDN.
+    demand_tracker: crate::demand_tracker::SharedDemandTracker,
+    /// Snapshot of `BufferCfg.capacity_per_peer` used as `B_k` in
+    /// the demand report. Stays constant for the lifetime of the
+    /// Generator (topology mutations don't resize buffers).
+    buffer_capacity_per_peer: usize,
     ack_endpoint: Option<String>,
     default_max_hops: i32,
 }
@@ -115,6 +122,7 @@ impl Generator {
         sdn_http: Arc<SdnHttpClient>,
         pool: Arc<BufferPool>,
         ack_pending: Arc<AckPendingStore>,
+        demand_tracker: crate::demand_tracker::SharedDemandTracker,
     ) -> Self {
         let mut peers_orr = HashMap::new();
         for (peer_id, pc) in &cfg.peers {
@@ -147,6 +155,8 @@ impl Generator {
             ack_pending,
             orr,
             sdn_http,
+            demand_tracker,
+            buffer_capacity_per_peer: cfg.buffer.capacity_per_peer,
             ack_endpoint,
             default_max_hops: cfg.southbound.default_max_hops,
         }
@@ -196,15 +206,16 @@ impl Generator {
         tokio::spawn(async move {
             log_loop.run_state_log_loop().await;
         });
-        let priority_loop = me.clone();
+        let demand_loop = me.clone();
         tokio::spawn(async move {
-            priority_loop.run_priority_loop().await;
+            demand_loop.run_demand_loop().await;
         });
         info!(
             my_dkms = %me.my_dkms_id,
             n_peers = me.peers_orr.len(),
             tick_ms = me.cfg.tick_ms,
             ack_timeout_ms = me.cfg.ack_timeout_ms,
+            demand_refresh_ms = me.cfg.demand_refresh_ms,
             "generator background started",
         );
         me
@@ -464,59 +475,85 @@ impl Generator {
         }
     }
 
-    /// Cada `priority_refresh_ms` recalcula el `BufferQos` de cada peer
-    /// a partir del fill_ratio de `buffer_enc[peer]`. Si la clase cambió
-    /// respecto a la última reportada, POSTea al SDN. El SDN re-computa
-    /// MCF y la siguiente consulta de `get_rates` ya devuelve las nuevas
-    /// rates para que el token bucket per-peer se ajuste.
+    /// Build a `DemandReport` for the current set of ORR-routed peers
+    /// and POST it to the SDN's `/demand` endpoint. One entry per
+    /// peer, even when its EWMA is 0 — the SDN solver needs to see
+    /// every commodity it might allocate rate to.
     ///
-    /// **NB sobre `ack_pending`**: NO lo metemos en el fill_ratio
-    /// porque las keys en-vuelo pueden expirar (acks perdidos cuando el
-    /// `buffer_dec[source]` del receptor está full) y dejar al buffer
-    /// "atascado" en Saturated por culpa de la histéresis. La
-    /// contra-presión ya la da el `max_in_flight` del propio loop de
-    /// emisión.
-    async fn run_priority_loop(self: Arc<Self>) {
-        // Cadencia propia (default 200ms) — INDEPENDIENTE del rate loop.
-        // Detectar cruces de umbral con baja latencia es crítico: el
-        // strict-priority del SDN penaliza los huecos en los que un peer
-        // sigue marcado como `priority` aunque su buffer ya esté en
-        // `important`. Solo se POSTea cuando la clase cambia, no hay
-        // spam.
-        let period = Duration::from_millis(self.cfg.priority_refresh_ms);
-        let mut last_reported: HashMap<String, BufferQos> = HashMap::new();
-        loop {
-            tokio::time::sleep(period).await;
-            let mut updates: Vec<PriorityUpdate> = Vec::new();
-            for peer in self.peers_orr.keys() {
-                let buf = self.pool.for_peer(peer);
-                let occupancy = buf.enc.len();
-                let cap = buf.enc.capacity().max(1);
-                let fill = (occupancy as f64 / cap as f64).clamp(0.0, 1.0);
-                let prev = last_reported.get(peer).copied();
-                let new_class = classify(fill, prev);
-                if Some(new_class) != prev {
-                    info!(
-                        peer = %peer,
-                        fill = format!("{:.3}", fill),
-                        from = ?prev.map(|p| p.as_str()),
-                        to = new_class.as_str(),
-                        "generator.priority transition",
-                    );
-                    updates.push(PriorityUpdate {
-                        dkms_id: self.my_dkms_id.clone(),
-                        peer: peer.clone(),
-                        role: "enc_keys".into(),
-                        class: new_class.as_str().into(),
-                    });
-                    last_reported.insert(peer.clone(), new_class);
+    /// Empty batches short-circuit inside `SdnHttpClient::post_demand`
+    /// (no network I/O), so a DKMS without peers stays quiet.
+    fn build_demand_report(&self, now_ms: i64) -> crate::southbound::DemandReport {
+        use crate::southbound::{CommodityDemand, DemandReport};
+        let cap = self.buffer_capacity_per_peer as f64;
+        let entries: Vec<CommodityDemand> = self
+            .peers_orr
+            .keys()
+            // Skip self: the DKMS config lists every DKMS (including
+            // this one) under `peers.<id>` so the SaeBindingCache can
+            // resolve every SAE. The MCMCF-λ commodity space excludes
+            // self-loops; the SDN rejects them with `malformed entry`
+            // otherwise.
+            .filter(|peer| peer.as_str() != self.my_dkms_id.as_str())
+            .map(|peer| {
+                let level = self.pool.for_peer(peer).enc.len() as f64;
+                let drain_rate = self.demand_tracker.rate(peer, now_ms);
+                CommodityDemand {
+                    src_dkms: self.my_dkms_id.clone(),
+                    dst_dkms: peer.clone(),
+                    level,
+                    capacity: cap,
+                    drain_rate,
+                    timestamp_ms: now_ms,
                 }
-            }
-            if updates.is_empty() {
+            })
+            .collect();
+        DemandReport {
+            dkms_id: self.my_dkms_id.clone(),
+            entries,
+        }
+    }
+
+    /// Periodic reporter that drives the SDN's `DemandRegistry`.
+    /// Every `demand_refresh_ms` (default 1 s) it snapshots
+    /// `(level, capacity, δ_k)` per peer and POSTs the batch to the
+    /// SDN. The MCMCF-λ solver reads from that registry on its next
+    /// recompute.
+    ///
+    /// Single-shot failures are warn-and-continue: the SDN's
+    /// registry just keeps the previous snapshot until the next tick
+    /// succeeds. We don't retry inside the tick because the next
+    /// tick will resend anyway, and stacking retries here would
+    /// build pressure on a flaky SDN.
+    async fn run_demand_loop(self: Arc<Self>) {
+        let period = Duration::from_millis(self.cfg.demand_refresh_ms.max(50));
+        let mut tick = tokio::time::interval(period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let report = self.build_demand_report(now_ms);
+            if report.entries.is_empty() {
                 continue;
             }
-            if let Err(e) = self.sdn_http.post_priority(&updates).await {
-                warn!(error = %e, n = updates.len(), "generator.priority POST failed");
+            match self.sdn_http.post_demand(&report).await {
+                Ok(applied) => {
+                    if !applied.errors.is_empty() {
+                        warn!(
+                            n_errors = applied.errors.len(),
+                            registry_len = applied.registry_len,
+                            "generator.demand SDN rejected entries"
+                        );
+                    } else {
+                        debug!(
+                            n = applied.accepted,
+                            registry_len = applied.registry_len,
+                            "generator.demand POST ok"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, n = report.entries.len(), "generator.demand POST failed");
+                }
             }
         }
     }

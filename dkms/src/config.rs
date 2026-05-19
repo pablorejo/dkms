@@ -271,13 +271,13 @@ pub struct GeneratorCfg {
     /// Periodo de polling de rates al SDN (ms). El SDN re-calcula MCF
     /// cada `mcf_period_ms` (5s típico), así que 5000-10000 está bien.
     pub rate_refresh_ms: u64,
-    /// Periodo de evaluación del fill_ratio + POST /priority al SDN (ms).
-    /// Independiente de `rate_refresh_ms` porque detectar cruces de
-    /// umbral con baja latencia es clave para que el strict-priority del
-    /// SDN no genere huecos: si un peer cruza umbral y tarda 5s en avisar,
-    /// durante ese hueco el SDN sigue dándole rate alta y sus vecinos
-    /// quedan congelados. Default 200ms = 25× más fino que el rate loop.
-    pub priority_refresh_ms: u64,
+    /// Periodo de reporte `POST /demand` al SDN (ms). Cada DKMS envía,
+    /// por cada peer, una snapshot `(level, capacity, δ_k)` que el
+    /// solver MCMCF-λ consume como demanda escalada por λ. La EWMA del
+    /// drain ya suaviza picos, así que 1000 ms es un buen default: el
+    /// SDN reactúa rápido sin saturar la red de control. Sólo se POSTea
+    /// cuando el batch tiene al menos un peer (ver `run_demand_loop`).
+    pub demand_refresh_ms: u64,
     /// Deadline máximo que una clave permanece en `ack_pending` antes
     /// de descartarse (ms). Debe cubrir el round-trip ORR+QKC+ACK socket.
     pub ack_timeout_ms: u64,
@@ -311,7 +311,7 @@ impl Default for GeneratorCfg {
             key_size_bytes: 32,
             tick_ms: 100,
             rate_refresh_ms: 1_000,
-            priority_refresh_ms: 200,
+            demand_refresh_ms: 1_000,
             ack_timeout_ms: 30_000,
             ack_reaper_ms: 1_000,
             ack_socket_addr: None,

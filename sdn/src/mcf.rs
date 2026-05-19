@@ -1,85 +1,114 @@
-//! Min-Cost-Flow solver for the SDN — strict-priority + round-robin
-//! (water-filling) within each priority class.
+//! Data types shared between the MCMCF-λ solver and the rest of the
+//! SDN (HTTP endpoints, forwarding push loop, downstream consumers).
 //!
-//! This is a direct port of the productive path of the Python solver
-//! (`code_dkms/src/SDN/mcf.py::_solve_strict_priority_within_class`,
-//! plus `_solve_proportional_fair`'s water-filling). The legacy
-//! `scipy.optimize.linprog`-based lex-max-min solver is intentionally
-//! omitted — the Python branch we mirror uses SP+RR exclusively.
+//! ## Phase 6 housekeeping
 //!
-//! Algorithm sketch:
+//! The original `McfSolver` lived here — a strict-priority +
+//! round-robin water-filling solver ported from the Python codebase.
+//! It was retired in phase 3 once the MCMCF-λ LP took over, and
+//! deleted in phase 6 once its QoS-class machinery (`priority.rs`)
+//! went with it. What remains is the wire-level types that the LP
+//! produces and that the rest of the SDN consumes:
 //!
-//! 1. **Build commodities.** For every ordered DKMS pair `(s, d)` with
-//!    distinct anchor QKCs, pre-compute up to `k_paths` shortest paths
-//!    (Yen over BFS). Each commodity carries `src_qkc`, `dst_qkc` and
-//!    its candidate paths.
-//! 2. **Group by priority.** Each flow gets a weight from the caller
-//!    (default 1.0); higher weight = higher class.
-//! 3. **For each class, descending weight:** run proportional-fair
-//!    water-filling over the *remaining* edge capacities. The flows in
-//!    that class share capacity fairly; flows in lower classes only
-//!    see what's left over.
-//! 4. **Subtract used capacity** along the shortest path of each flow
-//!    that got a non-zero rate, then move to the next class.
-//!
-//! Water-filling fixed point:
-//!
-//! ```text
-//!   r_i = w_i / Σ_{e ∈ p_i} λ_e
-//!   λ_e ← λ_e · exp(η · (usage_e − C_e) / C_e)
-//! ```
-//!
-//! Converges in ~50–200 iterations for the sizes we care about. Pure
-//! arithmetic over `Vec<f64>` — no extra deps required.
+//! - [`flow_id`] — canonical `"src->dst"` string used as a map key.
+//! - [`BufferRole`] — `EncKeys` / `DecKeys` enum for the per-buffer
+//!   rate view in [`McfSnapshot::rates_by_dkms`].
+//! - [`WcmpNextHop`] — one entry of a weighted forwarding table,
+//!   serialised verbatim into the QKC's `POST /forwarding-table`
+//!   body.
+//! - [`McfSnapshot`] — the published view of "what the SDN wants
+//!   every DKMS / QKC to do right now". Built by
+//!   [`crate::mcmcf::McmcfSolution::into_mcf_snapshot`].
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
-use tracing::debug;
-
-use crate::topology::{edge_key, EdgeKey, Topology};
-
-// Re-export so call sites can keep using `mcf::BufferRole` as the
-// solver-facing name while the canonical definition lives next to the
-// rest of the priority machinery.
-pub use crate::priority::BufferRole;
-
-// ---------------------------------------------------------------- types
-
-/// A path in the QKC graph: ordered sequence of QKC ids.
-pub type Path = Vec<String>;
+use serde::Serialize;
 
 /// Build the canonical id used to key a flow `(src_dkms → dst_dkms)`.
+/// Stable serialisation so two snapshots over identical inputs hash
+/// the same.
 pub fn flow_id(src_dkms: &str, dst_dkms: &str) -> String {
     format!("{src_dkms}->{dst_dkms}")
 }
 
-/// One MCF commodity = an ordered DKMS pair plus its shortest path
-/// (already projected onto QKCs).
-#[derive(Debug, Clone)]
-pub struct Commodity {
-    pub src_dkms: String,
-    pub dst_dkms: String,
-    pub src_qkc: String,
-    pub dst_qkc: String,
-    pub path: Path,
+/// Which side of a directional commodity a buffer represents. Each
+/// DKMS sees two roles for every peer:
+///
+/// * `EncKeys`: the buffer the DKMS *fills* when it acts as the
+///   source of a commodity — keys it will hand to a SAE for
+///   encryption.
+/// * `DecKeys`: the mirror buffer the *destination* DKMS holds for
+///   the same commodity — keys it uses to decrypt material handed
+///   back by a SAE.
+///
+/// The MCMCF-λ commodity is single-directional (one `r_k` per
+/// ordered pair), but the per-DKMS view in
+/// [`McfSnapshot::rates_by_dkms`] surfaces both perspectives so the
+/// DKMS' `/rate` poll can drive both buffers from the same snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum BufferRole {
+    EncKeys,
+    DecKeys,
 }
 
-impl Commodity {
-    pub fn flow_id(&self) -> String {
-        flow_id(&self.src_dkms, &self.dst_dkms)
+impl BufferRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BufferRole::EncKeys => "enc_keys",
+            BufferRole::DecKeys => "dec_keys",
+        }
     }
 }
 
-/// Result of a solve: per-flow rate, forwarding table per QKC, and a
-/// per-DKMS buffer view.
+impl fmt::Display for BufferRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BufferRole {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "enc_keys" => Ok(BufferRole::EncKeys),
+            "dec_keys" => Ok(BufferRole::DecKeys),
+            _ => Err(format!("unknown buffer role: {s}")),
+        }
+    }
+}
+
+/// One weighted next-hop entry in a WCMP forwarding table. Mirrors
+/// the wire shape consumed by the QKC's `POST /forwarding-table`
+/// endpoint (`{"qkc_id": N, "weight": W}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WcmpNextHop {
+    pub qkc_id: u32,
+    pub weight: u32,
+}
+
+/// Published view of the SDN's current allocation: per-flow rates,
+/// per-DKMS buffer rates, and the WCMP forwarding tables that go to
+/// the QKCs.
+///
+/// Built by [`crate::mcmcf::McmcfSolution::into_mcf_snapshot`] and
+/// stored behind an `ArcSwap` in [`crate::service::SdnService`].
 #[derive(Debug, Default, Clone)]
 pub struct McfSnapshot {
-    /// `flow_id → r_f` (keys/s). Only flows with positive rate appear.
+    /// `flow_id → r_f` (keys/s). Includes flows with `r_f = 0` so a
+    /// DKMS polling `/rate` can distinguish "known commodity, no
+    /// rate" from "unknown".
     pub rates: HashMap<String, f64>,
 
-    /// `qkc_id → flow_id → next_hop_qkc`. Single-path: each flow has
-    /// exactly one next hop per intermediate QKC.
-    pub forwarding: HashMap<String, HashMap<String, String>>,
+    /// `qkc_id → dst_qkc → Vec<WcmpNextHop>` — Ford-Fulkerson
+    /// decomposition of the LP's edge-flow assignment, expressed as
+    /// per-destination WCMP entries. The forwarding push loop POSTs
+    /// this map to each QKC's `/forwarding-table` endpoint.
+    ///
+    /// Empty `(qkc, dst)` pairs fall back to topology
+    /// `shortest_path_qkc` in the push loop.
+    pub wcmp: HashMap<String, HashMap<String, Vec<WcmpNextHop>>>,
 
     /// `dkms_id → (peer_dkms, role) → r_f`. For a flow `A → B` with
     /// rate `r`:
@@ -109,688 +138,47 @@ impl McfSnapshot {
     }
 }
 
-// ---------------------------------------------------------------- K-shortest
-
-/// Up to `k` simple shortest paths from `src` to `dst` in `graph`, in
-/// non-decreasing number-of-hops order.
-pub fn shortest_path(
-    graph: &HashMap<String, HashSet<String>>,
-    src: &str,
-    dst: &str,
-) -> Option<Path> {
-    if src == dst || !graph.contains_key(src) || !graph.contains_key(dst) {
-        return None;
-    }
-    bfs_shortest(graph, &HashSet::new(), &HashSet::new(), src, dst)
-}
-
-fn bfs_shortest(
-    graph: &HashMap<String, HashSet<String>>,
-    excluded_edges: &HashSet<EdgeKey>,
-    excluded_nodes: &HashSet<String>,
-    start: &str,
-    dst: &str,
-) -> Option<Path> {
-    if start == dst {
-        return Some(vec![start.to_string()]);
-    }
-    let mut prev: HashMap<String, Option<String>> = HashMap::new();
-    prev.insert(start.into(), None);
-    let mut queue: VecDeque<String> = VecDeque::from([start.to_string()]);
-    while let Some(node) = queue.pop_front() {
-        let mut neighbors: Vec<&String> = graph
-            .get(&node)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
-        neighbors.sort();
-        for n in neighbors {
-            if prev.contains_key(n) {
-                continue;
-            }
-            if excluded_nodes.contains(n) && n != dst {
-                continue;
-            }
-            if excluded_edges.contains(&edge_key(&node, n)) {
-                continue;
-            }
-            prev.insert(n.clone(), Some(node.clone()));
-            if n == dst {
-                let mut path = vec![dst.to_string()];
-                let mut cur = dst.to_string();
-                while let Some(Some(p)) = prev.get(&cur).cloned() {
-                    path.push(p.clone());
-                    cur = p;
-                }
-                path.reverse();
-                return Some(path);
-            }
-            queue.push_back(n.clone());
-        }
-    }
-    None
-}
-
-fn path_edges(path: &[String]) -> Vec<EdgeKey> {
-    path.windows(2).map(|w| edge_key(&w[0], &w[1])).collect()
-}
-
-// ---------------------------------------------------------------- Solver
-
-/// SDN MCF solver. Stateless.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct McfSolver;
-
-impl McfSolver {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Generate the full commodity set from a topology snapshot. Pairs
-    /// of DKMSs anchored to the same QKC are skipped (no physical link
-    /// in between → no demand on the network).
-    pub fn build_commodities(&self, topo: &Topology) -> Vec<Commodity> {
-        let mut dkms_ids: Vec<&str> = topo.dkms.keys().map(String::as_str).collect();
-        dkms_ids.sort();
-
-        let mut out = Vec::with_capacity(dkms_ids.len() * dkms_ids.len().saturating_sub(1));
-        for &s in &dkms_ids {
-            for &d in &dkms_ids {
-                if s == d {
-                    continue;
-                }
-                let Some(src_qkc) = topo.qkc_of_dkms(s).map(str::to_string) else {
-                    continue;
-                };
-                let Some(dst_qkc) = topo.qkc_of_dkms(d).map(str::to_string) else {
-                    continue;
-                };
-                if src_qkc == dst_qkc {
-                    continue;
-                }
-                let Some(path) = shortest_path(&topo.graph, &src_qkc, &dst_qkc) else {
-                    continue;
-                };
-                out.push(Commodity {
-                    src_dkms: s.into(),
-                    dst_dkms: d.into(),
-                    src_qkc,
-                    dst_qkc,
-                    path,
-                });
-            }
-        }
-        out
-    }
-
-    /// Produce the per-edge capacity map (keys/s) from a topology
-    /// snapshot. Keys are canonical sorted pairs, matching the format
-    /// the solver consumes.
-    pub fn capacities(&self, topo: &Topology) -> HashMap<EdgeKey, f64> {
-        topo.edges
-            .iter()
-            .map(|(k, m)| (k.clone(), m.quditto_capacity_keys_per_second()))
-            .collect()
-    }
-
-    /// Run the solver. `weights` maps `flow_id → w_f`; missing flows
-    /// default to `1.0`. Flows with weight `≤ 0` are excluded entirely
-    /// (the caller is expected to override their rate to 0 outside).
-    ///
-    /// Strategy: **hybrid two-tier weighted max-min**.
-    ///
-    /// * **HIGH tier** (`w ≥ TIER_THRESHOLD`): the upper QoS classes
-    ///   (Priority, Important, Quickly) compete for the full edge
-    ///   capacity via weighted max-min — decade-spaced weights give
-    ///   them a 10×/100× ratio without starving each other.
-    /// * **LOW tier** (`0 < w < TIER_THRESHOLD`): the lower classes
-    ///   (Relax, BestEffort) see only the **residual** capacity left
-    ///   by the HIGH tier. Strict between tiers, max-min within.
-    ///
-    /// With the default class weights (Pri=10000, Imp=1000, Qkly=100,
-    /// Relax=10, BE=1), `TIER_THRESHOLD = 100.0` puts the natural
-    /// boundary between Quickly and Relax.
-    pub fn solve(
-        &self,
-        commodities: &[Commodity],
-        capacities: &HashMap<EdgeKey, f64>,
-        weights: &HashMap<String, f64>,
-    ) -> McfSnapshot {
-        const TIER_THRESHOLD: f64 = 100.0;
-
-        let weight_of = |c: &Commodity| weights.get(&c.flow_id()).copied().unwrap_or(1.0);
-        let high: Vec<&Commodity> = commodities
-            .iter()
-            .filter(|c| weight_of(c) >= TIER_THRESHOLD)
-            .collect();
-        let low: Vec<&Commodity> = commodities
-            .iter()
-            .filter(|c| {
-                let w = weight_of(c);
-                w > 0.0 && w < TIER_THRESHOLD
-            })
-            .collect();
-
-        // First pass: HIGH tier on the full capacity.
-        let mut snap = McfSnapshot::default();
-        let mut remaining = capacities.clone();
-        if !high.is_empty() {
-            let sub = self.weighted_maxmin(&high, &remaining, weights);
-            self.subtract_usage(&mut remaining, &high, &sub);
-            self.merge_into(&mut snap, sub);
-        }
-        // Second pass: LOW tier on what's left.
-        if !low.is_empty() && remaining.values().any(|c| *c > 1e-9) {
-            let sub = self.weighted_maxmin(&low, &remaining, weights);
-            self.merge_into(&mut snap, sub);
-        }
-        debug!(
-            high = high.len(),
-            low = low.len(),
-            flows_with_rate = snap.rates.len(),
-            "hybrid solve done"
-        );
-        snap
-    }
-
-    /// Subtract flow rates from `remaining` along each commodity's
-    /// shortest path. Single-path: each flow consumes its rate from
-    /// every edge on its single path.
-    fn subtract_usage(
-        &self,
-        remaining: &mut HashMap<EdgeKey, f64>,
-        commodities: &[&Commodity],
-        snap: &McfSnapshot,
-    ) {
-        for c in commodities {
-            let fid = c.flow_id();
-            let Some(&r) = snap.rates.get(&fid) else {
-                continue;
-            };
-            if r <= 0.0 {
-                continue;
-            }
-            for (u, v) in c.path.iter().zip(c.path.iter().skip(1)) {
-                let k = edge_key(u, v);
-                if let Some(cap) = remaining.get_mut(&k) {
-                    *cap = (*cap - r).max(0.0);
-                }
-            }
-        }
-    }
-
-    fn merge_into(&self, dst: &mut McfSnapshot, src: McfSnapshot) {
-        for (fid, r) in src.rates {
-            dst.rates.insert(fid, r);
-        }
-        for (dkms, m) in src.rates_by_dkms {
-            dst.rates_by_dkms.entry(dkms).or_default().extend(m);
-        }
-        for (qkc, ft) in src.forwarding {
-            let merged = dst.forwarding.entry(qkc).or_default();
-            for (fid, nxt) in ft {
-                merged.insert(fid, nxt);
-            }
-        }
-    }
-
-    // -------------------------------------------------------- Weighted max-min
-    //
-    // Progressive-filling algorithm — at each iteration grow every
-    // active flow by `w_i × Δ` where Δ is the largest increment any
-    // edge can absorb. The first edge to saturate freezes the flows
-    // passing through it; the remaining flows keep growing on the
-    // remaining capacity. Repeat until no flow is active.
-    //
-    // Properties (with decade-spaced class weights):
-    // * Within a tier, Priority gets ≈10× Important's rate on a shared
-    //   edge; no class is pinned to 0.
-    // * Caller (`solve`) supplies the per-tier commodity subset; this
-    //   routine doesn't know about tiers.
-    // * O(F × E) per iteration, at most E iterations → O(F × E²).
-    //   For the typical sim (12 flows × 6 edges) this is trivial.
-
-    fn weighted_maxmin(
-        &self,
-        commodities: &[&Commodity],
-        capacities: &HashMap<EdgeKey, f64>,
-        weights: &HashMap<String, f64>,
-    ) -> McfSnapshot {
-        let mut snap = McfSnapshot::default();
-        if commodities.is_empty() || capacities.is_empty() {
-            return snap;
-        }
-
-        // Stable edge ordering.
-        let edge_list: Vec<EdgeKey> = {
-            let mut v: Vec<_> = capacities.keys().cloned().collect();
-            v.sort();
-            v
-        };
-        let edge_idx: HashMap<&EdgeKey, usize> =
-            edge_list.iter().enumerate().map(|(i, k)| (k, i)).collect();
-        let n_edges = edge_list.len();
-
-        // Por commodity: lista de edge_idx del path + peso.
-        let mut c_edges: Vec<Vec<usize>> = Vec::with_capacity(commodities.len());
-        let mut c_weights: Vec<f64> = Vec::with_capacity(commodities.len());
-        for c in commodities {
-            let w = weights.get(&c.flow_id()).copied().unwrap_or(1.0);
-            let mut edges_in_subgraph: Vec<usize> = Vec::new();
-            for ek in path_edges(&c.path) {
-                if let Some(&e) = edge_idx.get(&ek) {
-                    edges_in_subgraph.push(e);
-                }
-            }
-            c_edges.push(edges_in_subgraph);
-            c_weights.push(w);
-        }
-
-        let n_c = commodities.len();
-        let caps: Vec<f64> = edge_list.iter().map(|k| capacities[k]).collect();
-
-        let mut c_rates = vec![0.0_f64; n_c];
-        let mut remaining = caps.clone();
-        // Active iff weight > 0 AND has at least one edge in subgraph.
-        let mut active: Vec<bool> =
-            (0..n_c).map(|i| c_weights[i] > 0.0 && !c_edges[i].is_empty()).collect();
-
-        const EPS: f64 = 1e-9;
-        let mut guard = 0usize;
-        loop {
-            guard += 1;
-            if guard > n_edges + 2 {
-                debug!("weighted_maxmin: guard tripped at iter {guard}");
-                break;
-            }
-            // Suma de pesos de commodities activos que cruzan cada edge.
-            let mut edge_w: Vec<f64> = vec![0.0; n_edges];
-            for i in 0..n_c {
-                if !active[i] {
-                    continue;
-                }
-                for &e in &c_edges[i] {
-                    edge_w[e] += c_weights[i];
-                }
-            }
-            // Δ máximo admisible en cada edge.
-            let mut delta = f64::INFINITY;
-            for e in 0..n_edges {
-                if edge_w[e] > EPS && remaining[e] > EPS {
-                    let d = remaining[e] / edge_w[e];
-                    if d < delta {
-                        delta = d;
-                    }
-                }
-            }
-            if !delta.is_finite() || delta <= EPS {
-                break;
-            }
-            // Crecer commodities activos proporcional a su peso.
-            for i in 0..n_c {
-                if active[i] {
-                    c_rates[i] += c_weights[i] * delta;
-                }
-            }
-            // Restar capacidad consumida en cada edge.
-            for e in 0..n_edges {
-                if edge_w[e] > EPS {
-                    remaining[e] -= edge_w[e] * delta;
-                    if remaining[e] < EPS {
-                        remaining[e] = 0.0;
-                    }
-                }
-            }
-            // Congelar commodities cuyos paths cruzan algún edge saturado.
-            let saturated: Vec<usize> =
-                (0..n_edges).filter(|&e| remaining[e] <= EPS).collect();
-            if saturated.is_empty() {
-                break;
-            }
-            for i in 0..n_c {
-                if !active[i] {
-                    continue;
-                }
-                if c_edges[i].iter().any(|e| saturated.contains(e)) {
-                    active[i] = false;
-                }
-            }
-            if !active.iter().any(|&a| a) {
-                break;
-            }
-        }
-
-        for (c_idx, c) in commodities.iter().enumerate() {
-            let r = c_rates[c_idx];
-            if r <= 0.0 {
-                continue;
-            }
-            let fid = c.flow_id();
-            snap.rates.insert(fid.clone(), r);
-
-            // Forwarding single-path: cada hop intermedio del path
-            // tiene un único next_hop para este flow.
-            for w in c.path.windows(2) {
-                let u = &w[0];
-                let nxt = &w[1];
-                snap.forwarding
-                    .entry(u.clone())
-                    .or_default()
-                    .insert(fid.clone(), nxt.clone());
-            }
-
-            snap.rates_by_dkms
-                .entry(c.src_dkms.clone())
-                .or_default()
-                .insert((c.dst_dkms.clone(), BufferRole::EncKeys), r);
-            snap.rates_by_dkms
-                .entry(c.dst_dkms.clone())
-                .or_default()
-                .insert((c.src_dkms.clone(), BufferRole::DecKeys), r);
-        }
-
-        debug!(
-            commodities = commodities.len(),
-            edges = n_edges,
-            iters = guard,
-            "weighted_maxmin done"
-        );
-        snap
-    }
-}
-
-// ---------------------------------------------------------------- tests
-
+// ----------------------------------------------------------------- tests
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc};
 
-    fn graph_from(edges: &[(&str, &str)]) -> HashMap<String, HashSet<String>> {
-        let mut g: HashMap<String, HashSet<String>> = HashMap::new();
-        for (a, b) in edges {
-            g.entry((*a).into()).or_default().insert((*b).into());
-            g.entry((*b).into()).or_default().insert((*a).into());
-        }
-        g
+    #[test]
+    fn flow_id_is_stable() {
+        assert_eq!(flow_id("dA", "dB"), "dA->dB");
+        assert_eq!(flow_id("dA", "dB"), flow_id("dA", "dB"));
     }
 
     #[test]
-    fn shortest_path_finds_short_route() {
-        // Graph 1 -- 2 -- 3 -- 4.
-        let g = graph_from(&[("1", "2"), ("2", "3"), ("3", "4")]);
-        let p = shortest_path(&g, "1", "4").unwrap();
-        assert_eq!(p, vec!["1", "2", "3", "4"]);
+    fn buffer_role_serialises_and_parses() {
+        assert_eq!(BufferRole::EncKeys.as_str(), "enc_keys");
+        assert_eq!(BufferRole::DecKeys.as_str(), "dec_keys");
+        assert_eq!(
+            "enc_keys".parse::<BufferRole>().unwrap(),
+            BufferRole::EncKeys
+        );
+        assert_eq!(
+            "dec_keys".parse::<BufferRole>().unwrap(),
+            BufferRole::DecKeys
+        );
+        assert!("priority".parse::<BufferRole>().is_err());
     }
 
     #[test]
-    fn shortest_path_none_on_disconnected() {
-        let g = graph_from(&[("1", "2"), ("3", "4")]);
-        assert!(shortest_path(&g, "1", "4").is_none());
-    }
-
-    // ----------------------------------------------------------------
-    // filter_overlapping_paths
-    // ----------------------------------------------------------------
-
-    fn host(id: i64) -> HostEndpoint {
-        HostEndpoint {
-            id,
-            ip: format!("10.0.0.{id}"),
-            port: 9000 + id as u16,
-        }
-    }
-
-    fn small_topo() -> Topology {
-        // QKCs: 1 - 2 - 3 (linear).
-        // DKMSs: dA@1, dB@3.
-        let mut t = Topology::default();
-        for q in ["1", "2", "3"] {
-            t.upsert_qkc(Qkc {
-                id: q.into(),
-                host: host(q.parse().unwrap()),
-                kme_host: None,
-            });
-        }
-        t.add_edge(
-            "1",
-            "2",
-            EdgeMeta {
-                distance_km: 0,
-                r0_keys_per_second: 100.0,
-                alpha: 0.2,
-                max_buffer_size: 10,
-            },
-        );
-        t.add_edge(
-            "2",
-            "3",
-            EdgeMeta {
-                distance_km: 0,
-                r0_keys_per_second: 100.0,
-                alpha: 0.2,
-                max_buffer_size: 10,
-            },
-        );
-        t.upsert_orr(Orr {
-            id: "o1".into(),
-            host: host(11),
-            qkc_id: "1".into(),
-        });
-        t.upsert_orr(Orr {
-            id: "o3".into(),
-            host: host(13),
-            qkc_id: "3".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dA".into(),
-            host: host(21),
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dB".into(),
-            host: host(23),
-            tls_id: None,
-            orr_id: "o3".into(),
-        });
-        t
+    fn rate_for_buffer_resolves_encdec_views() {
+        let mut snap = McfSnapshot::default();
+        snap.rates.insert(flow_id("dA", "dB"), 100.0);
+        snap.rates.insert(flow_id("dB", "dA"), 50.0);
+        assert_eq!(snap.rate_for_buffer("dA", "dB", BufferRole::EncKeys), 100.0);
+        assert_eq!(snap.rate_for_buffer("dB", "dA", BufferRole::DecKeys), 100.0);
+        assert_eq!(snap.rate_for_buffer("dB", "dA", BufferRole::EncKeys), 50.0);
+        assert_eq!(snap.rate_for_buffer("dA", "dB", BufferRole::DecKeys), 50.0);
     }
 
     #[test]
-    fn solver_assigns_rates_to_all_commodities() {
-        let topo = small_topo();
-        let s = McfSolver::new();
-        let coms = s.build_commodities(&topo);
-        // dA→dB and dB→dA (different commodities, independent flows).
-        assert_eq!(coms.len(), 2);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-        for c in &coms {
-            assert!(snap.rates.get(&c.flow_id()).copied().unwrap_or(0.0) > 0.0);
-        }
-        // Buffer view: dA pushes ENC to dB, dB receives DEC from dA.
-        let r_ab = snap.rate_for_flow("dA", "dB");
-        assert!(
-            (snap.rates_by_dkms["dA"][&("dB".to_string(), BufferRole::EncKeys)] - r_ab).abs()
-                < 1e-9
-        );
-        assert!(
-            (snap.rates_by_dkms["dB"][&("dA".to_string(), BufferRole::DecKeys)] - r_ab).abs()
-                < 1e-9
-        );
+    fn rate_for_unknown_flow_is_zero() {
+        let snap = McfSnapshot::default();
+        assert_eq!(snap.rate_for_flow("dX", "dY"), 0.0);
+        assert_eq!(snap.rate_for_buffer("dX", "dY", BufferRole::EncKeys), 0.0);
     }
-
-    #[test]
-    fn solver_respects_capacity_bound() {
-        let topo = small_topo();
-        let s = McfSolver::new();
-        let coms = s.build_commodities(&topo);
-        let caps = s.capacities(&topo);
-        let snap = s.solve(&coms, &caps, &HashMap::new());
-        // No edge can carry more than its cap.
-        for (k, cap) in &caps {
-            let mut usage = 0.0;
-            for c in &coms {
-                let r = snap.rates.get(&c.flow_id()).copied().unwrap_or(0.0);
-                if r <= 0.0 {
-                    continue;
-                }
-                if c.path.windows(2).any(|w| &edge_key(&w[0], &w[1]) == k) {
-                    usage += r;
-                }
-            }
-            assert!(
-                usage <= cap * 1.01 + 1e-6,
-                "edge {:?} usage {} > cap {}",
-                k,
-                usage,
-                cap
-            );
-        }
-    }
-
-    #[test]
-    fn hybrid_solver_starves_low_tier_when_high_tier_uses_full_capacity() {
-        // Two pairs share a 1 kps edge. dA↔dB weight 10000 (HIGH tier,
-        // Priority), dC↔dD weight 1 (LOW tier, BestEffort). The hybrid
-        // solver runs HIGH first on the full capacity; LOW only sees
-        // whatever HIGH leaves over — which here is zero.
-        let mut t = Topology::default();
-        for q in ["1", "2"] {
-            t.upsert_qkc(Qkc {
-                id: q.into(),
-                host: host(q.parse().unwrap()),
-                kme_host: None,
-            });
-        }
-        t.add_edge(
-            "1",
-            "2",
-            EdgeMeta {
-                distance_km: 0,
-                r0_keys_per_second: 1.0,
-                alpha: 0.0,
-                max_buffer_size: 1,
-            },
-        );
-        t.upsert_orr(Orr {
-            id: "o1".into(),
-            host: host(11),
-            qkc_id: "1".into(),
-        });
-        t.upsert_orr(Orr {
-            id: "o2".into(),
-            host: host(12),
-            qkc_id: "2".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dA".into(),
-            host: host(21),
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dB".into(),
-            host: host(22),
-            tls_id: None,
-            orr_id: "o2".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dC".into(),
-            host: host(23),
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
-        t.upsert_dkms(Dkms {
-            id: "dD".into(),
-            host: host(24),
-            tls_id: None,
-            orr_id: "o2".into(),
-        });
-
-        let s = McfSolver::new();
-        let coms = s.build_commodities(&t);
-        let caps = s.capacities(&t);
-        let mut weights = HashMap::new();
-        for c in &coms {
-            let w = if c.src_dkms == "dA" || c.src_dkms == "dB" {
-                10_000.0 // Priority (HIGH tier)
-            } else {
-                1.0 // BestEffort (LOW tier)
-            };
-            weights.insert(c.flow_id(), w);
-        }
-        let snap = s.solve(&coms, &caps, &weights);
-
-        let r_high = snap.rate_for_flow("dA", "dB");
-        let r_low = snap.rate_for_flow("dC", "dD");
-        assert!(r_high > 0.0, "HIGH tier got 0 — it should consume the edge");
-        assert!(
-            r_low <= 1e-6,
-            "LOW tier should be starved when HIGH saturates the edge; got {r_low}",
-        );
-    }
-
-    #[test]
-    fn hybrid_solver_splits_intra_tier_by_weight_ratio() {
-        // Same single edge, but both pairs are in the HIGH tier.
-        // dA↔dB at Priority (10000), dC↔dD at Quickly (100). Same tier,
-        // so weighted max-min applies: dA gets ≈100× the rate of dC,
-        // and neither is starved.
-        let mut t = Topology::default();
-        for q in ["1", "2"] {
-            t.upsert_qkc(Qkc {
-                id: q.into(),
-                host: host(q.parse().unwrap()),
-                kme_host: None,
-            });
-        }
-        t.add_edge(
-            "1",
-            "2",
-            EdgeMeta {
-                distance_km: 0,
-                r0_keys_per_second: 1.0,
-                alpha: 0.0,
-                max_buffer_size: 1,
-            },
-        );
-        t.upsert_orr(Orr { id: "o1".into(), host: host(11), qkc_id: "1".into() });
-        t.upsert_orr(Orr { id: "o2".into(), host: host(12), qkc_id: "2".into() });
-        for (i, q) in [("dA", "1"), ("dB", "2"), ("dC", "1"), ("dD", "2")]
-            .iter()
-            .enumerate()
-        {
-            let orr = if q.1 == "1" { "o1" } else { "o2" };
-            t.upsert_dkms(Dkms {
-                id: q.0.into(),
-                host: host(21 + i as i64),
-                tls_id: None,
-                orr_id: orr.into(),
-            });
-        }
-        let s = McfSolver::new();
-        let coms = s.build_commodities(&t);
-        let caps = s.capacities(&t);
-        let mut weights = HashMap::new();
-        for c in &coms {
-            let w = if c.src_dkms == "dA" || c.src_dkms == "dB" {
-                10_000.0 // Priority
-            } else {
-                100.0 // Quickly — same HIGH tier
-            };
-            weights.insert(c.flow_id(), w);
-        }
-        let snap = s.solve(&coms, &caps, &weights);
-
-        let r_pri = snap.rate_for_flow("dA", "dB");
-        let r_qly = snap.rate_for_flow("dC", "dD");
-        assert!(r_pri > 0.0 && r_qly > 0.0, "neither should be starved within HIGH tier");
-        let ratio = r_pri / r_qly;
-        assert!(
-            (90.0..=110.0).contains(&ratio),
-            "expected ratio ≈100 within tier, got {ratio}",
-        );
-    }
-
 }

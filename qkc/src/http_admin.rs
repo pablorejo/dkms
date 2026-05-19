@@ -6,9 +6,15 @@
 //! ```text
 //!   GET  /healthz                                liveness
 //!   GET  /forwarding-table                        snapshot actual
-//!   POST /forwarding-table  body: { "replace": { "5": 2, "7": 2 } }
+//!   POST /forwarding-table  body: { "replace": { "5": 2, "7": 2 } }                       # legacy single-hop
+//!   POST /forwarding-table  body: { "replace": { "5": [{"qkc_id":2,"weight":3}, ...] } }  # WCMP
 //!   POST /forwarding-table  body: { "updates": { "5": 2 }, "removes": [7] }
 //! ```
+//!
+//! Phase 4 adds WCMP: each destination can carry a list of weighted
+//! next hops. Old single-`u32` shape stays accepted (parsed as a
+//! single-entry list with weight 1) so legacy bootstrap scripts keep
+//! working.
 
 use std::{collections::HashMap, sync::atomic::Ordering};
 
@@ -17,7 +23,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::service::QkcService;
+use crate::{routing::NextHop, service::QkcService};
 
 pub fn router(svc: QkcService) -> Router {
     Router::new()
@@ -47,15 +53,36 @@ async fn get_table(State(svc): State<QkcService>) -> impl IntoResponse {
     Json(snap)
 }
 
+/// Per-entry value in the `replace` / `updates` map. Untagged so
+/// either wire shape parses transparently:
+///
+/// * `0`             — legacy single next-hop (weight 1 implicit)
+/// * `[{"qkc_id": 2, "weight": 3}, ...]`  — WCMP entry
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum NextHopValue {
+    Single(u32),
+    Multi(Vec<NextHop>),
+}
+
+impl NextHopValue {
+    fn into_hops(self) -> Vec<NextHop> {
+        match self {
+            NextHopValue::Single(qkc_id) => vec![NextHop::single(qkc_id)],
+            NextHopValue::Multi(hops) => hops,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TableBody {
     /// Si está presente, reemplaza la tabla completa.
     #[serde(default)]
-    replace: Option<HashMap<String, u32>>,
+    replace: Option<HashMap<String, NextHopValue>>,
 
     /// Delta: inserta/sobreescribe estas entradas.
     #[serde(default)]
-    updates: Option<HashMap<String, u32>>,
+    updates: Option<HashMap<String, NextHopValue>>,
 
     /// Delta: elimina estas entradas (claves como string).
     #[serde(default)]
@@ -68,7 +95,7 @@ async fn post_table(
 ) -> impl IntoResponse {
     // Soporta dos modos: replace completo o delta.
     if let Some(replace) = body.replace {
-        let parsed = match parse_map(&replace) {
+        let parsed = match parse_map(replace) {
             Ok(m) => m,
             Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
         };
@@ -82,7 +109,7 @@ async fn post_table(
 
     let updates = body.updates.unwrap_or_default();
     let removes_raw = body.removes.unwrap_or_default();
-    let updates_parsed = match parse_map(&updates) {
+    let updates_parsed = match parse_map(updates) {
         Ok(m) => m,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
@@ -155,11 +182,83 @@ async fn get_stats(State(svc): State<QkcService>) -> impl IntoResponse {
     }))
 }
 
-fn parse_map(raw: &HashMap<String, u32>) -> Result<HashMap<u32, u32>, String> {
+fn parse_map(raw: HashMap<String, NextHopValue>) -> Result<HashMap<u32, Vec<NextHop>>, String> {
     let mut out = HashMap::with_capacity(raw.len());
     for (k, v) in raw {
         let kk: u32 = k.parse().map_err(|_| format!("key {k} is not u32"))?;
-        out.insert(kk, *v);
+        out.insert(kk, v.into_hops());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The legacy `{"replace": {"22": 0}}` shape used by the
+    /// `demo-star` bootstrap curls must keep parsing as a
+    /// single-entry WCMP table with weight 1.
+    #[test]
+    fn legacy_single_hop_shape_parses_to_weight_1() {
+        let body: TableBody = serde_json::from_str(r#"{"replace": {"5": 2, "7": 3}}"#).unwrap();
+        let r = body.replace.unwrap();
+        let parsed = parse_map(r).unwrap();
+        assert_eq!(parsed.len(), 2);
+        let hops_5 = parsed.get(&5).unwrap();
+        assert_eq!(hops_5.len(), 1);
+        assert_eq!(hops_5[0].qkc_id, 2);
+        assert_eq!(hops_5[0].weight, 1);
+    }
+
+    /// The new `{"replace": {"22": [{"qkc_id":0,"weight":100}, ...]}}`
+    /// WCMP shape parses verbatim.
+    #[test]
+    fn new_wcmp_shape_parses_verbatim() {
+        let body: TableBody = serde_json::from_str(
+            r#"{"replace": {"5": [{"qkc_id": 2, "weight": 3}, {"qkc_id": 4, "weight": 1}]}}"#,
+        )
+        .unwrap();
+        let parsed = parse_map(body.replace.unwrap()).unwrap();
+        let hops_5 = parsed.get(&5).unwrap();
+        assert_eq!(hops_5.len(), 2);
+        assert_eq!(hops_5[0].qkc_id, 2);
+        assert_eq!(hops_5[0].weight, 3);
+        assert_eq!(hops_5[1].qkc_id, 4);
+        assert_eq!(hops_5[1].weight, 1);
+    }
+
+    /// Mixed shapes in the same payload are accepted — the parser
+    /// normalises per-entry, not per-payload.
+    #[test]
+    fn mixed_legacy_and_wcmp_in_one_payload() {
+        let body: TableBody =
+            serde_json::from_str(r#"{"replace": {"5": 2, "9": [{"qkc_id": 1, "weight": 4}]}}"#)
+                .unwrap();
+        let parsed = parse_map(body.replace.unwrap()).unwrap();
+        assert_eq!(parsed[&5].len(), 1);
+        assert_eq!(parsed[&5][0].weight, 1);
+        assert_eq!(parsed[&9].len(), 1);
+        assert_eq!(parsed[&9][0].weight, 4);
+    }
+
+    #[test]
+    fn updates_field_accepts_both_shapes_too() {
+        let body: TableBody = serde_json::from_str(
+            r#"{"updates": {"5": 2, "9": [{"qkc_id": 1, "weight": 4}]}, "removes": ["7"]}"#,
+        )
+        .unwrap();
+        let parsed = parse_map(body.updates.unwrap()).unwrap();
+        assert_eq!(parsed[&5][0].qkc_id, 2);
+        assert_eq!(parsed[&5][0].weight, 1);
+        assert_eq!(parsed[&9][0].weight, 4);
+        assert_eq!(body.removes, Some(vec!["7".to_string()]));
+    }
+
+    #[test]
+    fn non_numeric_key_is_rejected() {
+        let mut m: HashMap<String, NextHopValue> = HashMap::new();
+        m.insert("not-a-number".into(), NextHopValue::Single(1));
+        let err = parse_map(m).unwrap_err();
+        assert!(err.contains("not-a-number"));
+    }
 }

@@ -71,6 +71,7 @@ use crate::{
     admission::Admission,
     config::DkmsConfig,
     control::{BatchedAckClient, Generator, SaeBufferBuckets},
+    demand_tracker::{DemandTracker, SharedDemandTracker},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
     sae_binding::SaeBindingCache,
@@ -130,6 +131,14 @@ pub struct DkmsService {
     /// Estado de admisión — consultado por el `AdmissionLayer` del HTTP y
     /// pilotado por el RPC `Drain` del plano gRPC.
     pub admission: Arc<Admission>,
+
+    /// EWMA-smoothed SAE demand per peer DKMS. Updated in
+    /// `handle_enc_keys` **before** bucket admission (so it reflects
+    /// what SAEs request, not what the buckets let through), and
+    /// reported periodically to the SDN's `POST /demand` endpoint by
+    /// the Generator's demand loop. Used by the MCMCF-λ solver as
+    /// `δ_k` (drain rate per commodity).
+    pub demand_tracker: SharedDemandTracker,
 }
 
 impl DkmsService {
@@ -161,6 +170,7 @@ impl DkmsService {
             ack_client: None,
             sae_buffer_buckets: None,
             admission: Admission::new(),
+            demand_tracker: Arc::new(DemandTracker::default()),
         }
     }
 
@@ -279,6 +289,21 @@ impl DkmsService {
         ) as f64;
         let remote_peer_ids: Vec<String> =
             remote_groups.iter().map(|(n, _)| n.to_string()).collect();
+
+        // Record SAE demand for the MCMCF-λ solver — keys/s per
+        // (self, peer) commodity. Done BEFORE the bucket admission
+        // call below, so a rate-limited request still shows up as
+        // demand to the SDN. Without this the system self-starves:
+        // limited buffers report δ≈0 → SDN allocates them less →
+        // they stay limited.
+        if !remote_peer_ids.is_empty() {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let demanded = cost_per_peer as u64;
+            for peer_id in &remote_peer_ids {
+                self.demand_tracker.record(peer_id, demanded, now_ms);
+            }
+        }
+
         if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
             if !remote_peer_ids.is_empty() {
                 if let Err(fail) = sbb.try_admit_many(&remote_peer_ids, master, cost_per_peer) {
@@ -741,7 +766,6 @@ impl DkmsService {
         );
         Ok(())
     }
-
 }
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────
@@ -806,7 +830,11 @@ mod tests {
         OsRng.fill_bytes(&mut transport);
         let k = b"this is a session key K".to_vec();
         let wire = wrap_session_key(&transport, &k).unwrap();
-        assert_eq!(wire.len(), k.len(), "OTP ciphertext has same length as plaintext");
+        assert_eq!(
+            wire.len(),
+            k.len(),
+            "OTP ciphertext has same length as plaintext"
+        );
         let pt = unwrap_session_key(&transport, &wire).unwrap();
         assert_eq!(pt, k);
     }

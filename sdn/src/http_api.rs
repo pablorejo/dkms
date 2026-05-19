@@ -13,11 +13,11 @@
 //!   DELETE /sae/{sae_id}              remove a SAE
 //!   POST   /link-capacity             notify a link-capacity change
 //!   POST   /paths                     compute a path
+//!   POST   /demand                    DKMS reports (L_k, B_k, δ_k) per commodity
+//!   GET    /demand                    inspect the demand registry
 //!
 //! Auth/JWT is intentionally out of scope here; the web frontend gates
 //! access at its own layer.
-
-use std::str::FromStr;
 
 use axum::{
     extract::{Path as AxumPath, State},
@@ -32,6 +32,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::{
+    demand::{CommodityDemand, DemandReport},
     error::SdnError,
     routing,
     service::SdnService,
@@ -140,8 +141,8 @@ async fn get_rate(
         for ((peer, role), rate) in my_rates.iter() {
             let entry = grouped.entry(peer.clone()).or_insert((0.0, 0.0));
             match role {
-                crate::priority::BufferRole::EncKeys => entry.0 = *rate,
-                crate::priority::BufferRole::DecKeys => entry.1 = *rate,
+                crate::mcf::BufferRole::EncKeys => entry.0 = *rate,
+                crate::mcf::BufferRole::DecKeys => entry.1 = *rate,
             }
         }
         for (peer, (enc, dec)) in grouped {
@@ -157,99 +158,6 @@ async fn get_rate(
             "peers":            peers,
         })),
     )
-}
-
-/// POST /priority — el DKMS reporta el class de uno o varios de sus
-/// buffers. Equivalente al `PATCH /flows/{flow_id}/class` del Python.
-///
-/// Body:
-/// ```json
-/// {
-///   "updates": [
-///     {"dkms_id": "dkms-11", "peer": "dkms-22", "role": "enc_keys", "class": "important"},
-///     {"dkms_id": "dkms-11", "peer": "dkms-33", "role": "enc_keys", "class": "best_effort"}
-///   ]
-/// }
-/// ```
-///
-/// `role`: `enc_keys` | `dec_keys`.
-/// `class`: `priority` | `important` | `quickly` | `relax` | `best_effort` | `saturated`.
-///
-/// Tras aplicar, dispara `recompute_mcf` para que `/rate` refleje las
-/// rates nuevas inmediatamente (sin esperar al periódico de 5 s).
-#[derive(Deserialize)]
-struct PriorityUpdate {
-    dkms_id: String,
-    peer: String,
-    role: String,
-    class: String,
-}
-
-#[derive(Deserialize)]
-struct PriorityBatch {
-    updates: Vec<PriorityUpdate>,
-}
-
-async fn post_priority(
-    State(svc): State<SdnService>,
-    Json(body): Json<PriorityBatch>,
-) -> impl IntoResponse {
-    let topology = svc.topology.load();
-    let mut applied = 0;
-    let mut errors: Vec<String> = Vec::new();
-    for u in body.updates.iter() {
-        if !topology.dkms.contains_key(&u.dkms_id) {
-            errors.push(format!("unknown dkms {}", u.dkms_id));
-            continue;
-        }
-        if !topology.dkms.contains_key(&u.peer) {
-            errors.push(format!("unknown peer {}", u.peer));
-            continue;
-        }
-        let role = match crate::priority::BufferRole::from_str(&u.role) {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(format!("role: {e}"));
-                continue;
-            }
-        };
-        let pri = match crate::priority::TrafficPriority::from_str(&u.class) {
-            Ok(p) => p,
-            Err(e) => {
-                errors.push(format!("class: {e}"));
-                continue;
-            }
-        };
-        svc.priorities.set(&u.dkms_id, &u.peer, role, pri);
-        applied += 1;
-    }
-    if applied > 0 {
-        // Recompute inmediato para que `GET /rate` vea las nuevas rates.
-        // No es caro: el MCF tarda <10ms para 12 commodities.
-        let _ = svc.recompute_mcf();
-    }
-    let status = if errors.is_empty() {
-        StatusCode::OK
-    } else {
-        StatusCode::PARTIAL_CONTENT
-    };
-    (status, Json(json!({"applied": applied, "errors": errors})))
-}
-
-async fn get_priorities(State(svc): State<SdnService>) -> impl IntoResponse {
-    let snap = svc.priorities.snapshot();
-    let arr: Vec<Value> = snap
-        .into_iter()
-        .map(|((dkms, peer, role), pri)| {
-            json!({
-                "dkms_id": dkms,
-                "peer":    peer,
-                "role":    role.as_str(),
-                "class":   pri.as_str(),
-            })
-        })
-        .collect();
-    Json(json!({"priorities": arr}))
 }
 
 async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
@@ -460,6 +368,74 @@ async fn compute_path(
     }
 }
 
+// ---------------- demand (MCMCF-λ) -------------------------------------------
+
+/// POST /demand — a DKMS reports the current `(L_k, B_k, δ_k)` for
+/// every commodity it sources. Replaces the previous report for
+/// matching `(src_dkms, dst_dkms)` keys.
+///
+/// Body:
+/// ```json
+/// {
+///   "dkms_id": "dkms-11",
+///   "entries": [
+///     {
+///       "src_dkms": "dkms-11", "dst_dkms": "dkms-22",
+///       "level": 1234.0, "capacity": 65536.0,
+///       "drain_rate": 50.0, "timestamp_ms": 1234567890
+///     }
+///   ]
+/// }
+/// ```
+///
+/// Returns `{accepted: N, errors: [...]}`. Status `200` if everything
+/// landed, `206` (partial content) if some entries were rejected.
+///
+/// Phase 1 — storage only: the MCMCF-λ solver in phase 3 will pick
+/// up these reports. The legacy MCF solver is unaffected.
+async fn post_demand(
+    State(svc): State<SdnService>,
+    Json(report): Json<DemandReport>,
+) -> impl IntoResponse {
+    if report.dkms_id.is_empty() {
+        return err_response(SdnError::BadRequest("dkms_id is required".into()));
+    }
+    let summary = svc.demand_registry.ingest(report);
+    let status = if summary.errors.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::PARTIAL_CONTENT
+    };
+    (
+        status,
+        Json(json!({
+            "accepted": summary.accepted,
+            "errors":   summary.errors,
+            "registry_len": svc.demand_registry.len(),
+        })),
+    )
+        .into_response()
+}
+
+/// GET /demand — dump every recorded `(src_dkms, dst_dkms)` demand
+/// snapshot. Read-only inspection endpoint for dashboards / debugging.
+async fn get_demand(State(svc): State<SdnService>) -> impl IntoResponse {
+    let entries: Vec<CommodityDemand> = svc.demand_registry.snapshot();
+    Json(json!({ "entries": entries, "len": entries.len() }))
+}
+
+/// GET /wcmp — dump the currently-published WCMP table per
+/// (transit_qkc, dst_qkc) pair. Read-only inspection of what the LP
+/// fed to the forwarding push loop. The shape mirrors
+/// `McfSnapshot::wcmp`: `qkc → dst → [{qkc_id, weight}, ...]`.
+async fn get_wcmp(State(svc): State<SdnService>) -> impl IntoResponse {
+    let snap = svc.mcf_snapshot.load();
+    Json(json!({
+        "wcmp": &snap.wcmp,
+        "n_qkcs": snap.wcmp.len(),
+    }))
+}
+
 // ---------------- error mapping ----------------------------------------------
 
 fn err_response(e: SdnError) -> axum::response::Response {
@@ -499,10 +475,173 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/link-capacity", post(update_link_capacity))
         .route("/paths", post(compute_path))
         .route("/rate/:dkms_id", get(get_rate))
-        .route("/priority", post(post_priority).get(get_priorities))
+        .route("/demand", post(post_demand).get(get_demand))
+        .route("/wcmp", get(get_wcmp))
         .with_state(svc);
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "sdn HTTP listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// ----------------------------------------------------------------- tests
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{demand::CommodityDemand, service::tests::make_service, service::SdnService};
+
+    /// Bind a minimal SDN HTTP router (just the demand endpoints) to
+    /// 127.0.0.1:0 and return the concrete `http://127.0.0.1:<port>`
+    /// base URL. We don't reuse `serve()` directly because we want a
+    /// stripped-down router that doesn't bind GRPC / metrics
+    /// addresses too.
+    async fn spawn_server(svc: SdnService) -> String {
+        let app = Router::new()
+            .route("/demand", post(post_demand).get(get_demand))
+        .route("/wcmp", get(get_wcmp))
+            .with_state(svc);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn post_demand_persists_entries_and_get_dumps_them() {
+        let svc = make_service();
+        let base = spawn_server(svc.clone()).await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let body = serde_json::json!({
+            "dkms_id": "dA",
+            "entries": [
+                {
+                    "src_dkms": "dA", "dst_dkms": "dB",
+                    "level": 100.0, "capacity": 4096.0,
+                    "drain_rate": 30.0, "timestamp_ms": 1_000,
+                },
+                {
+                    "src_dkms": "dA", "dst_dkms": "dC",
+                    "level": 200.0, "capacity": 4096.0,
+                    "drain_rate": 40.0, "timestamp_ms": 1_000,
+                }
+            ]
+        });
+        let r = client
+            .post(format!("{base}/demand"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["accepted"], 2);
+        assert_eq!(v["registry_len"], 2);
+
+        let g = client.get(format!("{base}/demand")).send().await.unwrap();
+        assert_eq!(g.status(), 200);
+        let dump: serde_json::Value = g.json().await.unwrap();
+        assert_eq!(dump["len"], 2);
+        let entries = dump["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Round-trip through serde — make sure CommodityDemand
+        // deserialises cleanly from the GET output.
+        let parsed: Vec<CommodityDemand> = serde_json::from_value(dump["entries"].clone()).unwrap();
+        assert!(parsed.iter().any(|e| e.dst_dkms == "dB"));
+        assert!(parsed.iter().any(|e| e.dst_dkms == "dC"));
+    }
+
+    #[tokio::test]
+    async fn post_demand_returns_206_when_some_entries_rejected() {
+        let svc = make_service();
+        let base = spawn_server(svc).await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let body = serde_json::json!({
+            "dkms_id": "dA",
+            "entries": [
+                { "src_dkms": "dA", "dst_dkms": "dB",
+                  "level": 100.0, "capacity": 4096.0,
+                  "drain_rate": 30.0, "timestamp_ms": 1_000 },
+                // src_dkms mismatch with report dkms_id → rejected
+                { "src_dkms": "dB", "dst_dkms": "dC",
+                  "level": 100.0, "capacity": 4096.0,
+                  "drain_rate": 30.0, "timestamp_ms": 1_000 }
+            ]
+        });
+        let r = client
+            .post(format!("{base}/demand"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 206);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["accepted"], 1);
+        assert_eq!(v["errors"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_demand_rejects_empty_dkms_id() {
+        let svc = make_service();
+        let base = spawn_server(svc).await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let body = serde_json::json!({ "dkms_id": "", "entries": [] });
+        let r = client
+            .post(format!("{base}/demand"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn post_demand_second_report_replaces_first() {
+        let svc = make_service();
+        let base = spawn_server(svc.clone()).await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mk = |level: f64, ts: i64| {
+            serde_json::json!({
+                "dkms_id": "dA",
+                "entries": [{
+                    "src_dkms": "dA", "dst_dkms": "dB",
+                    "level": level, "capacity": 4096.0,
+                    "drain_rate": 30.0, "timestamp_ms": ts,
+                }]
+            })
+        };
+        client
+            .post(format!("{base}/demand"))
+            .json(&mk(100.0, 1000))
+            .send()
+            .await
+            .unwrap();
+        client
+            .post(format!("{base}/demand"))
+            .json(&mk(500.0, 2000))
+            .send()
+            .await
+            .unwrap();
+        let g = svc.demand_registry.get("dA", "dB").unwrap();
+        assert_eq!(g.level, 500.0);
+        assert_eq!(g.timestamp_ms, 2000);
+        assert_eq!(svc.demand_registry.len(), 1);
+    }
 }

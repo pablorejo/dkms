@@ -14,11 +14,9 @@
 pub mod ack_pending;
 pub mod ack_socket;
 pub mod generator;
-pub mod priority;
 pub mod sae_buffer_bucket;
 
 pub use ack_pending::{AckPendingEntry, AckPendingStore};
 pub use ack_socket::{AckClient, AckFrame, BatchedAckClient};
 pub use generator::Generator;
-pub use priority::{classify, BufferQos};
 pub use sae_buffer_bucket::{AdmitFailure, SaeBufferBuckets};
