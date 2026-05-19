@@ -65,9 +65,6 @@
 //! `BadMagic`, y viceversa. La incompatibilidad es deliberada para que
 //! deployments mezclados fallen ruidosos en lugar de misparsear.
 
-pub mod qkc_path;
-pub use qkc_path::{decode_qkc_path, encode_qkc_path, pop_qkc_path_next_hop, QkcPathError};
-
 use std::io;
 
 use bytes::{Buf, BufMut, BytesMut};
