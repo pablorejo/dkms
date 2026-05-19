@@ -72,11 +72,14 @@ from tests.cli.topology_builders import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISTANCE_KM,
     DEFAULT_R0,
+    build_barabasi_albert,
     build_bridge,
+    build_er,
     build_line,
     build_mesh,
-    build_random,
+    build_rgg,
     build_ring,
+    build_secoqc,
     build_star,
 )
 
@@ -358,9 +361,18 @@ def _auto_name(subcmd: str, args: argparse.Namespace) -> str:
         return f"mesh-{args.n}x{args.m}"
     if subcmd == "star":
         return f"star-b{args.b}-p{args.p}"
-    if subcmd == "random":
+    if subcmd == "er":
         seed = args.seed if args.seed is not None else "rnd"
-        return f"random-n{args.n}-d{args.d}-s{seed}"
+        return f"er-n{args.n}-k{args.k}-s{seed}"
+    if subcmd == "ba":
+        seed = args.seed if args.seed is not None else "rnd"
+        return f"ba-n{args.n}-k{args.k}-s{seed}"
+    if subcmd == "rgg":
+        seed = args.seed if args.seed is not None else "rnd"
+        return f"rgg-n{args.n}-r{args.max_distance_km}-k{args.k}-s{seed}"
+    if subcmd == "secoqc":
+        seed = args.seed if args.seed is not None else "rnd"
+        return f"secoqc-n{args.n}-k{args.k}-s{seed}"
     if subcmd == "bridge":
         return f"bridge-c{args.cluster_count}-n{args.cluster_n}"
     return subcmd
@@ -375,8 +387,19 @@ def _build_topology(subcmd: str, args: argparse.Namespace) -> dict[str, Any]:
         return build_mesh(args.n, args.m)
     if subcmd == "star":
         return build_star(per_branch_n=args.p, branches=args.b)
-    if subcmd == "random":
-        return build_random(n=args.n, avg_degree=args.d, seed=args.seed)
+    if subcmd == "er":
+        return build_er(n=args.n, avg_degree=args.k, seed=args.seed)
+    if subcmd == "ba":
+        return build_barabasi_albert(n=args.n, avg_degree=args.k, seed=args.seed)
+    if subcmd == "rgg":
+        return build_rgg(
+            n=args.n,
+            max_distance_km=args.max_distance_km,
+            avg_degree=args.k,
+            seed=args.seed,
+        )
+    if subcmd == "secoqc":
+        return build_secoqc(n=args.n, avg_degree=args.k, seed=args.seed)
     if subcmd == "bridge":
         return build_bridge(
             cluster_n=args.cluster_n, cluster_count=args.cluster_count
@@ -423,24 +446,81 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_global_flags(p_star)
 
-    p_rand = sub.add_parser(
-        "random",
-        help="connected random graph (n, avg_degree, optional seed)",
+    # Erdős–Rényi: baseline sin estructura (modelo "no-structure").
+    p_er = sub.add_parser(
+        "er",
+        help="Erdős–Rényi G(N, p) con p = ⟨k⟩/(N-1) — baseline aleatoria",
     )
-    p_rand.add_argument("-n", type=int, required=True, help="number of nodes (>=2)")
-    p_rand.add_argument(
-        "-d",
-        type=float,
-        required=True,
-        help="target average degree (>=2.0, <= n-1)",
+    p_er.add_argument("-n", type=int, required=True, help="number of nodes (>=2)")
+    p_er.add_argument(
+        "-k", type=float, required=True, help="target average degree (>0, <= n-1)"
     )
-    p_rand.add_argument(
-        "--seed",
-        type=int,
-        default=None,
+    p_er.add_argument(
+        "--seed", type=int, default=None,
         help="random seed for reproducibility (default: nondeterministic)",
     )
-    _add_global_flags(p_rand)
+    _add_global_flags(p_er)
+
+    # Barabási–Albert: scale-free con vínculo preferencial.
+    p_ba = sub.add_parser(
+        "ba",
+        help="Barabási–Albert scale-free graph (preferential attachment), m = ⟨k⟩/2",
+    )
+    p_ba.add_argument("-n", type=int, required=True, help="number of nodes (>=2)")
+    p_ba.add_argument(
+        "-k", type=float, required=True,
+        help="target average degree (>=2.0, <= n-1)",
+    )
+    p_ba.add_argument(
+        "--seed", type=int, default=None,
+        help="random seed for reproducibility (default: nondeterministic)",
+    )
+    _add_global_flags(p_ba)
+
+    # Random Geometric Graph: N puntos uniformes en cuadrado, edges si distancia ≤ r.
+    p_rgg = sub.add_parser(
+        "rgg",
+        help=(
+            "Random Geometric Graph: N puntos en cuadrado 2D, conectar pares "
+            "con distancia <= max_distance_km. Cada arista lleva su distancia real "
+            "(capacidad QKD distinta por edge)."
+        ),
+    )
+    p_rgg.add_argument("-n", type=int, required=True, help="number of nodes (>=2)")
+    p_rgg.add_argument(
+        "--max-distance-km", type=float, required=True,
+        dest="max_distance_km",
+        help="máxima distancia para conexión (km, >0)",
+    )
+    p_rgg.add_argument(
+        "-k", type=float, required=True,
+        help="target average degree (>0); el lado del cuadrado se ajusta para que ⟨k⟩ ≈ target",
+    )
+    p_rgg.add_argument(
+        "--seed", type=int, default=None,
+        help="random seed for reproducibility (default: nondeterministic)",
+    )
+    _add_global_flags(p_rgg)
+
+    # SECOQC partial mesh: anillo + cuerdas hasta ⟨k⟩ objetivo.
+    p_secoqc = sub.add_parser(
+        "secoqc",
+        help=(
+            "Malla parcial tipo SECOQC: anillo base de N nodos + cuerdas "
+            "aleatorias hasta alcanzar ⟨k⟩ objetivo. Refleja redes QKD "
+            "operativas (Vienna, Geneva, Madrid)."
+        ),
+    )
+    p_secoqc.add_argument("-n", type=int, required=True, help="number of nodes (>=3)")
+    p_secoqc.add_argument(
+        "-k", type=float, required=True,
+        help="target average degree (>=2.0, <= n-1)",
+    )
+    p_secoqc.add_argument(
+        "--seed", type=int, default=None,
+        help="random seed for reproducibility (default: nondeterministic)",
+    )
+    _add_global_flags(p_secoqc)
 
     # ``bridge`` — multi-cluster topology with single-edge bridges between
     # clusters. The "obvious bottleneck" case for multi-path testing.

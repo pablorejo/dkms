@@ -17,11 +17,14 @@ from tests.cli.topology_builders import (
     DEFAULT_DISTANCE_KM,
     DEFAULT_LINK_TYPE,
     DEFAULT_R0,
+    build_barabasi_albert,
     build_bridge,
+    build_er,
     build_line,
     build_mesh,
-    build_random,
+    build_rgg,
     build_ring,
+    build_secoqc,
     build_star,
 )
 
@@ -228,25 +231,28 @@ def test_star_validation_errors() -> None:
 
 
 def test_random_8_connected() -> None:
-    topo = build_random(n=8, avg_degree=3.0, seed=42)
+    topo = build_er(n=8, avg_degree=3.0, seed=42)
     assert len(topo["nodes"]) == 8
-    # target_edges = ceil(8*3/2) = 12
-    assert len(topo["links"]) == 12
+    # ER is stochastic: edges ~ Binomial(C(N,2), p), grado medio ≈ ⟨k⟩.
+    # Just verify the count is in the right ballpark.
+    n_edges = len(topo["links"])
+    avg_k = 2.0 * n_edges / 8
+    assert 1.5 <= avg_k <= 4.5, f"ER avg_k out of range: {avg_k}"
     assert _is_connected(topo)
     _assert_fields(topo)
 
 
 def test_random_reproducible_with_seed() -> None:
-    topo_a = build_random(n=10, avg_degree=3.0, seed=123)
-    topo_b = build_random(n=10, avg_degree=3.0, seed=123)
+    topo_a = build_er(n=10, avg_degree=3.0, seed=123)
+    topo_b = build_er(n=10, avg_degree=3.0, seed=123)
     edges_a = {_undirected_edge(ln) for ln in topo_a["links"]}
     edges_b = {_undirected_edge(ln) for ln in topo_b["links"]}
     assert edges_a == edges_b
 
 
 def test_random_different_seeds_differ_typically() -> None:
-    topo_a = build_random(n=12, avg_degree=3.0, seed=1)
-    topo_b = build_random(n=12, avg_degree=3.0, seed=999)
+    topo_a = build_er(n=12, avg_degree=3.0, seed=1)
+    topo_b = build_er(n=12, avg_degree=3.0, seed=999)
     edges_a = {_undirected_edge(ln) for ln in topo_a["links"]}
     edges_b = {_undirected_edge(ln) for ln in topo_b["links"]}
     # very unlikely identical for non-trivial graphs
@@ -254,7 +260,7 @@ def test_random_different_seeds_differ_typically() -> None:
 
 
 def test_random_no_self_loops_or_duplicates() -> None:
-    topo = build_random(n=15, avg_degree=4.0, seed=7)
+    topo = build_er(n=15, avg_degree=4.0, seed=7)
     edge_set = set()
     for ln in topo["links"]:
         assert ln["source_uid"] != ln["target_uid"]
@@ -263,13 +269,128 @@ def test_random_no_self_loops_or_duplicates() -> None:
         edge_set.add(pair)
 
 
-def test_random_validation_errors() -> None:
+def test_er_validation_errors() -> None:
     with pytest.raises(ValueError):
-        build_random(n=1, avg_degree=2.0)
+        build_er(n=1, avg_degree=2.0)
     with pytest.raises(ValueError):
-        build_random(n=5, avg_degree=1.0)
+        build_er(n=5, avg_degree=0.0)
     with pytest.raises(ValueError):
-        build_random(n=5, avg_degree=5.0)  # avg_degree > n-1
+        build_er(n=5, avg_degree=5.0)  # avg_degree > n-1
+
+
+# -----------------------------------------------------------------------------
+# Barabási–Albert
+# -----------------------------------------------------------------------------
+
+
+def test_ba_basic_shape_and_connectivity() -> None:
+    topo = build_barabasi_albert(n=20, avg_degree=4.0, seed=7)
+    assert len(topo["nodes"]) == 20
+    assert _is_connected(topo), "BA must be connected (m_0 clique seed)"
+    avg_k = 2.0 * len(topo["links"]) / 20
+    # BA: expected average degree converges to 2m. For m=2, ⟨k⟩ ≈ 4.
+    assert 2.0 <= avg_k <= 6.0, f"BA avg_degree out of range: {avg_k}"
+
+
+def test_ba_stochastic_m_for_odd_avg_degree() -> None:
+    # avg_degree=5 → m_floor=2, p_extra=0.5 → mix of 2 and 3 edges per new node.
+    topo = build_barabasi_albert(n=50, avg_degree=5.0, seed=42)
+    avg_k = 2.0 * len(topo["links"]) / 50
+    # Larger N reduces variance; expect ⟨k⟩ ≈ 5 ± 1.
+    assert 3.5 <= avg_k <= 6.5, f"BA stochastic m gave avg_k={avg_k}"
+
+
+def test_ba_seed_reproducibility() -> None:
+    a = build_barabasi_albert(n=15, avg_degree=4.0, seed=42)
+    b = build_barabasi_albert(n=15, avg_degree=4.0, seed=42)
+    assert a == b
+
+
+def test_ba_validation_errors() -> None:
+    with pytest.raises(ValueError):
+        build_barabasi_albert(n=1, avg_degree=2.0)
+    with pytest.raises(ValueError):
+        build_barabasi_albert(n=10, avg_degree=1.5)  # < 2 ⇒ m < 1
+    with pytest.raises(ValueError):
+        build_barabasi_albert(n=5, avg_degree=10.0)  # > n-1
+
+
+# -----------------------------------------------------------------------------
+# Random Geometric Graph
+# -----------------------------------------------------------------------------
+
+
+def test_rgg_basic_shape_and_connectivity() -> None:
+    topo = build_rgg(n=20, max_distance_km=10.0, avg_degree=4.0, seed=42)
+    assert len(topo["nodes"]) == 20
+    assert _is_connected(topo)
+
+
+def test_rgg_distance_per_edge_varies() -> None:
+    # Use a higher target avg_degree so the geometric sampling alone
+    # produces a connected graph (avoiding the connectivity fallback
+    # which can add long-distance edges).
+    topo = build_rgg(n=20, max_distance_km=20.0, avg_degree=6.0, seed=42)
+    dists = sorted(ln["distance_km"] for ln in topo["links"])
+    # In RGG distances are euclidean random — they must vary.
+    assert dists[0] < dists[-1], "RGG must yield variable per-edge distances"
+    # All geometric edges are bounded by max_distance_km. The
+    # connectivity fallback may add a few edges beyond it; allow a
+    # small tail past the cutoff.
+    bounded = sum(1 for d in dists if d <= 20.0)
+    assert bounded >= 0.7 * len(dists), (
+        f"≥70% of RGG edges should respect max_distance; "
+        f"got {bounded}/{len(dists)} bounded"
+    )
+
+
+def test_rgg_seed_reproducibility() -> None:
+    a = build_rgg(n=15, max_distance_km=8.0, avg_degree=4.0, seed=42)
+    b = build_rgg(n=15, max_distance_km=8.0, avg_degree=4.0, seed=42)
+    assert a == b
+
+
+def test_rgg_validation_errors() -> None:
+    with pytest.raises(ValueError):
+        build_rgg(n=1, max_distance_km=5.0, avg_degree=2.0)
+    with pytest.raises(ValueError):
+        build_rgg(n=10, max_distance_km=0.0, avg_degree=4.0)
+    with pytest.raises(ValueError):
+        build_rgg(n=10, max_distance_km=5.0, avg_degree=0.0)
+
+
+# -----------------------------------------------------------------------------
+# SECOQC (partial mesh)
+# -----------------------------------------------------------------------------
+
+
+def test_secoqc_basic_shape_and_connectivity() -> None:
+    topo = build_secoqc(n=10, avg_degree=4.0, seed=42)
+    assert len(topo["nodes"]) == 10
+    assert _is_connected(topo)
+    avg_k = 2.0 * len(topo["links"]) / 10
+    assert abs(avg_k - 4.0) < 0.5, f"secoqc avg_k out of range: {avg_k}"
+
+
+def test_secoqc_ring_minimum() -> None:
+    # avg_degree=2 → exactly the ring, no extra chords.
+    topo = build_secoqc(n=8, avg_degree=2.0, seed=42)
+    assert len(topo["links"]) == 8  # N edges in a ring
+
+
+def test_secoqc_seed_reproducibility() -> None:
+    a = build_secoqc(n=12, avg_degree=3.0, seed=42)
+    b = build_secoqc(n=12, avg_degree=3.0, seed=42)
+    assert a == b
+
+
+def test_secoqc_validation_errors() -> None:
+    with pytest.raises(ValueError):
+        build_secoqc(n=2, avg_degree=2.0)  # n < 3
+    with pytest.raises(ValueError):
+        build_secoqc(n=10, avg_degree=1.0)  # < 2
+    with pytest.raises(ValueError):
+        build_secoqc(n=5, avg_degree=10.0)  # > n-1
 
 
 # -----------------------------------------------------------------------------

@@ -181,37 +181,61 @@ def build_star(per_branch_n: int, branches: int) -> dict[str, Any]:
     return {"nodes": nodes, "links": links}
 
 
-def build_random(
-    n: int, avg_degree: float, seed: int | None = None
-) -> dict[str, Any]:
-    """Connected random graph with target average degree.
+def _link_with_distance(src_uid: str, dst_uid: str, distance_km: float) -> dict[str, Any]:
+    """Variant of `_link` with explicit distance (used by RGG where every
+    edge has its own geometric distance and therefore its own QKD capacity
+    via R0 × 10^(-α·d/10)).
+    """
+    left, right = (src_uid, dst_uid) if src_uid <= dst_uid else (dst_uid, src_uid)
+    return {
+        "uid": f"edge-{left}-{right}",
+        "source_uid": left,
+        "target_uid": right,
+        "link_type": DEFAULT_LINK_TYPE,
+        "distance_km": float(distance_km),
+        "quditto_rate_r0": DEFAULT_R0,
+        "quditto_rate_alpha": DEFAULT_ALPHA,
+        "quditto_max_buffer_size": DEFAULT_BUFFER_SIZE,
+    }
 
-    Starts from a random spanning tree (n-1 edges, guaranteed connected),
-    then adds random edges until the total reaches ``ceil(n * avg_degree / 2)``.
-    Requires ``n >= 2`` and ``2.0 <= avg_degree <= n - 1`` (avg_degree >= 2
-    so the densification can produce a non-trivial graph beyond the tree).
+
+def _layout_circle(n: int) -> list[tuple[float, float]]:
+    """Default circular layout used by every non-geometric model."""
+    cx, cy = 320.0, 220.0
+    radius = 260.0
+    return [
+        (cx + radius * math.cos(2.0 * math.pi * i / n),
+         cy + radius * math.sin(2.0 * math.pi * i / n))
+        for i in range(n)
+    ]
+
+
+def build_er(n: int, avg_degree: float, seed: int | None = None) -> dict[str, Any]:
+    """Erdős–Rényi G(N, p) with target ⟨k⟩ → ``p = avg_degree / (N-1)``.
+
+    Models a "no-structure" baseline: a random graph where every pair is
+    independently connected with probability p. Used to compare against
+    structured models (BA, RGG, SECOQC).
+
+    Connectivity is enforced post-hoc by adding spanning-tree edges if
+    the sampled graph is disconnected (small bias for sparse regimes,
+    but keeps the topology usable by the orchestator which requires a
+    connected graph).
     """
     if n < 2:
-        raise ValueError(f"random requires n >= 2, got {n}")
-    if avg_degree < 2.0:
-        raise ValueError(
-            f"random requires avg_degree >= 2.0 for non-trivial graphs, got {avg_degree}"
-        )
+        raise ValueError(f"er requires n >= 2, got {n}")
+    if avg_degree <= 0.0:
+        raise ValueError(f"er requires avg_degree > 0, got {avg_degree}")
     if avg_degree > n - 1:
         raise ValueError(
-            f"random avg_degree {avg_degree} exceeds maximum n-1={n-1}"
+            f"er avg_degree {avg_degree} exceeds maximum n-1={n-1}"
         )
     rng = _random.Random(seed)
     nodes: list[dict[str, Any]] = []
-    cx, cy = 320.0, 220.0
-    radius = 260.0
-    for i in range(n):
-        angle = (2.0 * math.pi * i) / n
-        nodes.append(
-            _node(i + 1, cx + radius * math.cos(angle), cy + radius * math.sin(angle))
-        )
+    for i, (x, y) in enumerate(_layout_circle(n)):
+        nodes.append(_node(i + 1, x, y))
     uids = [nd["uid"] for nd in nodes]
-    rng.shuffle(uids)
+    p = avg_degree / (n - 1)
     links: list[dict[str, Any]] = []
     edge_set: set[tuple[str, str]] = set()
 
@@ -225,19 +249,251 @@ def build_random(
         links.append(_link(left, right))
         return True
 
-    for i in range(1, len(uids)):
-        prev = uids[rng.randrange(i)]
-        add_edge(uids[i], prev)
-    target_edges = int(math.ceil(n * avg_degree / 2.0))
-    safety = 0
-    max_safety = 20 * target_edges + 100
-    while len(links) < target_edges and safety < max_safety:
-        safety += 1
-        a = uids[rng.randrange(n)]
-        b = uids[rng.randrange(n)]
-        add_edge(a, b)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if rng.random() < p:
+                add_edge(uids[i], uids[j])
+    # Enforce connectivity: add a random spanning-tree skeleton if needed.
     if not _ensure_connected(nodes, links):
-        raise RuntimeError("random builder failed to produce a connected graph")
+        order = uids[:]
+        rng.shuffle(order)
+        for i in range(1, len(order)):
+            prev = order[rng.randrange(i)]
+            add_edge(order[i], prev)
+    return {"nodes": nodes, "links": links}
+
+
+def build_barabasi_albert(
+    n: int, avg_degree: float, seed: int | None = None
+) -> dict[str, Any]:
+    """Barabási–Albert (1999) scale-free graph with preferential attachment.
+
+    Average degree maps to ``m = avg_degree / 2``. For non-integer ⟨k⟩ the
+    number of edges added by each new node is stochastic: with prob
+    ``frac(m)`` add ``ceil(m)``, otherwise ``floor(m)``. The expected
+    average degree converges to the requested target as N grows.
+
+    Produces a power-law degree distribution P(k) ∝ k^(-3) regardless of
+    m: a few hubs accumulate most edges, the long tail is sparse. The
+    structural model behind real networks (web, citations, autonomous
+    systems, social).
+    """
+    if n < 2:
+        raise ValueError(f"ba requires n >= 2, got {n}")
+    if avg_degree < 2.0:
+        raise ValueError(
+            f"ba requires avg_degree >= 2.0 (so m >= 1), got {avg_degree}"
+        )
+    if avg_degree > n - 1:
+        raise ValueError(
+            f"ba avg_degree {avg_degree} exceeds maximum n-1={n-1}"
+        )
+    rng = _random.Random(seed)
+    m = avg_degree / 2.0
+    m_floor = int(math.floor(m))
+    p_extra = m - m_floor  # probability of adding one extra edge
+
+    nodes: list[dict[str, Any]] = []
+    for i, (x, y) in enumerate(_layout_circle(n)):
+        nodes.append(_node(i + 1, x, y))
+    uids = [nd["uid"] for nd in nodes]
+    links: list[dict[str, Any]] = []
+    edge_set: set[tuple[str, str]] = set()
+    # endpoint_pool[k] = uid that appears with frequency = current degree.
+    # Sampling uniformly from this list yields P(node i) ∝ k_i.
+    endpoint_pool: list[str] = []
+
+    def add_edge(a: str, b: str) -> bool:
+        if a == b:
+            return False
+        left, right = (a, b) if a <= b else (b, a)
+        if (left, right) in edge_set:
+            return False
+        edge_set.add((left, right))
+        links.append(_link(left, right))
+        endpoint_pool.append(left)
+        endpoint_pool.append(right)
+        return True
+
+    # Seed: m_floor+1 initial nodes as a small clique → every new node
+    # has at least m_floor+1 candidates to attach to.
+    m0 = max(m_floor + 1, 2)
+    for i in range(m0):
+        for j in range(i + 1, m0):
+            add_edge(uids[i], uids[j])
+
+    for new_idx in range(m0, n):
+        m_i = m_floor + (1 if rng.random() < p_extra else 0)
+        m_i = max(m_i, 1)
+        # Sample m_i distinct neighbours with P ∝ degree. Walker not
+        # needed for small N: just resample from the endpoint pool.
+        chosen: set[str] = set()
+        attempts = 0
+        max_attempts = 50 * m_i
+        while len(chosen) < m_i and attempts < max_attempts:
+            attempts += 1
+            if endpoint_pool:
+                target = endpoint_pool[rng.randrange(len(endpoint_pool))]
+            else:
+                target = uids[rng.randrange(new_idx)]
+            if target != uids[new_idx]:
+                chosen.add(target)
+        # If we couldn't fill m_i (degenerate case), pad with random earlier nodes.
+        while len(chosen) < m_i and new_idx > 0:
+            t = uids[rng.randrange(new_idx)]
+            if t != uids[new_idx]:
+                chosen.add(t)
+            else:
+                break
+        for target in chosen:
+            add_edge(uids[new_idx], target)
+    return {"nodes": nodes, "links": links}
+
+
+def build_rgg(
+    n: int,
+    max_distance_km: float,
+    avg_degree: float,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Random Geometric Graph: N nodes uniformly placed in a 2D square,
+    two nodes are linked iff their Euclidean distance is ≤ ``max_distance_km``.
+
+    The square side L is chosen so that the **expected** ⟨k⟩ equals the
+    target: for uniform points in [0, L]², a node sees on average
+    ``ρ · π · r²`` neighbours where ``ρ = N / L²``. Solving for L:
+
+        L = max_distance_km · sqrt(π · N / avg_degree)
+
+    Each edge carries its own ``distance_km`` (the real Euclidean
+    distance between the two points), so the QKD capacity per edge
+    varies as ``R0 · 10^(-α · d / 10)`` — unlike ER/BA/SECOQC where every
+    edge inherits ``DEFAULT_DISTANCE_KM``.
+
+    Connectivity is enforced post-hoc by adding spanning-tree edges if
+    the geometric sampling produced disconnected components.
+    """
+    if n < 2:
+        raise ValueError(f"rgg requires n >= 2, got {n}")
+    if max_distance_km <= 0.0:
+        raise ValueError(f"rgg requires max_distance_km > 0, got {max_distance_km}")
+    if avg_degree <= 0.0:
+        raise ValueError(f"rgg requires avg_degree > 0, got {avg_degree}")
+    rng = _random.Random(seed)
+    # Derive square side from target density: ⟨k⟩ ≈ π·r²·N / L²
+    side = max_distance_km * math.sqrt(math.pi * n / avg_degree)
+    # Place N points uniformly in [0, side] × [0, side]
+    pts: list[tuple[float, float]] = [
+        (rng.random() * side, rng.random() * side) for _ in range(n)
+    ]
+    # Layout: rescale points to the editor canvas (640×440 typically)
+    canvas_x_pad, canvas_y_pad = 60.0, 60.0
+    canvas_w, canvas_h = 580.0, 320.0
+    nodes: list[dict[str, Any]] = []
+    for i, (px, py) in enumerate(pts):
+        sx = canvas_x_pad + (px / side) * canvas_w
+        sy = canvas_y_pad + (py / side) * canvas_h
+        nodes.append(_node(i + 1, sx, sy))
+    uids = [nd["uid"] for nd in nodes]
+    links: list[dict[str, Any]] = []
+    edge_set: set[tuple[str, str]] = set()
+
+    def add_edge(a: str, b: str, dist: float) -> bool:
+        if a == b:
+            return False
+        left, right = (a, b) if a <= b else (b, a)
+        if (left, right) in edge_set:
+            return False
+        edge_set.add((left, right))
+        links.append(_link_with_distance(left, right, dist))
+        return True
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = pts[i][0] - pts[j][0]
+            dy = pts[i][1] - pts[j][1]
+            d = math.sqrt(dx * dx + dy * dy)
+            if d <= max_distance_km:
+                add_edge(uids[i], uids[j], d)
+    # Enforce connectivity: if the geometric sample produced isolated
+    # components, link them via the closest cross-component pair we can
+    # find. These extra edges can exceed `max_distance_km` (and thus
+    # carry lower QKD capacity), but they are needed for the orchestator
+    # to accept the topology.
+    if not _ensure_connected(nodes, links):
+        order = list(range(n))
+        rng.shuffle(order)
+        for i in range(1, len(order)):
+            ai = order[i]
+            bj = order[rng.randrange(i)]
+            dx = pts[ai][0] - pts[bj][0]
+            dy = pts[ai][1] - pts[bj][1]
+            d = math.sqrt(dx * dx + dy * dy)
+            add_edge(uids[ai], uids[bj], d)
+    return {"nodes": nodes, "links": links}
+
+
+def build_secoqc(
+    n: int, avg_degree: float, seed: int | None = None
+) -> dict[str, Any]:
+    """Partial mesh (SECOQC-style): N-node ring as backbone, then random
+    chord edges added until ⟨k⟩ ≈ ``avg_degree``.
+
+    Each chord lifts the average degree by 2/N. To reach target
+    avg_degree starting from the ring (degree 2 by construction), we add
+    ``round(N * (avg_degree - 2) / 2)`` extra edges drawn uniformly at
+    random from the set of non-ring node pairs.
+
+    Reflects the topology of real operational QKD networks: SECOQC
+    (Vienna 2008, 6 nodes), SwissQuantum (Geneva), Madrid Quantum
+    Network. Typical N ∈ [5, 15], ⟨k⟩ ∈ [2, 4]. The model is the
+    closest match to a fibre-route map: a ring of trusted nodes plus a
+    handful of cross-connections.
+    """
+    if n < 3:
+        raise ValueError(f"secoqc requires n >= 3, got {n}")
+    if avg_degree < 2.0:
+        raise ValueError(
+            f"secoqc requires avg_degree >= 2.0 (ring already has degree 2), got {avg_degree}"
+        )
+    if avg_degree > n - 1:
+        raise ValueError(
+            f"secoqc avg_degree {avg_degree} exceeds maximum n-1={n-1}"
+        )
+    rng = _random.Random(seed)
+    nodes: list[dict[str, Any]] = []
+    radius = 220.0
+    cx, cy = 320.0, 220.0
+    for i in range(n):
+        angle = (2.0 * math.pi * i) / n
+        nodes.append(_node(i + 1, cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    uids = [nd["uid"] for nd in nodes]
+    links: list[dict[str, Any]] = []
+    edge_set: set[tuple[str, str]] = set()
+
+    def add_edge(a: str, b: str) -> bool:
+        if a == b:
+            return False
+        left, right = (a, b) if a <= b else (b, a)
+        if (left, right) in edge_set:
+            return False
+        edge_set.add((left, right))
+        links.append(_link(left, right))
+        return True
+
+    # Backbone: ring.
+    for i in range(n):
+        add_edge(uids[i], uids[(i + 1) % n])
+    # Extra chords to reach target avg_degree.
+    target_edges = int(round(n * avg_degree / 2.0))
+    extra_needed = max(0, target_edges - len(links))
+    candidates = [
+        (i, j) for i in range(n) for j in range(i + 1, n)
+        if (uids[i], uids[j]) not in edge_set
+    ]
+    rng.shuffle(candidates)
+    for (i, j) in candidates[:extra_needed]:
+        add_edge(uids[i], uids[j])
     return {"nodes": nodes, "links": links}
 
 
@@ -323,7 +579,10 @@ __all__ = [
     "build_line",
     "build_mesh",
     "build_star",
-    "build_random",
+    "build_er",
+    "build_barabasi_albert",
+    "build_rgg",
+    "build_secoqc",
     "build_bridge",
     "DEFAULT_R0",
     "DEFAULT_ALPHA",
