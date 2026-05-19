@@ -1,0 +1,175 @@
+{
+  "name": "bridge-c2-n4",
+  "description": null,
+  "sdn": {
+    "ip": "172.30.0.2",
+    "port": 3000,
+    "type_http": "http"
+  },
+  "nodes": [
+    {
+      "uid": "node-76",
+      "node_id": 76,
+      "label": "DKMS 76",
+      "x": 250.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-77",
+      "node_id": 77,
+      "label": "DKMS 77",
+      "x": 150.0,
+      "y": 320.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-78",
+      "node_id": 78,
+      "label": "DKMS 78",
+      "x": 50.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-79",
+      "node_id": 79,
+      "label": "DKMS 79",
+      "x": 149.99999999999997,
+      "y": 120.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-80",
+      "node_id": 80,
+      "label": "DKMS 80",
+      "x": 490.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-81",
+      "node_id": 81,
+      "label": "DKMS 81",
+      "x": 390.0,
+      "y": 320.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-82",
+      "node_id": 82,
+      "label": "DKMS 82",
+      "x": 290.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-83",
+      "node_id": 83,
+      "label": "DKMS 83",
+      "x": 390.0,
+      "y": 120.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    }
+  ],
+  "links": [
+    {
+      "uid": "edge-node-76-node-77",
+      "source_uid": "node-76",
+      "target_uid": "node-77",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-77-node-78",
+      "source_uid": "node-77",
+      "target_uid": "node-78",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-78-node-79",
+      "source_uid": "node-78",
+      "target_uid": "node-79",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-76-node-79",
+      "source_uid": "node-76",
+      "target_uid": "node-79",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-80-node-81",
+      "source_uid": "node-80",
+      "target_uid": "node-81",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-81-node-82",
+      "source_uid": "node-81",
+      "target_uid": "node-82",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-82-node-83",
+      "source_uid": "node-82",
+      "target_uid": "node-83",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-80-node-83",
+      "source_uid": "node-80",
+      "target_uid": "node-83",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-78-node-80",
+      "source_uid": "node-78",
+      "target_uid": "node-80",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    }
+  ]
+}

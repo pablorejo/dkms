@@ -1,0 +1,74 @@
+# HELP loadtest_info Info sobre el test en curso (start/end/step/interval/offset)
+# TYPE loadtest_info gauge
+loadtest_info{end_saes="50",interval_seconds="15",offset_seconds="15",start_saes="5",step_saes="5",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+# HELP loadtest_active_saes Número de SAEs activos en este instante
+# TYPE loadtest_active_saes gauge
+loadtest_active_saes{test_id="ramp-sim58-20260519T062036-75ce0b"} 50.0
+# HELP loadtest_target_saes Número de SAEs objetivo al que ha llegado la rampa actualmente
+# TYPE loadtest_target_saes gauge
+loadtest_target_saes{test_id="ramp-sim58-20260519T062036-75ce0b"} 50.0
+# HELP loadtest_phase Fase del test: 0=idle,1=warmup,2=ramping,3=hold,4=draining,5=done
+# TYPE loadtest_phase gauge
+loadtest_phase{test_id="ramp-sim58-20260519T062036-75ce0b"} 5.0
+# HELP loadtest_requests_total Peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_requests_total counter
+loadtest_requests_total{result="ok",status_code="200",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_requests_total{result="error",status_code="502",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+# HELP loadtest_requests_created Peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_requests_created gauge
+loadtest_requests_created{result="ok",status_code="200",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791716788081481e+09
+loadtest_requests_created{result="error",status_code="502",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791717001468785e+09
+# HELP loadtest_request_duration_seconds Duración de las peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_request_duration_seconds histogram
+loadtest_request_duration_seconds_bucket{le="0.05",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 1991.0
+loadtest_request_duration_seconds_bucket{le="0.1",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2285.0
+loadtest_request_duration_seconds_bucket{le="0.25",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2302.0
+loadtest_request_duration_seconds_bucket{le="0.5",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2302.0
+loadtest_request_duration_seconds_bucket{le="1.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2302.0
+loadtest_request_duration_seconds_bucket{le="2.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2303.0
+loadtest_request_duration_seconds_bucket{le="5.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_bucket{le="10.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_bucket{le="20.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_bucket{le="30.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_bucket{le="60.0",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_bucket{le="+Inf",result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_count{result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 2304.0
+loadtest_request_duration_seconds_sum{result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 44.43388247489929
+loadtest_request_duration_seconds_bucket{le="0.05",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 0.0
+loadtest_request_duration_seconds_bucket{le="0.1",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 0.0
+loadtest_request_duration_seconds_bucket{le="0.25",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 0.0
+loadtest_request_duration_seconds_bucket{le="0.5",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 0.0
+loadtest_request_duration_seconds_bucket{le="1.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 0.0
+loadtest_request_duration_seconds_bucket{le="2.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="5.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="10.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="20.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="30.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="60.0",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_bucket{le="+Inf",result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_count{result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+loadtest_request_duration_seconds_sum{result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.5083723068237305
+# HELP loadtest_request_duration_seconds_created Duración de las peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_request_duration_seconds_created gauge
+loadtest_request_duration_seconds_created{result="ok",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791716788081825e+09
+loadtest_request_duration_seconds_created{result="error",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.779171700146901e+09
+# HELP loadtest_keys_requested_total Claves solicitadas acumuladas
+# TYPE loadtest_keys_requested_total counter
+loadtest_keys_requested_total{test_id="ramp-sim58-20260519T062036-75ce0b"} 9293.0
+# HELP loadtest_keys_requested_created Claves solicitadas acumuladas
+# TYPE loadtest_keys_requested_created gauge
+loadtest_keys_requested_created{test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791716788082407e+09
+# HELP loadtest_keys_received_total Claves recibidas acumuladas
+# TYPE loadtest_keys_received_total counter
+loadtest_keys_received_total{test_id="ramp-sim58-20260519T062036-75ce0b"} 9285.0
+# HELP loadtest_keys_received_created Claves recibidas acumuladas
+# TYPE loadtest_keys_received_created gauge
+loadtest_keys_received_created{test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791716788082502e+09
+# HELP loadtest_errors_total Errores clasificados por motivo (extraído del cuerpo del error)
+# TYPE loadtest_errors_total counter
+loadtest_errors_total{reason="502_bad_gateway",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.0
+# HELP loadtest_errors_created Errores clasificados por motivo (extraído del cuerpo del error)
+# TYPE loadtest_errors_created gauge
+loadtest_errors_created{reason="502_bad_gateway",test_id="ramp-sim58-20260519T062036-75ce0b"} 1.7791717001469452e+09
+# HELP loadtest_provision_failures_total Número de SAEs que fallaron durante la provisión
+# TYPE loadtest_provision_failures_total counter

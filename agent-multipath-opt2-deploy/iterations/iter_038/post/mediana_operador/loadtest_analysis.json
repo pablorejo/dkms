@@ -1,0 +1,44 @@
+{
+  "totals": {
+    "requests": 2298.0,
+    "by_status": {
+      "200": 2298.0
+    }
+  },
+  "status_classes": {
+    "ok": 2298.0
+  },
+  "percentages": {
+    "ok": 100.0
+  },
+  "latency": {
+    "count": 2298.0,
+    "sum_seconds": 41.37293982505798,
+    "mean_seconds": 0.018003890263297642,
+    "percentiles_seconds": {
+      "p50": 0.028927492447129912,
+      "p90": 0.06397959183673474,
+      "p95": 0.0835204081632653,
+      "p99": 0.0991530612244898
+    }
+  },
+  "params": {
+    "start_saes": 5,
+    "end_saes": 50,
+    "step_saes": 5,
+    "interval_seconds": 15.0,
+    "warmup_seconds": 30.0,
+    "per_sae_lambda": 0.5,
+    "key_size_bits": 256,
+    "request_timeout_seconds": 60
+  },
+  "plots": [
+    "agent-multipath-opt2-deploy/iterations/iter_038/post/mediana_operador/plots/requests_by_status.png",
+    "agent-multipath-opt2-deploy/iterations/iter_038/post/mediana_operador/plots/latency_percentiles.png",
+    "agent-multipath-opt2-deploy/iterations/iter_038/post/mediana_operador/plots/sae_status_over_time.png",
+    "agent-multipath-opt2-deploy/iterations/iter_038/post/mediana_operador/plots/sae_latency_p95_over_time.png"
+  ],
+  "csvs": [
+    "agent-multipath-opt2-deploy/iterations/iter_038/post/mediana_operador/data/loadtest_metrics.csv"
+  ]
+}

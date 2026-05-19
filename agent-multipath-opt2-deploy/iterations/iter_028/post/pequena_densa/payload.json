@@ -1,0 +1,214 @@
+{
+  "name": "mesh-3x3",
+  "description": null,
+  "sdn": {
+    "ip": "172.30.0.2",
+    "port": 3000,
+    "type_http": "http"
+  },
+  "nodes": [
+    {
+      "uid": "node-41",
+      "node_id": 41,
+      "label": "DKMS 41",
+      "x": 100.0,
+      "y": 100.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-42",
+      "node_id": 42,
+      "label": "DKMS 42",
+      "x": 220.0,
+      "y": 100.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-43",
+      "node_id": 43,
+      "label": "DKMS 43",
+      "x": 340.0,
+      "y": 100.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-44",
+      "node_id": 44,
+      "label": "DKMS 44",
+      "x": 100.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-45",
+      "node_id": 45,
+      "label": "DKMS 45",
+      "x": 220.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-46",
+      "node_id": 46,
+      "label": "DKMS 46",
+      "x": 340.0,
+      "y": 220.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-47",
+      "node_id": 47,
+      "label": "DKMS 47",
+      "x": 100.0,
+      "y": 340.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-48",
+      "node_id": 48,
+      "label": "DKMS 48",
+      "x": 220.0,
+      "y": 340.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    },
+    {
+      "uid": "node-49",
+      "node_id": 49,
+      "label": "DKMS 49",
+      "x": 340.0,
+      "y": 340.0,
+      "enc_buffer_size": null,
+      "dec_buffer_size": null
+    }
+  ],
+  "links": [
+    {
+      "uid": "edge-node-41-node-42",
+      "source_uid": "node-41",
+      "target_uid": "node-42",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-41-node-44",
+      "source_uid": "node-41",
+      "target_uid": "node-44",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-42-node-43",
+      "source_uid": "node-42",
+      "target_uid": "node-43",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-42-node-45",
+      "source_uid": "node-42",
+      "target_uid": "node-45",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-43-node-46",
+      "source_uid": "node-43",
+      "target_uid": "node-46",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-44-node-45",
+      "source_uid": "node-44",
+      "target_uid": "node-45",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-44-node-47",
+      "source_uid": "node-44",
+      "target_uid": "node-47",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-45-node-46",
+      "source_uid": "node-45",
+      "target_uid": "node-46",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-45-node-48",
+      "source_uid": "node-45",
+      "target_uid": "node-48",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-46-node-49",
+      "source_uid": "node-46",
+      "target_uid": "node-49",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-47-node-48",
+      "source_uid": "node-47",
+      "target_uid": "node-48",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    },
+    {
+      "uid": "edge-node-48-node-49",
+      "source_uid": "node-48",
+      "target_uid": "node-49",
+      "link_type": "QKD",
+      "distance_km": 5,
+      "quditto_rate_r0": 2000.0,
+      "quditto_rate_alpha": 0.0,
+      "quditto_max_buffer_size": 65536
+    }
+  ]
+}

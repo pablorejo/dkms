@@ -1,0 +1,53 @@
+# HELP loadtest_info Info sobre el test en curso (start/end/step/interval/offset)
+# TYPE loadtest_info gauge
+loadtest_info{end_saes="50",interval_seconds="15",offset_seconds="15",start_saes="5",step_saes="5",test_id="ramp-sim61-20260519T071335-4b4dc0"} 1.0
+# HELP loadtest_active_saes Número de SAEs activos en este instante
+# TYPE loadtest_active_saes gauge
+loadtest_active_saes{test_id="ramp-sim61-20260519T071335-4b4dc0"} 50.0
+# HELP loadtest_target_saes Número de SAEs objetivo al que ha llegado la rampa actualmente
+# TYPE loadtest_target_saes gauge
+loadtest_target_saes{test_id="ramp-sim61-20260519T071335-4b4dc0"} 50.0
+# HELP loadtest_phase Fase del test: 0=idle,1=warmup,2=ramping,3=hold,4=draining,5=done
+# TYPE loadtest_phase gauge
+loadtest_phase{test_id="ramp-sim61-20260519T071335-4b4dc0"} 5.0
+# HELP loadtest_requests_total Peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_requests_total counter
+loadtest_requests_total{result="ok",status_code="200",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+# HELP loadtest_requests_created Peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_requests_created gauge
+loadtest_requests_created{result="ok",status_code="200",test_id="ramp-sim61-20260519T071335-4b4dc0"} 1.7791748581687474e+09
+# HELP loadtest_request_duration_seconds Duración de las peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_request_duration_seconds histogram
+loadtest_request_duration_seconds_bucket{le="0.05",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 1986.0
+loadtest_request_duration_seconds_bucket{le="0.1",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2280.0
+loadtest_request_duration_seconds_bucket{le="0.25",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="0.5",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="1.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="2.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="5.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="10.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="20.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="30.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="60.0",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_bucket{le="+Inf",result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_count{result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 2298.0
+loadtest_request_duration_seconds_sum{result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 41.37293982505798
+# HELP loadtest_request_duration_seconds_created Duración de las peticiones enc_keys lanzadas por el runner
+# TYPE loadtest_request_duration_seconds_created gauge
+loadtest_request_duration_seconds_created{result="ok",test_id="ramp-sim61-20260519T071335-4b4dc0"} 1.7791748581687872e+09
+# HELP loadtest_keys_requested_total Claves solicitadas acumuladas
+# TYPE loadtest_keys_requested_total counter
+loadtest_keys_requested_total{test_id="ramp-sim61-20260519T071335-4b4dc0"} 9325.0
+# HELP loadtest_keys_requested_created Claves solicitadas acumuladas
+# TYPE loadtest_keys_requested_created gauge
+loadtest_keys_requested_created{test_id="ramp-sim61-20260519T071335-4b4dc0"} 1.7791748581688588e+09
+# HELP loadtest_keys_received_total Claves recibidas acumuladas
+# TYPE loadtest_keys_received_total counter
+loadtest_keys_received_total{test_id="ramp-sim61-20260519T071335-4b4dc0"} 9325.0
+# HELP loadtest_keys_received_created Claves recibidas acumuladas
+# TYPE loadtest_keys_received_created gauge
+loadtest_keys_received_created{test_id="ramp-sim61-20260519T071335-4b4dc0"} 1.7791748581688778e+09
+# HELP loadtest_errors_total Errores clasificados por motivo (extraído del cuerpo del error)
+# TYPE loadtest_errors_total counter
+# HELP loadtest_provision_failures_total Número de SAEs que fallaron durante la provisión
+# TYPE loadtest_provision_failures_total counter

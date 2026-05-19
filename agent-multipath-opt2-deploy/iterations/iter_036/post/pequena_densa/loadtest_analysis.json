@@ -1,0 +1,44 @@
+{
+  "totals": {
+    "requests": 2145.0,
+    "by_status": {
+      "200": 2145.0
+    }
+  },
+  "status_classes": {
+    "ok": 2145.0
+  },
+  "percentages": {
+    "ok": 100.0
+  },
+  "latency": {
+    "count": 2145.0,
+    "sum_seconds": 16.90254831314087,
+    "mean_seconds": 0.007879975903562177,
+    "percentiles_seconds": {
+      "p50": 0.02620967741935484,
+      "p90": 0.04717741935483871,
+      "p95": 0.0497983870967742,
+      "p99": 0.09214673913043489
+    }
+  },
+  "params": {
+    "start_saes": 5,
+    "end_saes": 50,
+    "step_saes": 5,
+    "interval_seconds": 15.0,
+    "warmup_seconds": 30.0,
+    "per_sae_lambda": 0.5,
+    "key_size_bits": 256,
+    "request_timeout_seconds": 60
+  },
+  "plots": [
+    "agent-multipath-opt2-deploy/iterations/iter_036/post/pequena_densa/plots/requests_by_status.png",
+    "agent-multipath-opt2-deploy/iterations/iter_036/post/pequena_densa/plots/latency_percentiles.png",
+    "agent-multipath-opt2-deploy/iterations/iter_036/post/pequena_densa/plots/sae_status_over_time.png",
+    "agent-multipath-opt2-deploy/iterations/iter_036/post/pequena_densa/plots/sae_latency_p95_over_time.png"
+  ],
+  "csvs": [
+    "agent-multipath-opt2-deploy/iterations/iter_036/post/pequena_densa/data/loadtest_metrics.csv"
+  ]
+}

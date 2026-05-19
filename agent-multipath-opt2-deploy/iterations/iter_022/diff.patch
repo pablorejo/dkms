@@ -1,0 +1,28 @@
+diff --git a/sdn/src/mcf.rs b/sdn/src/mcf.rs
+index 94fb076..86b7064 100644
+--- a/sdn/src/mcf.rs
++++ b/sdn/src/mcf.rs
+@@ -194,7 +194,7 @@ pub fn k_shortest_paths(
+ /// de operador con grado medio bajo (2–4) es un buen balance entre
+ /// "los paths sean realmente distintos" y "no perder K_efectivo
+ /// agresivamente".
+-pub const DEFAULT_OVERLAP_THRESHOLD: f64 = 0.70;
++pub const DEFAULT_OVERLAP_THRESHOLD: f64 = 0.50;
+ 
+ /// Descarta paths cuya fracción de edges compartidos con un path ya
+ /// aceptado del mismo commodity excede `threshold`.
+@@ -816,8 +816,12 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn filter_default_threshold_constant_is_0_70() {
+-        assert_eq!(DEFAULT_OVERLAP_THRESHOLD, 0.70);
++    fn filter_default_threshold_constant_is_0_50() {
++        // Auto-tune iter 1 (OBJ-027, 2026-05-19): 0.70 -> 0.50.
++        // Motivado por fallo R-017 en topologias sparse (random, bridge) tras
++        // primer despliegue. Permite contar como caminos distintos pares con
++        // hasta 50 % de edges compartidos, en lugar de exigir <30 % overlap.
++        assert_eq!(DEFAULT_OVERLAP_THRESHOLD, 0.50);
+     }
+ 
+     #[test]
