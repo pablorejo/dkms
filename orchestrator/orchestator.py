@@ -884,7 +884,12 @@ class Orchestator:
                 sdn_service_port = int(sdn_port)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"Puerto SDN invalido: {sdn_port}") from exc
-            sdn_service_host = pod_sdn.name
+            # 2026-05-20: use FQDN (svc.<ns>.svc.cluster.local) instead of
+            # the bare service name. Some EKS Auto Mode clusters started
+            # rejecting short-name DNS lookups across namespaces, leaving
+            # DKMS pods unable to POST /demand to the SDN. FQDN is always
+            # resolvable regardless of search-domain config.
+            sdn_service_host = f"{pod_sdn.name}.{simulation_key}.svc.cluster.local"
 
             dkms_pods: list[pods.PodDKMS] = []
             for dkms in sim.list_dkms:
@@ -985,7 +990,9 @@ class Orchestator:
                     continue
                 orr_id_int = int(getattr(orr_o, "id", 0) or qid)
                 dkms_meta_by_qkc_id[qid] = {
-                    "dns": f"dkms-{hid}",
+                    "dns": f"dkms-{hid}",  # short name for config-rs map keys
+                    # 2026-05-20: FQDN for URLs (avoids EKS short-name DNS issues)
+                    "fqdn": f"dkms-{hid}.{simulation_key}.svc.cluster.local",
                     "sae_port": sae_port,
                     # peer_port = sae_port + 1 (mismo convenio que
                     # `_dkms_rust_env_overrides` en pods.py). El
@@ -1066,18 +1073,20 @@ class Orchestator:
                     for n_qkc_id, meta in dkms_meta_by_qkc_id.items():
                         if n_qkc_id == my_qkc_id:
                             continue
-                        peer_key = meta["dns"]  # e.g. "dkms-15"
+                        peer_key = meta["dns"]  # e.g. "dkms-15" (no dots — config-rs uses '.' as separator)
                         # peer-plane port (sae_port+1) — `POST /kmapi/v1/ext_keys`
                         # vive en el router ETSI 020 del peer_addr, no en el
                         # sae_addr (que es para SAE-facing ETSI 014).
+                        # FQDN used in URL values (not in map keys) to avoid
+                        # short-name DNS resolution issues under EKS Auto Mode.
                         dkms_env[f"DKMS__peers__{peer_key}__endpoint"] = (
-                            f"https://{meta['dns']}:{meta['peer_port']}"
+                            f"https://{meta['fqdn']}:{meta['peer_port']}"
                         )
                         dkms_env[f"DKMS__peers__{peer_key}__transport"] = "orr"
                         dkms_env[f"DKMS__peers__{peer_key}__orr_id"] = meta["orr_id"]
                         dkms_env[f"ORR__peers__{meta['orr_id']}"] = str(n_qkc_id)
                         dkms_env[f"ORR__peer_grpc_addrs__{meta['orr_id']}"] = (
-                            f"http://{meta['dns']}:50052"
+                            f"http://{meta['fqdn']}:50052"
                         )
                 self._deploy_pod(
                     dkms_pod,
@@ -1218,7 +1227,9 @@ class Orchestator:
                     )
                 pod_sdn = pods.PodSDN(id_simulation=simulation_key, model_sdn=sim.sdn)
 
-            sdn_service_host = pod_sdn.name
+            # 2026-05-20: FQDN (see comment at line ~887) — short-name
+            # DNS lookups break under recent EKS Auto Mode CoreDNS configs.
+            sdn_service_host = f"{pod_sdn.name}.{simulation_key}.svc.cluster.local"
             sdn_service_port = getattr(getattr(pod_sdn.model, "host", None), "port", None)
             if not sdn_service_port:
                 raise ValueError("No se pudo resolver el puerto del servicio SDN para arrancar DKMS.")
