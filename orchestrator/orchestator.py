@@ -332,6 +332,12 @@ class Orchestator:
         if not runtime_dkms_payloads:
             return env_payload
 
+        # 2026-05-20: skip injecting SDN_TOPOLOGY_JSON_B64 if the
+        # encoded payload would push env+args past ARG_MAX (~128 KB
+        # on Linux). The Rust SDN reads its topology from
+        # /app/topology (ConfigMap mount) at boot, so this env is
+        # legacy. For N>=40 it always overflowed and triggered
+        # "exec /usr/local/bin/sdn: argument list too long".
         encoded_payload = base64.b64encode(
             json.dumps(
                 {"dkms": runtime_dkms_payloads},
@@ -339,7 +345,16 @@ class Orchestator:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).decode("ascii")
-        env_payload["SDN_TOPOLOGY_JSON_B64"] = encoded_payload
+        ARG_MAX_SOFT_LIMIT = 96 * 1024  # leave headroom for other env vars
+        if len(encoded_payload) <= ARG_MAX_SOFT_LIMIT:
+            env_payload["SDN_TOPOLOGY_JSON_B64"] = encoded_payload
+        else:
+            import logging
+            logging.getLogger(__name__).warning(
+                "SDN_TOPOLOGY_JSON_B64 omitted (size %d > limit %d); SDN loads from /app/topology ConfigMap",
+                len(encoded_payload),
+                ARG_MAX_SOFT_LIMIT,
+            )
         return env_payload
 
     def _wait_namespace_deleted(self, pod_sdn: "pods.PodSDN") -> bool:

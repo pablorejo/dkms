@@ -58,9 +58,21 @@ impl SdnService {
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
         };
-        // Pre-warm the MCF snapshot so /rate, /forwarding-table, etc.
-        // answer something coherent before the first event fires.
-        svc.recompute_mcf();
+        // 2026-05-20: previously called svc.recompute_mcf() synchronously
+        // here. With N=40 (~1560 commodities, ~110 edges) microlp takes
+        // 10-60s to solve the first LP, which blocks the runtime startup
+        // and the gRPC/HTTP servers never bind. The orchestator then
+        // sees "Connection refused" on every SAE provisioning attempt
+        // for as long as the LP runs. Spawn it on a background task so
+        // the servers come up immediately and /sae endpoints respond
+        // with a stale (default) McfSnapshot until the first solve
+        // finishes.
+        {
+            let svc_clone = svc.clone();
+            tokio::task::spawn_blocking(move || {
+                svc_clone.recompute_mcf();
+            });
+        }
         Ok(svc)
     }
 

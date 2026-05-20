@@ -63,3 +63,6 @@ audit_2026_05.md
 
 # Results dir (raw logs + JSON + plots de cada corrida CLI)
 tests/results/
+
+# Documentación técnica local (no para VCS)
+docs/local/

@@ -86,7 +86,7 @@ with e.connect() as c:
   python3 -m tests.cli.dkms_topo $flags \
     --name "$NAME" \
     --owner 3 \
-    --r0 10000 \
+    --r0 2000 \
     --buffer-enc-size 4096 \
     --buffer-saturated \
     --node-id-offset $offset \
