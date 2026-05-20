@@ -324,6 +324,16 @@ def _add_global_flags(p: argparse.ArgumentParser) -> None:
         help="alias for --force; assume 'yes' to all prompts",
     )
     p.add_argument(
+        "--no-stop",
+        dest="no_stop",
+        action="store_true",
+        help=(
+            "skip the final stop_simulation() call. Lets an external "
+            "orchestrator (parallel loadtest, manual probe, etc.) keep the "
+            "sim alive after dkms_topo exits. Default: stop on exit."
+        ),
+    )
+    p.add_argument(
         "--pod-ready-timeout",
         type=float,
         default=DEFAULT_POD_READY_TIMEOUT_S,
@@ -1140,11 +1150,14 @@ def _run_eks_session(
         sys.stderr.write(f"[dkms-topo] ERROR: {exc}\n")
         rc = 1
     finally:
-        try:
-            sys.stderr.write(f"[dkms-topo] stopping sim {sim_id}\n")
-            client.stop_simulation(sim_id)
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[dkms-topo] stop_simulation failed: {exc}\n")
+        if getattr(args, "no_stop", False):
+            sys.stderr.write(f"[dkms-topo] --no-stop set: leaving sim {sim_id} running\n")
+        else:
+            try:
+                sys.stderr.write(f"[dkms-topo] stopping sim {sim_id}\n")
+                client.stop_simulation(sim_id)
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[dkms-topo] stop_simulation failed: {exc}\n")
     return rc
 
 
