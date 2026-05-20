@@ -445,7 +445,14 @@ def _http_type_to_text(value: Optional[HTTPType]) -> str:
 
 
 def _node_ip(node_id: int) -> str:
-    return f"127.0.0.{100 + int(node_id)}"
+    # Legacy IPv4 field from the Python era — no functional role in K8s
+    # (pods talk via DNS). But the BD enforces ck_host_ipv4 (each octet
+    # 0..255). The original `127.0.0.{100+node_id}` overflowed octet 4
+    # for node_id ≥ 156. Spread across two octets via divmod to support
+    # arbitrary node_id ranges while staying RFC-1918 loopback.
+    n = 100 + int(node_id)
+    octet3, octet4 = divmod(n, 256)
+    return f"127.0.{octet3}.{octet4}"
 
 
 def _qkc_port(node_id: int) -> int:

@@ -166,17 +166,25 @@ class QKC(Base):
 
     host = relationship("Host", back_populates="qkc_nodes")
     orrs = relationship("ORR", back_populates="qkc", cascade="all, delete")
+    # 2026-05-20: `viewonly=True` to break the cascade nullification.
+    # Without it, session.merge(QKC) with an empty `local_kmes` list
+    # (which is what happens for every QKC saved via the repo, since
+    # the repo strips kmes=[] before persistence) disassociates ALL
+    # KMEs in session pointing at this QKC, setting local_qkc_id=NULL
+    # and triggering the NOT NULL constraint. With viewonly the
+    # relationship is read-only from the QKC side; KMEs are persisted
+    # explicitly via session.merge(Model2Entity.kme(...)) elsewhere.
     local_kmes = relationship(
         "KME",
         back_populates="local_qkc",
         foreign_keys="KME.local_qkc_id",
-        cascade="all, delete",
+        viewonly=True,
     )
     neighbor_kmes = relationship(
         "KME",
         back_populates="neighbor_qkc",
         foreign_keys="KME.neighbor_qkc_id",
-        cascade="all, delete",
+        viewonly=True,
     )
 
 

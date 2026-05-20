@@ -647,6 +647,31 @@ class Orchestator:
             if self.uow.repos.users.get(simulation_payload.id_user) is None:
                 raise ValueError(f"Usuario {simulation_payload.id_user} no encontrado")
 
+            # Bug fix (2026-05-20): purge orphan KMEs left behind by
+            # previous sims. session.merge() on a QKC with kmes=[]
+            # propagates NULL into the local_qkc_id of any orphan KME,
+            # violating the NOT NULL constraint. An orphan KME is one
+            # whose local_qkc_id no longer points at any row in `qkc`
+            # (the QKC was deleted when its sim was torn down, but the
+            # KME row stayed alive due to missing cascade). Wipe them up
+            # front so the merge has no leftover rows to corrupt.
+            session_for_cleanup = getattr(self.uow, "_session", None)
+            if session_for_cleanup is not None:
+                from sqlalchemy import text as _sql_text
+                purged = session_for_cleanup.execute(
+                    _sql_text(
+                        "DELETE FROM kme "
+                        "WHERE local_qkc_id NOT IN (SELECT id FROM qkc) "
+                        "OR neighbor_qkc_id NOT IN (SELECT id FROM qkc)"
+                    )
+                ).rowcount
+                if purged:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "create_simulation: pre-purged %d orphan KMEs to avoid NOT NULL violation",
+                        purged,
+                    )
+
             if simulation_payload.status is None:
                 simulation_payload = simulation_payload.model_copy(
                     update={"status": SimulationStatus.PENDING}
@@ -970,8 +995,15 @@ class Orchestator:
                     "DKMS_SDN_HOST": sdn_service_host,
                     "DKMS_SDN_PORT": str(sdn_service_port),
                 }
-                if dkms_topology_b64:
-                    dkms_env["DKMS_TOPOLOGY_JSON_B64"] = dkms_topology_b64
+                # Bug fix (2026-05-20): NOT injecting DKMS_TOPOLOGY_JSON_B64
+                # — for N=40 RGG/SECOQC the JSON is ~186 KB and together
+                # with the rest of the env (~16 KB) exceeds the kernel's
+                # ARG_MAX (~128 KB on Linux), making the DKMS binary fail
+                # at `execve` with "argument list too long". The Rust DKMS
+                # never reads this var anyway (it queries the SDN at
+                # runtime), so we just drop it. The legacy Python DKMS
+                # used it but that path is deprecated.
+                _ = dkms_topology_b64  # kept for backwards-compat / future use
                 if getattr(pods, "K8S_DKMS_RUST_SIDECARS", False):
                     # Override Rust DKMS [buffer] + [generator] sections.
                     # The Environment loader replaces the whole section, so
