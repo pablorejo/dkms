@@ -40,6 +40,7 @@
 //! + zeroize). Tras reinicio del proceso, se rehace el bootstrap inicial.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use parking_lot::RwLock;
 use zeroize::Zeroizing;
@@ -69,6 +70,16 @@ pub struct PeerRegistry {
     /// initiator con el peer. Solo se mantiene en el lado lex-smaller
     /// (= initiator). La siguiente rotación usa este valor + 1.
     current_send_epochs: RwLock<HashMap<String, u32>>,
+    /// orr_id → último `Instant` en que disparamos un passive re-bootstrap
+    /// reactivo contra ese peer. Sirve para rate-limit (ver
+    /// `should_attempt_rebootstrap`) y evitar tormenta de re-handshakes
+    /// si llegan muchos frames undecryptable del mismo peer.
+    rebootstrap_last_attempt: RwLock<HashMap<String, Instant>>,
+    /// orr_id → flag "rebootstrap en vuelo". Sirve para deduplicar: si
+    /// llegan 100 frames undecryptable de orr_X en 50 ms, solo el
+    /// primero dispara el handshake; los demás ven el flag y se
+    /// limitan a dropear.
+    rebootstrap_inflight: RwLock<HashMap<String, bool>>,
     local_orr_id: String,
     local_qkc_id: u32,
 }
@@ -82,6 +93,8 @@ impl PeerRegistry {
             master_secrets: RwLock::new(HashMap::new()),
             ephemeral_sks: RwLock::new(HashMap::new()),
             current_send_epochs: RwLock::new(HashMap::new()),
+            rebootstrap_last_attempt: RwLock::new(HashMap::new()),
+            rebootstrap_inflight: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -102,6 +115,8 @@ impl PeerRegistry {
             master_secrets: RwLock::new(HashMap::new()),
             ephemeral_sks: RwLock::new(HashMap::new()),
             current_send_epochs: RwLock::new(HashMap::new()),
+            rebootstrap_last_attempt: RwLock::new(HashMap::new()),
+            rebootstrap_inflight: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -320,6 +335,90 @@ impl PeerRegistry {
     pub fn set_current_send_epoch(&self, orr_id: String, epoch_id: u32) {
         self.current_send_epochs.write().insert(orr_id, epoch_id);
     }
+
+    // ─── passive re-bootstrap reactivo ────────────────────────────────
+    //
+    // Si un peer reinicia su pod (rolling restart, OOMKilled, etc.) su
+    // `PeerRegistry` (memory-only) se vacía. Cuando intenta cifrar y
+    // mandarnos frames con un master_secret nuevo, **nuestro** lado
+    // sigue con el viejo y los frames son undecryptables. El bootstrap
+    // inicial no se vuelve a disparar porque la convención lex-smaller
+    // solo cubre el caso happy-path inicial.
+    //
+    // Solución: cuando `handle_onion_in` detecta `master_secret missing
+    // for epoch` para un peer conocido, lanzamos un re-bootstrap
+    // reactivo (ver `OrrService::trigger_passive_rebootstrap`). El
+    // emisor (que somos nosotros aquí) hace `kem.encap(peer.pk)` y le
+    // manda un `EstablishSecret` al peer; el peer, con el handler
+    // arreglado (siempre decap + store), guarda el nuevo
+    // `master_secret`. Ambos lados quedan re-sincronizados.
+    //
+    // Los métodos siguientes implementan el rate-limit + dedup
+    // necesarios para evitar tormentas de re-handshakes.
+
+    /// Borra **todo** el material secreto asociado al peer:
+    /// `bootstrap_secret`, todas las épocas de `master_secrets` y
+    /// `ephemeral_sks`, y la `current_send_epoch`. Los `Zeroizing` que
+    /// salen del mapa borran la memoria al dropearse.
+    ///
+    /// Usado por el re-bootstrap reactivo para forzar que la siguiente
+    /// `attempt_establish` parta de cero y la nueva clave sustituya por
+    /// completo a la vieja.
+    pub fn clear_peer_secrets(&self, orr_id: &str) {
+        self.bootstrap_secrets.write().remove(orr_id);
+        self.master_secrets.write().remove(orr_id);
+        self.ephemeral_sks.write().remove(orr_id);
+        self.current_send_epochs.write().remove(orr_id);
+    }
+
+    /// Marca un re-bootstrap como "en vuelo" para el peer. Devuelve
+    /// `true` si el caller adquirió la exclusiva (= debe proceder con
+    /// el handshake), `false` si ya había otro hilo dentro (= debe
+    /// abortar y dropear el frame que lo disparó).
+    ///
+    /// Es la primitiva de dedup: si llegan 100 frames undecryptable de
+    /// orr_X en 50 ms, solo el primero adquiere y los demás ven `false`.
+    pub fn try_mark_rebootstrap_inflight(&self, orr_id: &str) -> bool {
+        let mut w = self.rebootstrap_inflight.write();
+        if w.get(orr_id).copied().unwrap_or(false) {
+            return false;
+        }
+        w.insert(orr_id.to_string(), true);
+        true
+    }
+
+    /// Libera el flag in-flight. Debe llamarse SIEMPRE (idealmente con
+    /// un guard RAII en el caller; aquí lo dejamos explícito porque el
+    /// callsite hace .spawn y la liberación va al final del task).
+    pub fn clear_rebootstrap_inflight(&self, orr_id: &str) {
+        self.rebootstrap_inflight.write().remove(orr_id);
+    }
+
+    /// Decide si vale la pena disparar un re-bootstrap reactivo para
+    /// este peer. Aplica una ventana mínima entre intentos
+    /// (`min_interval`); típicamente 30 s. La idea es que tras un
+    /// re-bootstrap exitoso los frames undecryptable cesan en pocos
+    /// ms, así que ver un frame undecryptable >30 s después del último
+    /// intento indica un fallo real (no spam del mismo intento).
+    pub fn should_attempt_rebootstrap(
+        &self,
+        orr_id: &str,
+        min_interval: std::time::Duration,
+    ) -> bool {
+        let r = self.rebootstrap_last_attempt.read();
+        match r.get(orr_id) {
+            None => true,
+            Some(last) => last.elapsed() >= min_interval,
+        }
+    }
+
+    /// Registra ahora como el último intento de re-bootstrap. Llamar
+    /// inmediatamente antes de spawnear el task de handshake.
+    pub fn mark_rebootstrap_attempt(&self, orr_id: &str) {
+        self.rebootstrap_last_attempt
+            .write()
+            .insert(orr_id.to_string(), Instant::now());
+    }
 }
 
 #[cfg(test)]
@@ -480,5 +579,51 @@ mod tests {
         assert_eq!(reg.current_send_epoch("orr_2"), Some(5));
         reg.set_current_send_epoch("orr_2".into(), 6);
         assert_eq!(reg.current_send_epoch("orr_2"), Some(6));
+    }
+
+    #[test]
+    fn clear_peer_secrets_removes_everything() {
+        let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
+        reg.set_bootstrap("orr_2".into(), [0xAA; 32]);
+        reg.set_master_for_epoch("orr_2".into(), 0, [0xBB; 32]);
+        reg.set_master_for_epoch("orr_2".into(), 1, [0xCC; 32]);
+        reg.store_ephemeral_sk("orr_2".into(), 1, vec![0xDD; 8]);
+        reg.set_current_send_epoch("orr_2".into(), 7);
+        assert!(reg.has_bootstrap("orr_2"));
+        assert!(reg.has_master_secret("orr_2"));
+        assert!(reg.has_ephemeral_sk("orr_2", 1));
+
+        reg.clear_peer_secrets("orr_2");
+
+        assert!(!reg.has_bootstrap("orr_2"));
+        assert!(!reg.has_master_secret("orr_2"));
+        assert!(!reg.has_ephemeral_sk("orr_2", 1));
+        assert_eq!(reg.current_send_epoch("orr_2"), None);
+        // qkc_id y pubkey son metadata pública, NO se borran
+        // (no es el job de clear_peer_secrets).
+    }
+
+    #[test]
+    fn rebootstrap_inflight_dedup() {
+        let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
+        assert!(reg.try_mark_rebootstrap_inflight("orr_2"));
+        // Segundo intento concurrente debe fallar
+        assert!(!reg.try_mark_rebootstrap_inflight("orr_2"));
+        // Tras liberar, el siguiente puede entrar
+        reg.clear_rebootstrap_inflight("orr_2");
+        assert!(reg.try_mark_rebootstrap_inflight("orr_2"));
+    }
+
+    #[test]
+    fn rebootstrap_rate_limit_blocks_within_window() {
+        use std::time::Duration;
+        let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
+        // Sin historial → siempre OK
+        assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
+        reg.mark_rebootstrap_attempt("orr_2");
+        // Justo después de marcar → blocked
+        assert!(!reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
+        // Con ventana 0 ns → siempre OK
+        assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_nanos(0)));
     }
 }

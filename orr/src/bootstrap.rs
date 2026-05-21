@@ -252,7 +252,12 @@ async fn try_fetch_pubkey(addr: &str) -> std::result::Result<(Vec<u8>, String, S
 
 /// Hace el encap contra `pk`, llama a `EstablishSecret` y devuelve el
 /// shared_secret de 32 B si la RPC confirma ok.
-async fn attempt_establish(
+///
+/// `pub` desde OBJ "passive re-bootstrap": el handler de
+/// `OrrService::trigger_passive_rebootstrap` reutiliza esta función
+/// para reactivar un peer cuyo `master_secret` se desincronizó tras un
+/// restart del pod.
+pub async fn attempt_establish(
     _identity: &OrrIdentity,
     suite: &str,
     pk: &[u8],

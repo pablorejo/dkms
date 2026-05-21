@@ -21,7 +21,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Ventana mínima entre dos passive re-bootstraps consecutivos contra
+/// el MISMO peer. Tras un re-handshake exitoso los frames undecryptable
+/// cesan en ms; ver otro >30 s después indica un fallo real (no spam
+/// del mismo intento todavía no propagado). Configurable a futuro si
+/// algún cluster lento necesita más.
+const PASSIVE_REBOOTSTRAP_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use common::metrics::Metrics;
@@ -572,6 +579,13 @@ impl OrrService {
         // que aún no rotamos con `from` (porque rotation.rs no
         // completó), `master_for_epoch` devuelve None → drop con warn,
         // jamás silencio. El emisor reintentará o caerá el frame.
+        //
+        // Passive re-bootstrap: si además es un peer conocido (= con
+        // `peer_grpc_addrs` y `pubkey` ya cargados), disparamos un
+        // re-handshake reactivo en background. Probablemente el peer
+        // se reinició (rolling restart, OOM) y perdió todo su
+        // `PeerRegistry`. Nuestro lado puede recuperar la sincronía
+        // sin ayuda externa.
         let ms = match self.peers.master_for_epoch(&from, epoch_id) {
             Some(ms) => ms,
             None => {
@@ -581,6 +595,7 @@ impl OrrService {
                     latest = ?self.peers.latest_epoch_for(&from),
                     "orr.incoming master_secret missing for epoch (drop)",
                 );
+                self.trigger_passive_rebootstrap(&from);
                 return Ok(());
             }
         };
@@ -686,6 +701,143 @@ impl OrrService {
         if self.deliveries_tx.send(msg).is_err() {
             debug!("orr.deliver no_subscribers");
         }
+    }
+
+    // ─── passive re-bootstrap reactivo ────────────────────────────────
+    //
+    // Dispara un re-handshake ML-KEM con `peer_id` en background si:
+    //   * el peer está en `peer_grpc_addrs` (= lo conocemos como peer
+    //     de configuración, no es spam);
+    //   * tenemos su `pubkey` cacheada (= el bootstrap inicial fetcheó
+    //     la pubkey en algún momento);
+    //   * pasó `PASSIVE_REBOOTSTRAP_MIN_INTERVAL` desde el último
+    //     intento (rate-limit);
+    //   * no hay otro intento in-flight para este peer (dedup).
+    //
+    // Si todo OK:
+    //   1. Reserva el flag in-flight + marca el último intento ahora.
+    //   2. Borra el material secreto stale del peer (`clear_peer_secrets`).
+    //   3. `tokio::spawn` un task que llama a `bootstrap::attempt_establish`.
+    //   4. Si la RPC retorna ok, guarda el `secret` como
+    //      `bootstrap_secret` Y como `master_secret_epoch_0` (mismo
+    //      workaround temporal que el bootstrap inicial — ver
+    //      comentario en `bootstrap.rs:151-152`).
+    //   5. Libera el flag in-flight.
+    //
+    // No es `async`: la decisión es síncrona; el handshake va en una
+    // task spawnneada. Eso permite llamarlo desde `handle_onion_in`
+    // sin tener que awaitear (y bloquear el pump de frames).
+    fn trigger_passive_rebootstrap(&self, peer_id: &str) {
+        // Filtro 1: peer en configuración. Sin esto un atacante podría
+        // forzar floods de re-bootstrap mandándonos frames con `from`
+        // arbitrarios. `peer_grpc_addrs` viene del TOML/configmap, es
+        // confiable.
+        let addr = match self.cfg.peer_grpc_addrs.get(peer_id) {
+            Some(a) => a.clone(),
+            None => {
+                debug!(
+                    peer = %peer_id,
+                    "orr.passive_rebootstrap skip (peer not in peer_grpc_addrs)"
+                );
+                return;
+            }
+        };
+
+        // Filtro 2: rate-limit. Tras un re-handshake exitoso los frames
+        // undecryptable cesan en ms; ver otro >30 s después indica
+        // fallo real, no spam.
+        if !self
+            .peers
+            .should_attempt_rebootstrap(peer_id, PASSIVE_REBOOTSTRAP_MIN_INTERVAL)
+        {
+            debug!(
+                peer = %peer_id,
+                "orr.passive_rebootstrap skip (rate-limited)"
+            );
+            return;
+        }
+
+        // Filtro 3: dedup in-flight. Sólo un hilo entra a la vez por
+        // peer. Si entran 100 frames undecryptable en 50 ms, sólo el
+        // primero adquiere el flag.
+        if !self.peers.try_mark_rebootstrap_inflight(peer_id) {
+            debug!(
+                peer = %peer_id,
+                "orr.passive_rebootstrap skip (another inflight)"
+            );
+            return;
+        }
+
+        // Necesitamos la pubkey del peer. Si no la tenemos cargada
+        // todavía, el bootstrap inicial no llegó tan lejos — un re-
+        // bootstrap ahora no tiene material para encap. Liberamos el
+        // flag y abortamos; el bootstrap inicial seguirá reintentando
+        // su `fetch_pubkey`.
+        let pk = match self.peers.public_key(peer_id) {
+            Some(p) => p,
+            None => {
+                debug!(
+                    peer = %peer_id,
+                    "orr.passive_rebootstrap skip (pubkey not cached yet)"
+                );
+                self.peers.clear_rebootstrap_inflight(peer_id);
+                return;
+            }
+        };
+
+        self.peers.mark_rebootstrap_attempt(peer_id);
+        // Borrado de claves stale ANTES del handshake. Si el RPC
+        // fallara, mejor estar sin clave que con una mezcla
+        // viejo/nuevo que produzca frames imposibles de descifrar.
+        // El siguiente frame que llegue volverá a disparar.
+        self.peers.clear_peer_secrets(peer_id);
+
+        let peers = self.peers.clone();
+        let identity = self.identity.clone();
+        let suite = self.cfg.default_pqc_suite.clone();
+        let local_orr_id = self.cfg.orr_id.clone();
+        let peer_id_owned = peer_id.to_string();
+
+        tokio::spawn(async move {
+            info!(
+                local = %local_orr_id,
+                peer = %peer_id_owned,
+                addr = %addr,
+                "orr.passive_rebootstrap start"
+            );
+            let res = bootstrap::attempt_establish(
+                &identity,
+                &suite,
+                &pk,
+                &local_orr_id,
+                &peer_id_owned,
+                &addr,
+            )
+            .await;
+            match res {
+                Ok(secret) => {
+                    // Mismo cableado que el bootstrap inicial: tanto
+                    // bootstrap_secret como master_secret_epoch_0 (ver
+                    // comentario en bootstrap.rs:151-152 sobre el
+                    // workaround temporal de OBJ-011).
+                    peers.set_bootstrap(peer_id_owned.clone(), secret);
+                    peers.set_master_for_epoch(peer_id_owned.clone(), 0, secret);
+                    info!(
+                        peer = %peer_id_owned,
+                        "orr.passive_rebootstrap ok"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        peer = %peer_id_owned,
+                        addr = %addr,
+                        error = %e,
+                        "orr.passive_rebootstrap failed (will retry on next undecryptable frame after rate-limit window)"
+                    );
+                }
+            }
+            peers.clear_rebootstrap_inflight(&peer_id_owned);
+        });
     }
 }
 

@@ -157,16 +157,15 @@ impl OrrControl for OrrGrpc {
         }
         tracing::Span::current().record("from", tracing::field::display(&from));
 
-        // Idempotente: si ya teníamos bootstrap_secret con este peer,
-        // no sobreescribimos (puede ser un reintento del initiator).
-        // Aún así devolvemos ok para que el initiator no haga loop.
-        if self.svc.peers.has_bootstrap(&from) {
-            debug!(peer = %from, "orr.establish_secret already_set idempotent_ok");
-            return Ok(Response::new(EstablishSecretResponse {
-                ok: true,
-                error: String::new(),
-            }));
-        }
+        // NOTA passive re-bootstrap: anteriormente había aquí un early
+        // return `if has_bootstrap → ok` por idempotencia. Eso rompía la
+        // auto-cura cuando el initiator se reiniciaba: re-mandaba un
+        // EstablishSecret con NUEVO ciphertext y el responder lo
+        // ignoraba silenciosamente, dejando los dos lados con
+        // master_secrets distintos para siempre. Ahora SIEMPRE
+        // decapsulamos y sobrescribimos. El caso "mismo encap repetido"
+        // sigue siendo idempotente porque decap(ct) es determinista —
+        // sobreescribir con el mismo valor no cambia nada.
 
         // Decapsular con nuestra sk.
         let ss = match self.svc.identity.decap(&m.ciphertext) {
