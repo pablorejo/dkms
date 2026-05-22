@@ -24,7 +24,6 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto,
 };
-use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use tracing::{debug, error, info, warn};
@@ -42,7 +41,7 @@ pub async fn serve_mtls(
     plane_label: &'static str,
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(tls_config);
-    let listener = TcpListener::bind(addr).await?;
+    let listener = common::net::bind_reuse_addr(addr).await?;
     info!(%addr, plane = plane_label, "dkms https listening");
 
     loop {

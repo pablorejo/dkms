@@ -20,7 +20,6 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde::Deserialize;
-use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::{routing::NextHop, service::QkcService};
@@ -34,7 +33,8 @@ pub fn router(svc: QkcService) -> Router {
 }
 
 pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let parsed: std::net::SocketAddr = addr.parse()?;
+    let listener = common::net::bind_reuse_addr(parsed).await?;
     info!(%addr, "qkc.http_admin.listening");
     axum::serve(listener, router(svc)).await?;
     Ok(())

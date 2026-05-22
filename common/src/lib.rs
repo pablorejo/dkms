@@ -11,6 +11,7 @@ pub mod ids;
 pub mod ipc;
 pub mod logging;
 pub mod metrics;
+pub mod net;
 pub mod tls;
 
 /// Auto-generated protobuf types and gRPC stubs.

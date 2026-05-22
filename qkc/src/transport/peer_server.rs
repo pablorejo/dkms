@@ -10,10 +10,7 @@
 
 use std::sync::Arc;
 
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-};
+use tokio::{net::TcpStream, sync::Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use wire::{decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_RECV, FRAME_RELAY};
@@ -28,7 +25,8 @@ use crate::{relay, service::QkcService};
 const MAX_INFLIGHT_PEER: usize = 8192;
 
 pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let addr: std::net::SocketAddr = addr.parse()?;
+    let listener = common::net::bind_reuse_addr(addr).await?;
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_PEER));
     info!(%addr, max_inflight = MAX_INFLIGHT_PEER, "qkc.peer_server.listening");
     loop {

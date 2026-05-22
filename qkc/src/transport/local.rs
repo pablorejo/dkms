@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{mpsc, Semaphore},
 };
 use tracing::{debug, info, warn};
@@ -41,7 +41,8 @@ const DELIVER_QUEUE_CAPACITY: usize = 65536;
 const MAX_INFLIGHT_LOCAL_SEND: usize = 4096;
 
 pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let addr: std::net::SocketAddr = addr.parse()?;
+    let listener = common::net::bind_reuse_addr(addr).await?;
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_LOCAL_SEND));
     info!(%addr, max_inflight = MAX_INFLIGHT_LOCAL_SEND, "qkc.local.listening");
     loop {

@@ -24,6 +24,8 @@ path = "src/lib.rs"
 etsi = { path = "../etsi" }
 # Wire binario TCP compartido con ORR↔QKC.
 wire = { path = "../wire" }
+# Helpers de red (bind_reuse_addr) compartidos.
+common = { workspace = true }
 
 # Async runtime + HTTP admin server.
 tokio = { workspace = true }

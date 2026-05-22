@@ -157,9 +157,11 @@ impl DkmsControl for DkmsGrpc {
 
 pub async fn serve(svc: DkmsService, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     info!(%addr, "dkms gRPC listening");
+    let listener = common::net::bind_reuse_addr(addr).await?;
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     Server::builder()
         .add_service(DkmsControlServer::new(DkmsGrpc { svc }))
-        .serve(addr)
+        .serve_with_incoming(incoming)
         .await?;
     Ok(())
 }

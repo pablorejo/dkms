@@ -309,11 +309,13 @@ fn map_err(e: OrrError) -> Status {
 }
 
 pub async fn serve(svc: OrrService, addr: &str) -> anyhow::Result<()> {
-    let addr = addr.parse()?;
+    let addr: std::net::SocketAddr = addr.parse()?;
     info!(%addr, "orr gRPC listening");
+    let listener = common::net::bind_reuse_addr(addr).await?;
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     Server::builder()
         .add_service(OrrControlServer::new(OrrGrpc { svc }))
-        .serve(addr)
+        .serve_with_incoming(incoming)
         .await?;
     Ok(())
 }

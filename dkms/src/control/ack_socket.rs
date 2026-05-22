@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use common::ids::KeyId;
@@ -39,7 +39,7 @@ pub struct AckFrame {
 /// su propio task; el handler lee líneas JSON, parsea `AckFrame`, y por
 /// cada `key_id` llama a `gen.on_ack(from, key_id)`.
 pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = common::net::bind_reuse_addr(addr).await?;
     info!(%addr, "dkms.ack_socket listening");
     loop {
         let (stream, peer) = match listener.accept().await {
