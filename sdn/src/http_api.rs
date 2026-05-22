@@ -36,7 +36,7 @@ use crate::{
     error::SdnError,
     routing,
     service::SdnService,
-    topology::{Dkms, Sae, Topology},
+    topology::{Dkms, Sae, SaeBulkItem, Topology},
 };
 
 #[derive(Serialize)]
@@ -276,6 +276,38 @@ async fn register_sae(
     }
 }
 
+/// Body item accepted by `POST /sae-bulk`. The orchestator emits a flat
+/// `{id, dkms_id}` shape (see `_sdn_http_json` callers in
+/// `orchestrator/api_orchestator.py`), so we deserialize that and translate
+/// to the canonical `SaeBulkItem`.
+#[derive(Deserialize)]
+struct SaeBulkPayloadItem {
+    #[serde(alias = "sae_id")]
+    id: String,
+    #[serde(default)]
+    dkms_id: Option<String>,
+    #[serde(default)]
+    dkms_target: Option<DkmsTargetPayload>,
+}
+
+async fn register_sae_bulk(
+    State(svc): State<SdnService>,
+    Json(items): Json<Vec<SaeBulkPayloadItem>>,
+) -> impl IntoResponse {
+    let bulk: Vec<SaeBulkItem> = items
+        .into_iter()
+        .map(|p| SaeBulkItem {
+            sae_id: p.id,
+            dkms_id: p.dkms_id,
+            dkms_target: p.dkms_target.map(|t| (t.ip, t.port)),
+        })
+        .collect();
+    match svc.topology.register_sae_bulk(bulk) {
+        Ok(outcomes) => (StatusCode::OK, Json(outcomes)).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
 async fn update_sae(
     State(svc): State<SdnService>,
     AxumPath(sae_id): AxumPath<String>,
@@ -485,6 +517,7 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/saes", get(get_saes))
         .route("/links", get(get_links))
         .route("/sae", post(register_sae))
+        .route("/sae-bulk", post(register_sae_bulk))
         .route("/sae/:sae_id", put(update_sae).delete(delete_sae))
         .route("/sae/:sae_id/binding", get(get_sae_binding))
         .route("/sae-bindings/:dkms_id", get(list_sae_bindings))

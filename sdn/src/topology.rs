@@ -65,6 +65,31 @@ pub struct Sae {
     pub dkms_id: String,
 }
 
+/// Input item for `register_sae_bulk` — same shape as the per-item args
+/// of `register_sae`. Either `dkms_id` (canonical) or `dkms_target`
+/// (legacy host:port) must be set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaeBulkItem {
+    pub sae_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkms_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkms_target: Option<(String, u16)>,
+}
+
+/// Outcome of one SAE in a `register_sae_bulk` call. Failures do NOT
+/// abort the batch; each item gets its own row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum BulkSaeOutcome {
+    Ok(Sae),
+    Error {
+        sae_id: String,
+        code: String,
+        detail: String,
+    },
+}
+
 /// Physical metadata of a QKC↔QKC link.
 ///
 /// `r0_keys_per_second` × 10^(−α·d/10) gives the link's effective key-rate
@@ -728,6 +753,73 @@ impl TopologyStore {
             t.saes.insert(sae.id.clone(), sae.clone());
             Ok(sae)
         })
+    }
+
+    /// Register many SAEs in a single mutation (single write_mux lock,
+    /// single topology clone, single atomic swap). Drastically faster
+    /// than calling `register_sae` N times because the clone cost
+    /// dominates for N > 100. Each item returns its own Result —
+    /// failures (already registered, unknown DKMS) do not abort the
+    /// batch; they appear as Err in the returned Vec.
+    ///
+    /// 2026-05-20: added to fix the loadtest bottleneck where
+    /// concurrent POSTs to /sae stalled under the global write_mux
+    /// lock + per-call topology clone.
+    pub fn register_sae_bulk(&self, items: Vec<SaeBulkItem>) -> Result<Vec<BulkSaeOutcome>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut results: Vec<BulkSaeOutcome> = Vec::with_capacity(items.len());
+        // ONE mutex take, ONE clone for the whole batch.
+        self.try_mutate(|t| {
+            for item in items.iter() {
+                if item.dkms_id.is_none() && item.dkms_target.is_none() {
+                    results.push(BulkSaeOutcome::Error {
+                        sae_id: item.sae_id.clone(),
+                        code: "bad_request".into(),
+                        detail: "must specify dkms_id or dkms_target".into(),
+                    });
+                    continue;
+                }
+                if t.saes.contains_key(&item.sae_id) {
+                    results.push(BulkSaeOutcome::Error {
+                        sae_id: item.sae_id.clone(),
+                        code: "already_registered".into(),
+                        detail: format!("sae already registered: {}", item.sae_id),
+                    });
+                    continue;
+                }
+                let resolved = t.resolve_dkms(
+                    item.dkms_id.as_deref(),
+                    item.dkms_target.as_ref().map(|(ip, p)| (ip.as_str(), *p)),
+                );
+                let dkms_id = match resolved {
+                    Some(d) => d.id.clone(),
+                    None => {
+                        let key = item.dkms_id.clone().unwrap_or_else(|| {
+                            item.dkms_target
+                                .as_ref()
+                                .map(|(ip, p)| format!("{ip}:{p}"))
+                                .unwrap_or_default()
+                        });
+                        results.push(BulkSaeOutcome::Error {
+                            sae_id: item.sae_id.clone(),
+                            code: "unknown_dkms".into(),
+                            detail: format!("unknown dkms: {key}"),
+                        });
+                        continue;
+                    }
+                };
+                let sae = Sae {
+                    id: item.sae_id.clone(),
+                    dkms_id,
+                };
+                t.saes.insert(sae.id.clone(), sae.clone());
+                results.push(BulkSaeOutcome::Ok(sae));
+            }
+            Ok(())
+        })?;
+        Ok(results)
     }
 
     /// Replace the DKMS binding of an existing SAE.
