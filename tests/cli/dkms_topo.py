@@ -862,21 +862,57 @@ def _wait_pods_ready(
     """Block until every pod matching ``selector`` in ``namespace`` is Ready.
 
     Wraps ``kubectl wait --for=condition=Ready --timeout=Ns pod -l ...``.
+
+    Handles the boot race: orchestator schedules pods asynchronously, so the
+    initial ``kubectl wait`` may fire before any pod exists and fail with
+    ``no matching resources found``. We poll with ``kubectl get pods -l``
+    until at least one matching pod exists (or up to ``existence_grace_s``
+    of the total timeout) before delegating to ``kubectl wait``.
+
     Raises ``RuntimeError`` on rc != 0 (typically timeout).
     """
+    deadline = time.monotonic() + timeout_seconds
+    existence_grace_s = min(60.0, timeout_seconds * 0.5)
+    existence_deadline = time.monotonic() + existence_grace_s
+    while time.monotonic() < existence_deadline:
+        check = subprocess.run(
+            [
+                kubectl_path,
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-l",
+                selector,
+                "--no-headers",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if check.returncode == 0 and check.stdout.strip():
+            break
+        time.sleep(2.0)
+    else:
+        raise RuntimeError(
+            f"kubectl wait pods not Ready (rc=1): no matching pods appeared "
+            f"under selector={selector!r} within {int(existence_grace_s)}s"
+        )
+
+    remaining = max(1.0, deadline - time.monotonic())
     args = [
         kubectl_path,
         "wait",
         "-n",
         namespace,
         "--for=condition=Ready",
-        f"--timeout={int(timeout_seconds)}s",
+        f"--timeout={int(remaining)}s",
         "pod",
         "-l",
         selector,
     ]
     result = subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout_seconds + 30
+        args, capture_output=True, text=True, timeout=remaining + 30
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -913,17 +949,36 @@ def _stage_saturate(
 
     # Re-key theory_rates from editor `node-<uid>` to live `dkms-<bd_id>` so
     # commodity ids match what the Rust DKMS emits in `generator.state peer=...`.
-    try:
-        dkms_ids = _discover_dkms_ids(namespace)
-        uid_to_dkms = _build_uid_to_dkms_id_map(topology, dkms_ids)
+    #
+    # Pods may still be appearing when wait returned partially Ready or
+    # raised: retry the discover/remap for up to remap_deadline_s so a
+    # straggler pod doesn't leave the map at the editor-uid layer (which
+    # would make ``_all_peers_saturated`` permanently report 0/N).
+    expected_node_count = len(topology["nodes"])
+    remap_deadline_s = time.monotonic() + 90.0
+    last_exc: RuntimeError | None = None
+    uid_to_dkms: dict[str, str] = {}
+    while time.monotonic() < remap_deadline_s:
+        try:
+            dkms_ids = _discover_dkms_ids(namespace)
+            if len(dkms_ids) < expected_node_count:
+                raise RuntimeError(
+                    f"only {len(dkms_ids)}/{expected_node_count} dkms pods discovered yet"
+                )
+            uid_to_dkms = _build_uid_to_dkms_id_map(topology, dkms_ids)
+            break
+        except RuntimeError as exc:
+            last_exc = exc
+            time.sleep(3.0)
+    if uid_to_dkms:
         theory = _remap_theory_rates(theory_node, uid_to_dkms)
         sys.stderr.write(
             f"[dkms-topo] mapped {len(uid_to_dkms)} editor uids to dkms ids: "
             f"{sorted(uid_to_dkms.items())[:4]}{'...' if len(uid_to_dkms) > 4 else ''}\n"
         )
-    except RuntimeError as exc:
+    else:
         sys.stderr.write(
-            f"[dkms-topo] WARN could not remap theory to dkms ids: {exc}\n"
+            f"[dkms-topo] WARN could not remap theory to dkms ids: {last_exc}\n"
         )
         theory = theory_node
     expected = set(theory.keys())
