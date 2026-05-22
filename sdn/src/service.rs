@@ -17,6 +17,7 @@ use crate::{
     error::Result,
     mcf::{BufferRole, McfSnapshot},
     mcmcf::{McmcfInputs, McmcfSolver},
+    metrics::SdnMetrics,
     push::Pushers,
     topology::{Topology, TopologyStore},
 };
@@ -28,6 +29,7 @@ pub struct SdnService {
     pub mcf_snapshot: Arc<ArcSwap<McfSnapshot>>,
     pub pushers: Arc<Pushers>,
     pub metrics: Metrics,
+    pub sdn_metrics: SdnMetrics,
     /// Per-commodity demand reports POSTed by each DKMS via
     /// `POST /demand`. Read by the MCMCF-λ solver on every recompute.
     pub demand_registry: SharedDemandRegistry,
@@ -49,12 +51,14 @@ impl SdnService {
             },
             None => Topology::default(),
         };
+        let sdn_metrics = SdnMetrics::register(&metrics);
         let svc = Self {
             cfg: Arc::new(cfg),
             topology: TopologyStore::new(initial),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics,
+            sdn_metrics,
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
         };
@@ -88,7 +92,12 @@ impl SdnService {
     /// snapshot. Inputs are the topology snapshot + the
     /// [`Self::demand_registry`] reported by DKMSs.
     pub fn recompute_mcf(&self) -> Arc<McfSnapshot> {
-        recompute_mcf_inner(&self.topology, &self.demand_registry, &self.mcf_snapshot)
+        recompute_mcf_inner(
+            &self.topology,
+            &self.demand_registry,
+            &self.mcf_snapshot,
+            Some(&self.sdn_metrics.lp_solve_duration_seconds),
+        )
     }
 
     // ---------- debouncer wiring -----------------------------------------
@@ -116,8 +125,9 @@ impl SdnService {
         let topo = self.topology.clone();
         let demand = self.demand_registry.clone();
         let snap = self.mcf_snapshot.clone();
+        let lp_hist = self.sdn_metrics.lp_solve_duration_seconds.clone();
         let new_deb = Debouncer::new(window, max_wait, move || {
-            recompute_mcf_inner(&topo, &demand, &snap);
+            recompute_mcf_inner(&topo, &demand, &snap, Some(&lp_hist));
         });
         info!(
             n_dkms = n,
@@ -367,7 +377,9 @@ fn recompute_mcf_inner(
     topo_store: &TopologyStore,
     demand_registry: &Arc<DemandRegistry>,
     snap_cell: &Arc<ArcSwap<McfSnapshot>>,
+    lp_solve_histogram: Option<&prometheus::Histogram>,
 ) -> Arc<McfSnapshot> {
+    let t_start = std::time::Instant::now();
     let topo = topo_store.load();
     let inputs = McmcfInputs::build(&topo, demand_registry);
     let n_commodities = inputs.commodities.len();
@@ -380,12 +392,17 @@ fn recompute_mcf_inner(
     let arc = Arc::new(snap);
     snap_cell.store(arc.clone());
 
+    let elapsed = t_start.elapsed();
+    if let Some(h) = lp_solve_histogram {
+        h.observe(elapsed.as_secs_f64());
+    }
     info!(
         n_commodities,
         n_edges,
         lambda,
         flows_with_rate = n_flows_positive,
         registry_len = demand_registry.len(),
+        elapsed_ms = elapsed.as_millis() as u64,
         "MCMCF-λ recomputed"
     );
 
@@ -478,6 +495,7 @@ pub(crate) mod tests {
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics: Metrics::new("sdn-test"),
+            sdn_metrics: SdnMetrics::register(&Metrics::new("sdn-test-metrics")),
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
         }

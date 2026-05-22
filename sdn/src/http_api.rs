@@ -397,10 +397,26 @@ async fn post_demand(
     State(svc): State<SdnService>,
     Json(report): Json<DemandReport>,
 ) -> impl IntoResponse {
+    // Observes on Drop, so it covers both the bad-request early-return
+    // and the happy path.
+    let _timer = svc.sdn_metrics.demand_post_duration_seconds.start_timer();
     if report.dkms_id.is_empty() {
+        svc.sdn_metrics
+            .demand_post_total
+            .with_label_values(&["bad_request"])
+            .inc();
         return err_response(SdnError::BadRequest("dkms_id is required".into()));
     }
     let summary = svc.demand_registry.ingest(report);
+    let outcome = if summary.errors.is_empty() {
+        "ok"
+    } else {
+        "partial"
+    };
+    svc.sdn_metrics
+        .demand_post_total
+        .with_label_values(&[outcome])
+        .inc();
     let status = if summary.errors.is_empty() {
         StatusCode::OK
     } else {

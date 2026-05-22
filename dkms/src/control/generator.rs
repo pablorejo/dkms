@@ -519,12 +519,17 @@ impl Generator {
     /// SDN. The MCMCF-λ solver reads from that registry on its next
     /// recompute.
     ///
-    /// Single-shot failures are warn-and-continue: the SDN's
-    /// registry just keeps the previous snapshot until the next tick
-    /// succeeds. We don't retry inside the tick because the next
-    /// tick will resend anyway, and stacking retries here would
-    /// build pressure on a flaky SDN.
+    /// Why: the v13-validation campaign found 17-33% of POSTs were
+    /// dropping at the transport layer during SAE ramps (mesh topos:
+    /// 1445-7615 fails over a single run), leaving the SDN with stale
+    /// δ_k and r_k that never tracked demand growth. Retry locally
+    /// before accepting a lost tick so the EWMA at the SDN side keeps
+    /// up.
     async fn run_demand_loop(self: Arc<Self>) {
+        const MAX_ATTEMPTS: u32 = 3;
+        // Backoff schedule (ms) chosen so the worst case (3 attempts
+        // with two waits) stays well below demand_refresh_ms=1000.
+        const BACKOFF_MS: [u64; 2] = [40, 120];
         let period = Duration::from_millis(self.cfg.demand_refresh_ms.max(50));
         let mut tick = tokio::time::interval(period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -535,8 +540,30 @@ impl Generator {
             if report.entries.is_empty() {
                 continue;
             }
-            match self.sdn_http.post_demand(&report).await {
-                Ok(applied) => {
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut applied_ok: Option<crate::southbound::DemandApplied> = None;
+            for attempt in 1..=MAX_ATTEMPTS {
+                match self.sdn_http.post_demand(&report).await {
+                    Ok(applied) => {
+                        applied_ok = Some(applied);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < MAX_ATTEMPTS {
+                            // Jitter ±25% to avoid 20 DKMSs synchronously
+                            // retrying against a stressed SDN.
+                            let base = BACKOFF_MS[(attempt - 1) as usize];
+                            let jitter = (rand::thread_rng().next_u64() % (base / 2 + 1)) as i64
+                                - (base / 4) as i64;
+                            let wait = (base as i64 + jitter).max(1) as u64;
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                        }
+                    }
+                }
+            }
+            match (applied_ok, last_err) {
+                (Some(applied), _) => {
                     if !applied.errors.is_empty() {
                         warn!(
                             n_errors = applied.errors.len(),
@@ -551,9 +578,22 @@ impl Generator {
                         );
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, n = report.entries.len(), "generator.demand POST failed");
+                (None, Some(e)) => {
+                    // Walk the full anyhow chain so the operator sees
+                    // the underlying reqwest cause (timeout vs.
+                    // connection refused vs. DNS) — v13 logs only
+                    // showed the top-level wrapper, leaving the root
+                    // cause invisible.
+                    let chain: Vec<String> = e.chain().map(|c| c.to_string()).collect();
+                    warn!(
+                        error = %e,
+                        chain = ?chain,
+                        n = report.entries.len(),
+                        attempts = MAX_ATTEMPTS,
+                        "generator.demand POST failed after retries"
+                    );
                 }
+                (None, None) => unreachable!("loop guarantees one branch"),
             }
         }
     }

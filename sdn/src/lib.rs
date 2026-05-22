@@ -20,6 +20,7 @@ pub mod http_api;
 pub mod link_admission;
 pub mod mcf;
 pub mod mcmcf;
+pub mod metrics;
 pub mod push;
 pub mod routing;
 pub mod service;

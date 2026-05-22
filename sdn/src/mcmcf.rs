@@ -1444,12 +1444,7 @@ mod tests {
             }
         }
         // DKMSs + ORRs at the 4 corners.
-        for (name, qkc) in [
-            ("A", "00"),
-            ("B", "03"),
-            ("C", "20"),
-            ("D", "23"),
-        ] {
+        for (name, qkc) in [("A", "00"), ("B", "03"), ("C", "20"), ("D", "23")] {
             t.upsert_orr(Orr {
                 id: format!("o-{name}"),
                 host: host(name.bytes().next().unwrap() as i64),
