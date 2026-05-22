@@ -621,8 +621,15 @@ impl McmcfSolver {
         undirected: &[((String, String), f64)],
         inputs: &McmcfInputs,
     ) -> Phase2Output {
+        // iter-009: λ is NOT a variable in phase-2 — substitute literally
+        // by `lambda_star` (the phase-1 optimum). The original formulation
+        // had `lambda` as a free variable with constraint `λ ≥ λ* − slack`,
+        // which left a degree of freedom that microlp filled with numerical
+        // drift, eventually breaking the conservation constraints and
+        // reporting false-Infeasible in ~97% of solves. Pinning λ removes
+        // the drift source entirely: the LP has only x (flow) and η (lex)
+        // variables now.
         let mut vars = ProblemVariables::new();
-        let lambda = vars.add(variable().min(0.0));
         let x: Vec<Vec<Variable>> = active
             .iter()
             .map(|_| {
@@ -649,16 +656,14 @@ impl McmcfSolver {
             obj += *e;
         }
         let mut problem = vars.maximise(obj).using(good_lp::default_solver);
-        // Pin λ to phase-1 optimum (with small slack to absorb
-        // microlp's solve-to-solve numerical drift).
-        problem = problem.with((lambda - lambda_star).geq(-LAMBDA_FIX_SLACK));
-        // Conservation with η_k present at source/sink.
+        // Conservation with η_k present at source/sink, λ pinned to λ*.
         for (k_idx, c) in active.iter().enumerate() {
             let src = inputs.dkms_to_qkc.get(c.src_dkms.as_str()).unwrap();
             let dst = inputs.dkms_to_qkc.get(c.dst_dkms.as_str()).unwrap();
             let r_k = c.remaining();
             let delta_k = c.drain_rate;
             let eta_k = eta[k_idx];
+            let lambda_r_k = lambda_star * r_k; // constante, no Variable
             for node in node_set {
                 let mut expr = Expression::with_capacity(arcs.len());
                 for (a_idx, (a, b)) in arcs.iter().enumerate() {
@@ -669,10 +674,15 @@ impl McmcfSolver {
                         expr -= x[k_idx][a_idx];
                     }
                 }
+                // Substituyendo λ → λ*:
+                //   src: (out - in) - λ*·R_k - η_k = δ_k
+                //        → (out - in - η_k) = δ_k + λ*·R_k
+                //   dst: (out - in) + λ*·R_k + η_k = -δ_k
+                //        → (out - in + η_k) = -δ_k - λ*·R_k
                 let c_node = if node == src {
-                    (expr - lambda * r_k - eta_k).eq(delta_k)
+                    (expr - eta_k).eq(delta_k + lambda_r_k)
                 } else if node == dst {
-                    (expr + lambda * r_k + eta_k).eq(-delta_k)
+                    (expr + eta_k).eq(-delta_k - lambda_r_k)
                 } else {
                     expr.eq(0.0)
                 };
