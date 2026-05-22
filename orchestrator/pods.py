@@ -1230,6 +1230,19 @@ class Pod:
             env_payload.setdefault("OMP_NUM_THREADS", "1")
             env_payload.setdefault("MKL_NUM_THREADS", "1")
             env_payload.setdefault("NUMEXPR_NUM_THREADS", "1")
+            # 2026-05-22 (reverted same day): originally injected
+            # `SDN_DISABLE_LEX_REFINEMENT=1` to dodge the
+            # `project_mcmcf_er20_smoke` phase-2 infeasibility, BUT
+            # the v13-validation BA campaign relied on phase-2's η_k
+            # refinement to escalate `sdn_rate` from ~53 to ~400-870
+            # kps after the first commodities saturated. Disabling
+            # phase-2 froze the SDN at the phase-1 λ·R_k rate and
+            # multiplied the saturation time by ~10x. Phase-2 failure
+            # is gracefully handled in the SDN (`falling back to η =
+            # 0`), so accepting the occasional 100-500 s solve is
+            # worth it for the throughput. With CPU bumped to 8 cores
+            # the SDN keeps up.
+            # env_payload.setdefault("SDN_DISABLE_LEX_REFINEMENT", "1")
             # glibc malloc: cada solve aloca matrices ~160 MB que numpy
             # libera enseguida, pero glibc las retiene en arenas (una
             # por thread → hasta 8×CPU por defecto). Con la SDN
@@ -3571,8 +3584,8 @@ class PodDKMS(Pod):
                 client.V1ContainerPort(container_port=7200),
             ],
             resources=client.V1ResourceRequirements(
-                requests={"cpu": "100m", "memory": "128Mi"},
-                limits={"cpu": "1500m", "memory": "1Gi"},
+                requests={"cpu": "100m", "memory": "512Mi"},
+                limits={"cpu": "1500m", "memory": "2Gi"},
             ),
             startup_probe=client.V1Probe(
                 tcp_socket=client.V1TCPSocketAction(port=K8S_QKC_TCP_PORT),

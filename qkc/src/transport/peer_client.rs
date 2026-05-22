@@ -70,29 +70,31 @@ impl PeerOut {
         if let Some(s) = self.peers.get(&peer_id) {
             return s.clone();
         }
-        // Crea el slot + spawnea el writer task.
-        let slot = Arc::new(PeerSlot {
+        let candidate = Arc::new(PeerSlot {
             queue: Arc::new(ArrayQueue::new(QUEUE_CAPACITY)),
             notify: Arc::new(Notify::new()),
             addr: peer_addr.to_string(),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
         });
-        // Insertar es idempotente — si dos handlers entran a la vez,
-        // un solo writer queda.
-        let entry = self.peers.entry(peer_id).or_insert_with(|| slot.clone());
-        let slot = entry.value().clone();
+        let entry = self.peers.entry(peer_id).or_insert_with(|| candidate.clone());
+        let stored = entry.value().clone();
         drop(entry);
-        // Spawn solo si lo hemos insertado en esta llamada (otherwise
-        // ya hay un writer corriendo). Para detectarlo, comparamos el
-        // Arc devuelto con el que construimos — son distintos si ya
-        // existía.
-        let writer_slot = slot.clone();
-        let peer_id_for_log = peer_id;
-        tokio::spawn(async move {
-            writer_loop(peer_id_for_log, writer_slot).await;
-        });
-        slot
+        // Solo arrancar el writer si nuestro candidato fue el que quedó
+        // guardado en el DashMap. Si otro hilo (o una llamada previa)
+        // ya tenía un slot dentro, `or_insert_with` lo devuelve y
+        // descarta `candidate`; spawnear aquí en ese caso fugaba una
+        // task tokio por cada send() y, en hubs de topologías densas,
+        // saturaba la memoria del sidecar (OOM ~3 min en BA hub con 12
+        // peers, observado en sim 16/17/18 / v14-validation).
+        if Arc::ptr_eq(&stored, &candidate) {
+            let writer_slot = stored.clone();
+            let peer_id_for_log = peer_id;
+            tokio::spawn(async move {
+                writer_loop(peer_id_for_log, writer_slot).await;
+            });
+        }
+        stored
     }
 
     pub fn stats(&self, peer_id: u32) -> Option<(u64, u64)> {
