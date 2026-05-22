@@ -526,9 +526,26 @@ impl McmcfSolver {
         // σ_k ∈ [0, δ_k] — "unmet drain" per commodity. Active only
         // for commodities with δ_k > 0 (a fill-only commodity can't
         // have unmet drain).
+        //
+        // `SDN_DISABLE_SLACK_VARS=1` forces σ_k = 0 (upper bound 0)
+        // for all commodities. Used to investigate if σ_k introduces
+        // numerical drift between phase-1 and phase-2 LPs that causes
+        // phase-2 to report false-infeasible — when phase-1 uses
+        // σ_k > 0, phase-2's stricter formulation (no slack) cannot
+        // reproduce the phase-1 routing exactly.
+        let slack_disabled = std::env::var("SDN_DISABLE_SLACK_VARS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false);
         let sigma: Vec<Variable> = active
             .iter()
-            .map(|c| vars.add(variable().min(0.0).max(c.drain_rate.max(0.0))))
+            .map(|c| {
+                let upper = if slack_disabled {
+                    0.0
+                } else {
+                    c.drain_rate.max(0.0)
+                };
+                vars.add(variable().min(0.0).max(upper))
+            })
             .collect();
         // Build objective: λ − M·Σ σ_k.
         let mut obj = Expression::with_capacity(1 + sigma.len());
