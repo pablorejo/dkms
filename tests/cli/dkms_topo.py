@@ -1149,6 +1149,142 @@ def _stage_sae_test(
     return 0
 
 
+def _plot_topology(
+    payload: dict[str, Any],
+    output_dir: Path,
+    topology_kind: str,
+) -> tuple[Path, Path] | None:
+    """Render the topology (nodes + edges with distances) as PNG + Markdown.
+
+    Uses `node.x, node.y` from the web-editor coordinates baked into the
+    payload. Returns `(png_path, md_path)` or `None` if matplotlib not available.
+    """
+    try:
+        import matplotlib  # type: ignore
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    png_path = plots_dir / "topology.png"
+    md_path = output_dir / "topology.md"
+
+    nodes = payload.get("nodes") or []
+    links = payload.get("links") or []
+    if not nodes:
+        return None
+
+    uid_to_xy = {n["uid"]: (n.get("x", 0.0), n.get("y", 0.0)) for n in nodes}
+
+    # Compute node degrees for sizing
+    degree: dict[str, int] = {n["uid"]: 0 for n in nodes}
+    distances: list[float] = []
+    for ln in links:
+        s, t = ln.get("source_uid"), ln.get("target_uid")
+        if s in degree:
+            degree[s] += 1
+        if t in degree:
+            degree[t] += 1
+        d = ln.get("distance_km")
+        if d is not None:
+            distances.append(float(d))
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    # Draw edges
+    for ln in links:
+        s, t = ln.get("source_uid"), ln.get("target_uid")
+        if s not in uid_to_xy or t not in uid_to_xy:
+            continue
+        x1, y1 = uid_to_xy[s]
+        x2, y2 = uid_to_xy[t]
+        ax.plot([x1, x2], [y1, y2], color="0.6", linewidth=1.0, zorder=1)
+        d = ln.get("distance_km")
+        if d is not None:
+            mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            ax.text(mx, my, f"{d}km", fontsize=6, color="0.4",
+                    ha="center", va="center", zorder=2)
+
+    # Draw nodes (size by degree; max-degree hub stands out)
+    max_deg = max(degree.values()) if degree else 1
+    for n in nodes:
+        uid = n["uid"]
+        x, y = uid_to_xy[uid]
+        deg = degree.get(uid, 0)
+        size = 200 + 80 * deg
+        color = "#d62728" if deg == max_deg and max_deg > 2 else "#1f77b4"
+        ax.scatter([x], [y], s=size, c=color, edgecolors="black",
+                   linewidths=0.8, zorder=3)
+        label = n.get("label") or uid
+        ax.text(x, y, str(n.get("node_id", label)), fontsize=8,
+                color="white", ha="center", va="center",
+                fontweight="bold", zorder=4)
+
+    # Stats overlay
+    n_nodes = len(nodes)
+    n_links = len(links)
+    avg_k = (2.0 * n_links / n_nodes) if n_nodes else 0.0
+    title = (
+        f"Topology: {topology_kind} — "
+        f"N={n_nodes} nodes, E={n_links} edges, ⟨k⟩={avg_k:.2f}"
+    )
+    if distances:
+        title += f", d∈[{min(distances):.0f},{max(distances):.0f}]km"
+    ax.set_title(title)
+    ax.set_xlabel("x (editor coords)")
+    ax.set_ylabel("y (editor coords)")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.invert_yaxis()  # screen-y convention
+    ax.grid(True, linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=120)
+    plt.close(fig)
+
+    # Markdown sidecar
+    import statistics
+    md_lines = [
+        f"# Topology — {payload.get('name', topology_kind)}",
+        "",
+        f"![topology](plots/topology.png)",
+        "",
+        "## Stats",
+        f"- Kind: **{topology_kind}**",
+        f"- Nodes (N): **{n_nodes}**",
+        f"- Edges (E): **{n_links}**",
+        f"- Average degree ⟨k⟩: **{avg_k:.2f}**",
+    ]
+    if distances:
+        md_lines += [
+            f"- Distance per edge (km): min={min(distances):.1f}, "
+            f"med={statistics.median(distances):.1f}, "
+            f"max={max(distances):.1f}",
+        ]
+
+    # Adjacency table (compact)
+    adj: dict[str, list[str]] = {n["uid"]: [] for n in nodes}
+    for ln in links:
+        s, t = ln.get("source_uid"), ln.get("target_uid")
+        if s in adj and t in adj:
+            adj[s].append(t)
+            adj[t].append(s)
+    md_lines += ["", "## Adjacency", "", "| Node | Degree | Neighbors |",
+                 "|------|-------:|-----------|"]
+    for n in sorted(nodes, key=lambda x: x.get("node_id", 0)):
+        uid = n["uid"]
+        node_id = n.get("node_id", uid)
+        neighbors = sorted(
+            (next((m.get("node_id", m["uid"]) for m in nodes if m["uid"] == nb), nb)
+             for nb in adj[uid])
+        )
+        nb_str = ", ".join(str(x) for x in neighbors)
+        md_lines.append(f"| {node_id} | {len(adj[uid])} | {nb_str} |")
+
+    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    return (png_path, md_path)
+
+
 def _run_eks_session(
     args: argparse.Namespace,
     payload: dict[str, Any],
@@ -1164,6 +1300,15 @@ def _run_eks_session(
     (output_dir / "payload.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
     )
+    # Render topology plot + Markdown sidecar (silent if matplotlib missing).
+    topo_kind = getattr(args, "subcommand", None) or payload.get("name", "topology")
+    plot_result = _plot_topology(payload, output_dir, str(topo_kind))
+    if plot_result is not None:
+        png, md = plot_result
+        sys.stderr.write(
+            f"[dkms-topo] wrote topology plot → {png.relative_to(output_dir.parent)} "
+            f"+ {md.relative_to(output_dir.parent)}\n"
+        )
 
     client = OrchestatorClient(
         authz_url=args.authz_url, orch_url=args.orch_url
