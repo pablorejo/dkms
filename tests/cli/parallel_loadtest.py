@@ -237,30 +237,88 @@ def run_loadtest(args) -> dict[str, Any]:
     next_idx = 0
     t_ramp_start = time.time()
     targets = list(range(args.start_saes, args.end_saes + 1, args.step_saes))
+    use_bulk = getattr(args, "use_bulk", True)
     for step_i, target in enumerate(targets):
         n_new = target - next_idx
         if n_new <= 0:
             continue
-        print(f"[par-loadtest] step {step_i+1}/{len(targets)} target={target} provisioning {n_new} SAEs")
+        print(f"[par-loadtest] step {step_i+1}/{len(targets)} target={target} provisioning {n_new} SAEs (bulk={use_bulk})")
         t_step = time.time()
-        # Provision new SAEs in parallel
-        futs = []
-        for i in range(n_new):
-            idx = next_idx + i
-            dkms_id = dkms_list[idx % len(dkms_list)]
-            futs.append(provision_pool.submit(
-                _provision_one, sess_provision, args.orch_url, args.sim_id,
-                dkms_id, uid, idx, test_id, sae_writer, sae_lock,
-            ))
         new_workers: list[dict[str, Any]] = []
-        for f in as_completed(futs):
-            res = f.result()
-            if res["ok"]:
-                res["test_id"] = test_id
-                new_workers.append(res)
-                provisioned.append(res)
-            else:
-                failed += 1
+        if use_bulk:
+            # 2026-05-20: bulk-provision the whole step in a single POST
+            # to /orch/admin/saes/bulk. The orchestator inserts N SAE
+            # rows in 1 transaction + does 1 sync to SDN /sae-bulk (one
+            # write_mux lock + one topology clone for the whole batch).
+            # Drastically reduces the SDN bottleneck observed under
+            # parallel single-provision (it took ~10s for the SDN to
+            # process ~100 SAEs sequentially).
+            bulk_items = []
+            for i in range(n_new):
+                idx = next_idx + i
+                dkms_id = dkms_list[idx % len(dkms_list)]
+                bulk_items.append({
+                    "simulation_id": args.sim_id,
+                    "dkms_id": dkms_id,
+                    "sae_id": f"par-{test_id}-{idx:05d}",
+                    "description": "parallel-loadtest-bulk",
+                })
+            try:
+                r = sess_provision.post(
+                    f"{args.orch_url}/orch/admin/saes/bulk",
+                    headers={"X-User-Id": str(uid)},
+                    json=bulk_items,
+                    timeout=120,
+                )
+                if r.status_code == 200:
+                    res = r.json()
+                    created = int(res.get("created", 0))
+                    sdn_ok = int(res.get("sdn_ok", 0))
+                    failed_step = int(res.get("failed", 0))
+                    # Record each successfully created SAE in timeline
+                    with sae_lock:
+                        for i in range(min(created, n_new)):
+                            idx = next_idx + i
+                            sae_writer.writerow({
+                                "sae_index": idx,
+                                "sae_id": bulk_items[i]["sae_id"],
+                                "dkms_id": bulk_items[i]["dkms_id"],
+                                "src_ingress_id": bulk_items[i]["dkms_id"],
+                                "provisioned_at_epoch": time.time(),
+                                "provisioned_at_iso": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                            })
+                            provisioned.append({
+                                "sae_id": bulk_items[i]["sae_id"],
+                                "dkms_id": bulk_items[i]["dkms_id"],
+                                "ok": True,
+                            })
+                    failed += failed_step + (n_new - created)
+                    print(f"[par-loadtest]   bulk step: created={created} sdn_ok={sdn_ok} failed={failed_step + (n_new - created)}")
+                else:
+                    failed += n_new
+                    print(f"[par-loadtest]   bulk step FAILED status={r.status_code} body={r.text[:200]}")
+            except Exception as exc:
+                failed += n_new
+                print(f"[par-loadtest]   bulk step EXCEPTION: {str(exc)[:200]}")
+        else:
+            # Legacy path: parallel single provisions (kept for comparison)
+            futs = []
+            for i in range(n_new):
+                idx = next_idx + i
+                dkms_id = dkms_list[idx % len(dkms_list)]
+                futs.append(provision_pool.submit(
+                    _provision_one, sess_provision, args.orch_url, args.sim_id,
+                    dkms_id, uid, idx, test_id, sae_writer, sae_lock,
+                ))
+            for f in as_completed(futs):
+                res = f.result()
+                if res["ok"]:
+                    res["test_id"] = test_id
+                    new_workers.append(res)
+                    provisioned.append(res)
+                else:
+                    failed += 1
         next_idx = target
         sae_fp.flush()
         # Spawn traffic workers for new SAEs (if runtime URL provided)
@@ -333,6 +391,9 @@ def main():
     ap.add_argument("--request-timeout-s", type=float, default=30.0)
     ap.add_argument("--concurrency", type=int, default=20)
     ap.add_argument("--hold-seconds", type=float, default=60.0)
+    ap.add_argument("--no-bulk", dest="use_bulk", action="store_false",
+                    help="disable bulk provisioning (legacy parallel-singular path)")
+    ap.set_defaults(use_bulk=True)
     ap.add_argument("--runtime-url", default=None,
                     help="HTTPS base URL of runtime ingress (e.g. https://dkms2.example.com/api/sim/91)")
     ap.add_argument("--runtime-verify", action="store_true",

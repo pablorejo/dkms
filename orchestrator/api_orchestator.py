@@ -3167,6 +3167,150 @@ def create_admin_sae(
         return _sae_entity_to_dto(entity)
 
 
+class SaeAdminBulkItem(BaseModel):
+    simulation_id: int = Field(..., ge=1)
+    dkms_id: int = Field(..., ge=1)
+    sae_id: str = Field(..., min_length=1, max_length=128)
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class SaeAdminBulkResponse(BaseModel):
+    created: int
+    failed: int
+    sdn_ok: int
+    sdn_failed: int
+    errors: list[dict[str, Any]] = []
+
+
+@app.post(
+    "/orch/admin/saes/bulk",
+    response_model=SaeAdminBulkResponse,
+    status_code=status.HTTP_200_OK,
+)
+def create_admin_sae_bulk(
+    items: list[SaeAdminBulkItem],
+    x_user_id: int = Depends(_require_user_id),
+) -> SaeAdminBulkResponse:
+    """Provision many SAEs in a single transaction + single SDN sync.
+
+    2026-05-20: built to break the bottleneck of the individual
+    `POST /orch/admin/saes` under high concurrency. The bottleneck was
+    the per-call `_sync_sae_binding_to_sdn` which serializes through
+    the SDN's global `write_mux` lock. Batching collapses N mutex
+    takes + N topology clones into 1.
+
+    All SAEs in `items` must share the same simulation_id (validated).
+    """
+    from persistence.sqlalchemy.data import SAE as SAEEntity
+    from persistence.sqlalchemy.data import SaeStatusEnum
+
+    if not items:
+        return SaeAdminBulkResponse(created=0, failed=0, sdn_ok=0, sdn_failed=0)
+    sim_ids = {it.simulation_id for it in items}
+    if len(sim_ids) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="all items must share the same simulation_id",
+        )
+    sim_id = sim_ids.pop()
+
+    errors: list[dict[str, Any]] = []
+    created_entities: list = []
+    with _sqlalchemy_uow_session() as (uow, session):
+        simulation_entity = _require_owned_simulation(
+            session, user_id=x_user_id, simulation_id=sim_id,
+        )
+        for it in items:
+            try:
+                resolved_dkms = _require_dkms_in_simulation(
+                    session, simulation_id=sim_id, dkms_id=int(it.dkms_id),
+                )
+                resolved_dkms_id = int(resolved_dkms.id)
+                # Skip if already exists.
+                existing = (
+                    session.query(SAEEntity)
+                    .filter(SAEEntity.simulation_id == sim_id)
+                    .filter(SAEEntity.sae_id == it.sae_id)
+                    .one_or_none()
+                )
+                if existing is not None:
+                    continue
+                controller = _resolve_agent_controller_for_dkms(
+                    session, dkms_id=resolved_dkms_id,
+                )
+                entity = SAEEntity(
+                    sae_id=it.sae_id,
+                    display_name=it.display_name or it.sae_id,
+                    owner_user_id=int(x_user_id),
+                    simulation_id=sim_id,
+                    dkms_id=resolved_dkms_id,
+                    status=SaeStatusEnum.PENDING_CERT,
+                    sdn_id=int(controller.id_sdn) if controller and controller.id_sdn is not None else None,
+                    agent_dkms_id=int(controller.id) if controller else None,
+                    tls_id=None,
+                )
+                session.add(entity)
+                created_entities.append(entity)
+            except HTTPException as exc:
+                errors.append({"sae_id": it.sae_id, "code": exc.status_code, "detail": str(exc.detail)})
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"sae_id": it.sae_id, "code": 500, "detail": str(exc)})
+        try:
+            session.flush()
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            raise HTTPException(status_code=500, detail=f"bulk insert flush failed: {exc}") from exc
+
+        # Single bulk SDN sync — N SAEs in 1 mutex take + 1 topology clone.
+        sdn_ok = 0
+        sdn_failed = 0
+        if created_entities and _simulation_is_running(simulation_entity):
+            try:
+                base_url = _simulation_sdn_service_base_url(simulation_entity)
+                bulk_payload: list[dict[str, Any]] = []
+                for ent in created_entities:
+                    sdn_dkms_id = _resolve_sdn_dkms_id(
+                        session, dkms_db_id=int(ent.dkms_id),
+                    )
+                    bulk_payload.append({
+                        "id": str(ent.sae_id),
+                        "dkms_id": str(sdn_dkms_id),
+                    })
+                code, _, body = _sdn_http_json(
+                    method="POST",
+                    url=f"{base_url}/sae-bulk",
+                    payload=bulk_payload,
+                )
+                if code in {200, 201}:
+                    # Parse outcomes for OK/error count
+                    try:
+                        outcomes = json.loads(body)
+                        for o in outcomes:
+                            if isinstance(o, dict) and o.get("outcome") == "ok":
+                                sdn_ok += 1
+                            else:
+                                sdn_failed += 1
+                                errors.append({"sae_id": o.get("sae_id"), "code": "sdn_" + o.get("code", "unknown"), "detail": o.get("detail", "")})
+                    except Exception:
+                        sdn_ok = len(bulk_payload)
+                else:
+                    sdn_failed = len(bulk_payload)
+                    errors.append({"sae_id": "*", "code": f"sdn_{code}", "detail": body[:200]})
+            except HTTPException as exc:
+                sdn_failed = len(created_entities)
+                errors.append({"sae_id": "*", "code": exc.status_code, "detail": str(exc.detail)})
+
+        uow.commit()
+    return SaeAdminBulkResponse(
+        created=len(created_entities),
+        failed=len(errors),
+        sdn_ok=sdn_ok if created_entities else 0,
+        sdn_failed=sdn_failed if created_entities else 0,
+        errors=errors,
+    )
+
+
 @app.post(
     "/orch/admin/saes/{sae_id}/csr",
     response_model=SaeIssueResponse,
