@@ -115,6 +115,16 @@ spec:
               value: "0.0.0.0"
             - name: ORCHESTATOR_PORT
               value: "8080"
+            - name: SDN_DISABLE_SLACK_VARS
+              # iter-007/009: σ_k slack vars activadas → microlp phase-2 LP
+              # reporta false-Infeasible 97-100% del tiempo, perdiendo el
+              # bonus η_k del lex refinement. Forzar σ_k=0 (env=1) hace que
+              # phase-1 sea más estricto, produce λ más ajustado, y mitiga
+              # el impacto del bug microlp. Trade-off conocido: bajo
+              # overload real (Σδ_k > capacity), unset esta env. Ver
+              # CLAUDE.md "Active known issues / gotchas" entry de
+              # 2026-05-23 sobre microlp phase-2 false-Infeasible.
+              value: "1"
             - name: SDN_IMAGE
               value: "pablopio/sdn:v2"
             - name: DKMS_IMAGE
