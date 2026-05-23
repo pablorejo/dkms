@@ -66,3 +66,13 @@ tests/results/
 
 # Documentación técnica local (no para VCS)
 docs/local/
+
+# Trabajo paralelo / paper de congreso (no para VCS)
+agent-bench-5topos/
+docs/EXPLAIN_PLOTS.md
+docs/Paper_congreso/
+
+# Notas legacy en la raíz (orphan markdowns)
+.nothing.md
+.orr_qkc_quidtto.md
+.results.md
