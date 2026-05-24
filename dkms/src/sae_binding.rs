@@ -129,6 +129,16 @@ impl SaeBindingCache {
                 upstream.resolve(&sae_clone).await
             })
             .await;
+        // 2026-05-23: moka cachea errores en try_get_with — sin invalidar
+        // explícitamente, una respuesta "not found" de la SDN (binding aún
+        // no propagado) queda memorizada `ttl_secs` (default 60s) y
+        // bloquea retries de la misma SAE durante todo ese tiempo. Para
+        // el caso "race entre provisioning vía /sae-bulk y el primer
+        // enc_keys del peer", queremos que cada llamada re-pregunte a la
+        // SDN; solo cacheamos resultados positivos.
+        if res.is_err() {
+            self.cache.invalidate(sae).await;
+        }
         // moka envuelve nuestro error en Arc<DkmsError>. Lo desenvolvemos
         // exponiendo solo el `SaeBindingLookupFailed` que es el caso útil.
         res.map_err(|e| match e.as_ref() {

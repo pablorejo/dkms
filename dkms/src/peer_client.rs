@@ -10,7 +10,8 @@
 //!   `rustls` no coincide *exactamente* con la versión interna que
 //!   bundle-a reqwest. La API de alto nivel sigue dando mTLS rustls real
 //!   (reqwest pasa los bytes PEM por dentro).
-//! * `http2_prior_knowledge()` ⇒ sin ALPN dance ni upgrades.
+//! * Sin `http2_prior_knowledge()`: el handshake negocia h2 vía ALPN
+//!   normal contra el server (que anuncia `h2`/`http/1.1`).
 //! * Timeouts apropiados a cada llamada (configurables vía
 //!   [`crate::config::RequestCfg`]).
 //! * Endpoint final: `{peer.endpoint}/kmapi/v1/ext_keys` (alineado con el
@@ -64,11 +65,17 @@ impl PeerHttpClient {
         let identity = Identity::from_pem(&bundle)
             .map_err(|e| DkmsError::Crypto(format!("identity from pem: {e}")))?;
 
+        // No usamos http2_prior_knowledge: con esa opción + use_rustls_tls
+        // reqwest 0.12 envía bytes h2 sin completar correctamente el ciclo
+        // ALPN sobre rustls — el servidor rustls reporta `received corrupt
+        // message of type InvalidContentType` y aborta. Dejando que h2 se
+        // negocie por ALPN normal (server.alpn_protocols = ["h2","http/1.1"]
+        // en common::tls::server_config), reqwest hace handshake limpio y
+        // sigue usando HTTP/2 al ser h2 el primer protocol ofrecido.
         let mut builder = Client::builder()
             .use_rustls_tls()
             .identity(identity)
             .https_only(true)
-            .http2_prior_knowledge()
             .pool_max_idle_per_host(64)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(30))

@@ -44,7 +44,7 @@ pub fn server_config(
     let key = load_key(key_path)?;
 
     let builder = ServerConfig::builder();
-    let cfg = if let Some(ca) = client_ca {
+    let mut cfg = if let Some(ca) = client_ca {
         let mut roots = RootCertStore::empty();
         for c in load_certs(ca)? {
             roots.add(c)?;
@@ -58,6 +58,14 @@ pub fn server_config(
     } else {
         builder.with_no_client_auth().with_single_cert(certs, key)?
     };
+
+    // ALPN: anunciar `h2` y `http/1.1`. El peer_client DKMS↔DKMS usa
+    // reqwest con `http2_prior_knowledge() + use_rustls_tls()` que añade
+    // alpn `h2` al ClientHello; si el servidor no lo lista, el handshake
+    // termina en `NoApplicationProtocol` (visible como `tls handshake eof`
+    // en logs). El plano SAE también puede llegar con HTTP/1.1 desde
+    // clientes Python `requests` por intra-cluster, así que ambos van.
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(cfg))
 }

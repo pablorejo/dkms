@@ -3722,7 +3722,18 @@ class PodDKMS(Pod):
             'distinguished_name=req\n'
             'req_extensions=v3_req\n'
             '[v3_req]\n'
-            f'subjectAltName=DNS:{self.name},DNS:localhost,IP:127.0.0.1\n'
+            # SAN debe incluir tanto el shortname (`dkms-N`) como la K8s
+            # FQDN (`dkms-N.{namespace}.svc.cluster.local`) porque el
+            # peer_client construye la URL via FQDN. Sin la FQDN en SAN,
+            # reqwest+rustls falla verificación del cert del peer y aborta
+            # el handshake (sintoma: `tls handshake eof` en server logs).
+            f'subjectAltName=DNS:{self.name},DNS:{self.name}.{self.namespace}.svc.cluster.local,DNS:{self.name}.{self.namespace}.svc,DNS:{self.name}.{self.namespace},DNS:localhost,IP:127.0.0.1\n'
+            # EKU obligatorio: el DKMS usa este cert como SERVIDOR (ETSI 014
+            # hacia SAEs, ETSI 020 listener hacia peers) y como CLIENTE
+            # (peer_client.rs hacia peers). Sin EKU explicito,
+            # rustls/webpki ≥0.103 rechaza el cert durante mTLS al
+            # comprobar usage en el verifier del peer (WebPkiClientVerifier).
+            'extendedKeyUsage=serverAuth,clientAuth\n'
             'EOF\n'
             f'openssl req -new -key server.key -subj "/CN={self.name}" '
             '-config /tmp/san.cnf -out /tmp/server.csr\n'
