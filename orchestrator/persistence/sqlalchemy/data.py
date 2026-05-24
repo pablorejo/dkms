@@ -162,6 +162,16 @@ class QKC(Base):
         ForeignKey("host.id", onupdate="CASCADE", ondelete="NO ACTION"),
         nullable=False,
     )
+    # 2026-05-23: id_simulation se añade explícitamente porque qkc.id es
+    # un ID lógico derivado del node_id_offset (e.g. 100011..30 para
+    # offset 10), reusado entre sims vía UPSERT. Sin id_simulation el
+    # relationship `local_kmes` devuelve KMEs de TODAS las sims que
+    # tocaron el mismo offset (project_bd_orphan_kmes_inflate_sdn).
+    id_simulation = Column(
+        Integer,
+        ForeignKey("simulation.id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+    )
     kme_host = Column(String(255), nullable=True)
 
     host = relationship("Host", back_populates="qkc_nodes")
@@ -174,16 +184,26 @@ class QKC(Base):
     # and triggering the NOT NULL constraint. With viewonly the
     # relationship is read-only from the QKC side; KMEs are persisted
     # explicitly via session.merge(Model2Entity.kme(...)) elsewhere.
+    #
+    # 2026-05-23: primaryjoin filtra por (local_qkc_id, id_simulation)
+    # para que cada sim solo vea sus propios KMEs (no los huérfanos de
+    # sims previas con mismo node_id_offset).
     local_kmes = relationship(
         "KME",
         back_populates="local_qkc",
-        foreign_keys="KME.local_qkc_id",
+        primaryjoin=(
+            "and_(KME.local_qkc_id == QKC.id, "
+            "foreign(KME.id_simulation) == QKC.id_simulation)"
+        ),
         viewonly=True,
     )
     neighbor_kmes = relationship(
         "KME",
         back_populates="neighbor_qkc",
-        foreign_keys="KME.neighbor_qkc_id",
+        primaryjoin=(
+            "and_(KME.neighbor_qkc_id == QKC.id, "
+            "foreign(KME.id_simulation) == QKC.id_simulation)"
+        ),
         viewonly=True,
     )
 
@@ -448,6 +468,17 @@ class KME(Base):
     __tablename__ = "kme"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # 2026-05-23: id_simulation se añade para aislar KMEs entre sims que
+    # comparten el mismo node_id_offset. Sin esta columna, el relationship
+    # `QKC.local_kmes` devolvía KMEs de TODAS las sims que habían pasado
+    # por qkc.id=100011..30, inflando el grafo del SDN (ver memoria
+    # project_bd_orphan_kmes_inflate_sdn). Con ON DELETE CASCADE la
+    # cascada al borrar simulation purga todos sus KMEs automáticamente.
+    id_simulation = Column(
+        Integer,
+        ForeignKey("simulation.id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+    )
     local_qkc_id = Column(
         Integer,
         ForeignKey("qkc.id", onupdate="CASCADE", ondelete="NO ACTION"),
@@ -484,8 +515,29 @@ class KME(Base):
     hybrid_enabled = Column(Boolean, nullable=False, default=False)
     pqc_kme_port = Column(Integer, nullable=False, default=6000)
 
-    local_qkc = relationship("QKC", foreign_keys=[local_qkc_id], back_populates="local_kmes")
-    neighbor_qkc = relationship("QKC", foreign_keys=[neighbor_qkc_id], back_populates="neighbor_kmes")
+    # 2026-05-23: ambos relationships comparten la columna id_simulation
+    # como join criterion; `overlaps` silencia el aviso de SQLAlchemy y
+    # confirma que la sobreposición es intencionada.
+    local_qkc = relationship(
+        "QKC",
+        foreign_keys=[local_qkc_id],
+        primaryjoin=(
+            "and_(KME.local_qkc_id == QKC.id, "
+            "foreign(KME.id_simulation) == QKC.id_simulation)"
+        ),
+        back_populates="local_kmes",
+        overlaps="neighbor_qkc",
+    )
+    neighbor_qkc = relationship(
+        "QKC",
+        foreign_keys=[neighbor_qkc_id],
+        primaryjoin=(
+            "and_(KME.neighbor_qkc_id == QKC.id, "
+            "foreign(KME.id_simulation) == QKC.id_simulation)"
+        ),
+        back_populates="neighbor_kmes",
+        overlaps="local_qkc",
+    )
     cert = relationship("DataFile", foreign_keys=[cert_id])
     key = relationship("DataFile", foreign_keys=[key_id])
     token_bucket = relationship("TokenBucket", back_populates="kme", uselist=False, cascade="all, delete-orphan")

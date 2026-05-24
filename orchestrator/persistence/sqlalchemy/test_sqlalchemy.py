@@ -132,7 +132,7 @@ def run_smoke_test(session) -> list[str]:
         host=host_qkc_neighbor,
         kmes=[],
     )
-    qkc_neighbor_entity = _merge_and_refresh(session, Model2Entity.qkc(qkc_neighbor_model))
+    qkc_neighbor_entity = _merge_and_refresh(session, Model2Entity.qkc(qkc_neighbor_model, id_simulation=simulation_entity.id))
     qkc_neighbor_model = qkc_neighbor_model.model_copy(update={"id": qkc_neighbor_entity.id})
 
     qkc_local_model = ModelQKC(
@@ -141,7 +141,7 @@ def run_smoke_test(session) -> list[str]:
         host=host_qkc_local,
         kmes=[],
     )
-    qkc_local_entity = _merge_and_refresh(session, Model2Entity.qkc(qkc_local_model))
+    qkc_local_entity = _merge_and_refresh(session, Model2Entity.qkc(qkc_local_model, id_simulation=simulation_entity.id))
     qkc_local_model = qkc_local_model.model_copy(update={"id": qkc_local_entity.id})
 
     kme_config = KMEConfig(
@@ -161,7 +161,7 @@ def run_smoke_test(session) -> list[str]:
         channel=Channel(type_channel=ChannelType.QKD, distance=5),
     )
     qkc_local_with_kme = qkc_local_model.model_copy(update={"kmes": [kme_config]})
-    _merge_and_refresh(session, Model2Entity.qkc(qkc_local_with_kme))
+    _merge_and_refresh(session, Model2Entity.qkc(qkc_local_with_kme, id_simulation=simulation_entity.id))
 
     orr_model = ModelORR(
         id_host=host_orr.id,
@@ -169,7 +169,7 @@ def run_smoke_test(session) -> list[str]:
         host=host_orr,
         qkc=qkc_local_with_kme,
     )
-    orr_entity = _merge_and_refresh(session, Model2Entity.orr(orr_model))
+    orr_entity = _merge_and_refresh(session, Model2Entity.orr(orr_model, id_simulation=simulation_entity.id))
     orr_model = orr_model.model_copy(update={"id": orr_entity.id})
 
     tls_dkms_model = TLSConfigDKMS(
@@ -194,7 +194,7 @@ def run_smoke_test(session) -> list[str]:
         orr=orr_model,
         tls=tls_dkms_model,
     )
-    dkms_entity = _merge_and_refresh(session, Model2Entity.dkms(dkms_model))
+    dkms_entity = _merge_and_refresh(session, Model2Entity.dkms(dkms_model, id_simulation=simulation_entity.id))
     dkms_model = dkms_model.model_copy(update={"id": dkms_entity.id})
 
     sdn_model = ModelSDN(

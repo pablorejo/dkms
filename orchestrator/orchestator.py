@@ -786,7 +786,9 @@ class Orchestator:
                             "neighbor_qkc_id": neighbor_qkc_id,
                         }
                     )
-                    session.merge(Model2Entity.kme(kme_to_save))
+                    session.merge(
+                        Model2Entity.kme(kme_to_save, id_simulation=simulation_id)
+                    )
                 session.flush()
 
             completed_simulation = saved_simulation.model_copy(

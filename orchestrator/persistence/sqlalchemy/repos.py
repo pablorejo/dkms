@@ -29,6 +29,28 @@ class _RepoBase:
         if exists is None:
             raise ValueError(f"{entity_cls.__name__} con id {entity_id} no existe")
 
+    def _resolve_id_simulation(self, model) -> int:
+        """Devuelve `id_simulation` para mapper KME/QKC/ORR/DKMS.
+
+        Busca, en orden: model.host.id_simulation, lookup en BD por
+        model.id_host. Necesario tras añadir id_simulation FK en kme/qkc
+        (project_bd_orphan_kmes_inflate_sdn).
+        """
+        host = getattr(model, "host", None)
+        if host is not None:
+            sim = getattr(host, "id_simulation", None)
+            if sim is not None:
+                return int(sim)
+        id_host = getattr(model, "id_host", None)
+        if id_host is None:
+            raise ValueError(
+                "No se puede resolver id_simulation sin host ni id_host"
+            )
+        host_entity = self._session.get(Host, id_host)
+        if host_entity is None:
+            raise ValueError(f"Host con id {id_host} no existe")
+        return int(host_entity.id_simulation)
+
     def _ensure_host(self, model, allow_none: bool = False):
         host = getattr(model, "host", None)
         id_host = getattr(model, "id_host", None)
@@ -101,7 +123,7 @@ class SimulationRepoSA(_RepoBase):
 class DKMSRepoSA(_RepoBase):
     def save(self, model: ModelDKMS) -> ModelDKMS:
         model = self._ensure_host(model)
-        entity = Model2Entity.dkms(model)
+        entity = Model2Entity.dkms(model, id_simulation=self._resolve_id_simulation(model))
         merged = self._session.merge(entity)
         self._session.flush()
         self._session.refresh(merged)
@@ -129,7 +151,7 @@ class DKMSRepoSA(_RepoBase):
 class QKCRepoSA(_RepoBase):
     def save(self, model: ModelQKC) -> ModelQKC:
         model = self._ensure_host(model)
-        entity = Model2Entity.qkc(model)
+        entity = Model2Entity.qkc(model, id_simulation=self._resolve_id_simulation(model))
         merged = self._session.merge(entity)
         self._session.flush()
         self._session.refresh(merged)
@@ -157,7 +179,7 @@ class QKCRepoSA(_RepoBase):
 class ORRRepoSA(_RepoBase):
     def save(self, model: ModelORR) -> ModelORR:
         model = self._ensure_host(model)
-        entity = Model2Entity.orr(model)
+        entity = Model2Entity.orr(model, id_simulation=self._resolve_id_simulation(model))
         merged = self._session.merge(entity)
         self._session.flush()
         self._session.refresh(merged)

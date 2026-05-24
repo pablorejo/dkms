@@ -109,7 +109,14 @@ class Model2Entity:
         )
 
     @staticmethod
-    def kme(model: KMEConfig) -> KME:
+    def kme(model: KMEConfig, *, id_simulation: int) -> KME:
+        """Crea entidad KME ligada a una sim concreta vía id_simulation.
+
+        2026-05-23: id_simulation se vuelve **obligatorio** porque qkc.id es
+        un ID lógico (derivado de node_id_offset) reusado entre sims; sin
+        id_simulation el `QKC.local_kmes` relationship leakea KMEs entre
+        sims (ver project_bd_orphan_kmes_inflate_sdn).
+        """
         url_node_qkd = getattr(model, "local_url_node_qkd", None)
         if url_node_qkd is None:
             url_node_qkd = getattr(model, "url_node_qkd", None)
@@ -136,6 +143,7 @@ class Model2Entity:
         )
         entity = KME(
             id=model.id,
+            id_simulation=int(id_simulation),
             local_qkc_id=model.local_qkc_id,
             neighbor_qkc_id=model.neighbor_qkc_id,
             url_node_QKD=url_node_qkd,
@@ -157,21 +165,30 @@ class Model2Entity:
         return entity
 
     @staticmethod
-    def qkc(model: ModelQKC) -> QKC:
+    def qkc(model: ModelQKC, *, id_simulation: int) -> QKC:
+        """Crea entidad QKC ligada a una sim concreta.
+
+        2026-05-23: id_simulation obligatorio; propaga a sus KMEs.
+        """
         entity = QKC(
             id=model.id,
             id_host=model.id_host,
+            id_simulation=int(id_simulation),
             kme_host=model.kme_host,
         )
         if model.host:
             entity.host = Model2Entity.host(model.host)
             if model.host.id is not None:
                 entity.id_host = model.host.id
-        entity.local_kmes = [Model2Entity.kme(kme_cfg) for kme_cfg in model.kmes]
+        entity.local_kmes = [
+            Model2Entity.kme(kme_cfg, id_simulation=id_simulation)
+            for kme_cfg in model.kmes
+        ]
         return entity
 
     @staticmethod
-    def orr(model: ModelORR) -> ORR:
+    def orr(model: ModelORR, *, id_simulation: int) -> ORR:
+        """Crea entidad ORR + propaga id_simulation a su QKC."""
         entity = ORR(
             id=model.id,
             id_host=model.id_host,
@@ -182,7 +199,7 @@ class Model2Entity:
             if model.host.id is not None:
                 entity.id_host = model.host.id
         if model.qkc:
-            entity.qkc = Model2Entity.qkc(model.qkc)
+            entity.qkc = Model2Entity.qkc(model.qkc, id_simulation=id_simulation)
             if model.qkc.id is not None:
                 entity.qkc_id = model.qkc.id
         return entity
@@ -259,7 +276,8 @@ class Model2Entity:
         return entity
 
     @staticmethod
-    def dkms(model: ModelDKMS) -> DKMS:
+    def dkms(model: ModelDKMS, *, id_simulation: int) -> DKMS:
+        """Crea entidad DKMS + propaga id_simulation a su ORR/QKC."""
         entity = DKMS(
             id=model.id,
             id_host=model.id_host,
@@ -271,7 +289,7 @@ class Model2Entity:
             if model.host.id is not None:
                 entity.id_host = model.host.id
         if model.orr:
-            entity.orr = Model2Entity.orr(model.orr)
+            entity.orr = Model2Entity.orr(model.orr, id_simulation=id_simulation)
             if model.orr.id is not None:
                 entity.orr_id = model.orr.id
         if model.tls:

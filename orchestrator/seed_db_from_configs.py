@@ -799,9 +799,22 @@ def main() -> int:
             )
 
         _persist_hosts(session, hosts_by_id.values())
-        _persist_group(session, normalized_qkcs, Model2Entity.qkc)
-        _persist_group(session, normalized_orrs, Model2Entity.orr)
-        _persist_group(session, normalized_dkms, Model2Entity.dkms)
+        # 2026-05-23: id_simulation propagation tras añadir kme.id_simulation
+        # FK (project_bd_orphan_kmes_inflate_sdn). Las lambdas threadear sim_id
+        # al mapper sin cambiar la firma de _persist_group.
+        sim_id_local = int(simulation_id)
+        _persist_group(
+            session, normalized_qkcs,
+            lambda m: Model2Entity.qkc(m, id_simulation=sim_id_local),
+        )
+        _persist_group(
+            session, normalized_orrs,
+            lambda m: Model2Entity.orr(m, id_simulation=sim_id_local),
+        )
+        _persist_group(
+            session, normalized_dkms,
+            lambda m: Model2Entity.dkms(m, id_simulation=sim_id_local),
+        )
         _persist_group(session, normalized_sdns, Model2Entity.sdn)
 
         dkms_map = _build_endpoint_map_from_db(session, "dkms")
@@ -821,7 +834,7 @@ def main() -> int:
             # KME payloads may reference DataFile IDs already attached to other
             # entities in the same seed run (e.g. TLS configs). `merge` keeps
             # the operation idempotent and avoids duplicate PK inserts.
-            session.merge(Model2Entity.kme(kme))
+            session.merge(Model2Entity.kme(kme, id_simulation=sim_id_local))
         session.flush()
 
         if not dkms_map:
