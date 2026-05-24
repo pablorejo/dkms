@@ -107,33 +107,32 @@ def _provision_one(session, orch_url, sim_id, dkms_id, uid, idx, test_id,
 # ----------- Key-ID broker (enc -> dec hand-off) -----------
 
 class KeyIdBroker:
-    """Cross-worker, thread-safe FIFO of key_IDs by (master, slave).
+    """Cross-worker, thread-safe FIFO of (key_id, key_bytes_b64) by (master, slave).
 
-    After SAE M issues `enc_keys` against peer S the returned key_IDs land
-    in ``_q[(M, S)]``. When SAE S wants to do real `dec_keys` against M it
-    pops the oldest unused key_ID via ``pop(M, S)``. The per-pair queue is
-    bounded to avoid unbounded growth when one direction dominates.
+    2026-05-24 iter-001 F2.0: el broker ahora guarda los BYTES de la key
+    además del key_ID. Cuando el slave llama dec_keys con ese key_ID,
+    compara los bytes recibidos con los originales del master — si no
+    coinciden, es key_mismatch (bug grave del protocolo ETSI 014).
     """
 
     __slots__ = ("_lock", "_q", "_cap")
 
     def __init__(self, per_pair_cap: int = 256) -> None:
         self._lock = threading.Lock()
-        self._q: dict[tuple[str, str], list[str]] = {}
+        self._q: dict[tuple[str, str], list[tuple[str, str]]] = {}
         self._cap = max(1, int(per_pair_cap))
 
-    def push(self, master: str, slave: str, key_id: str) -> None:
+    def push(self, master: str, slave: str, key_id: str, key_b64: str) -> None:
         if not key_id:
             return
         k = (master, slave)
         with self._lock:
             lst = self._q.setdefault(k, [])
-            lst.append(key_id)
+            lst.append((key_id, key_b64))
             if len(lst) > self._cap:
-                # drop oldest to keep memory bounded
                 del lst[: len(lst) - self._cap]
 
-    def pop(self, master: str, slave: str) -> str | None:
+    def pop(self, master: str, slave: str) -> tuple[str, str] | None:
         k = (master, slave)
         with self._lock:
             lst = self._q.get(k)
@@ -176,7 +175,7 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
     verify = str(ca_path) if runtime_verify else False
 
     def _write_row(method, peer, t_start, t_end, status_code,
-                   n_keys_received, error, fallback=False):
+                   n_keys_received, error, fallback=False, key_match=""):
         with rows_lock:
             rows_writer.writerow({
                 "architecture": "qkd",
@@ -194,6 +193,7 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
                 "status_code": status_code,
                 "success": str(status_code == 200).lower(),
                 "error": error,
+                "key_match": key_match,
             })
 
     # Per-SAE base URL: each SAE must hit ITS OWN DKMS's runtime ingress,
@@ -212,7 +212,9 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
 
         want_dec = rng.random() < method_mix
         method = "dec" if want_dec else "enc"
-        used_key_id = broker.pop(peer, sae_id) if want_dec else None
+        popped = broker.pop(peer, sae_id) if want_dec else None
+        used_key_id = popped[0] if popped else None
+        expected_key_b64 = popped[1] if popped else None
         fallback = False
         if want_dec and used_key_id is None:
             # No key_ID yet from this peer — emit enc instead so the
@@ -237,9 +239,10 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
                         n_keys_received = len(keys)
                         for k in keys:
                             kid = k.get("key_ID") or k.get("key_id")
+                            kb = k.get("key") or ""
                             if kid:
                                 # `me` is master here; peer is slave.
-                                broker.push(sae_id, peer, kid)
+                                broker.push(sae_id, peer, kid, kb)
                     except Exception:
                         pass
                 error = "" if status_code == 200 else (r.text[:200] if r.text else "")
@@ -254,6 +257,7 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
             url = f"{base}/api/v1/keys/{peer}/dec_keys"
             body = {"key_IDs": [{"key_ID": used_key_id}]}
             t_start = time.time()
+            key_match = ""
             try:
                 r = session.post(url, json=body, cert=cert_tuple, verify=verify,
                                  timeout=request_timeout_s)
@@ -262,7 +266,13 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
                 if status_code == 200:
                     try:
                         payload = r.json()
-                        n_keys_received = len(payload.get("keys", []) or [])
+                        keys = payload.get("keys", []) or []
+                        n_keys_received = len(keys)
+                        # F2.0: comparar key_bytes recibidos con los del
+                        # master (originados en el push del broker).
+                        if expected_key_b64 and keys:
+                            received_b64 = keys[0].get("key") or ""
+                            key_match = "true" if received_b64 == expected_key_b64 else "false"
                     except Exception:
                         pass
                 error = "" if status_code == 200 else (r.text[:200] if r.text else "")
@@ -272,7 +282,7 @@ def _sae_traffic_worker(sae_info, peer_pool, lambda_req_s, key_size_bits,
                 error = str(exc)[:200]
             t_end = time.time()
             _write_row("dec", peer, t_start, t_end, status_code,
-                       n_keys_received, error)
+                       n_keys_received, error, key_match=key_match)
 
 
 # ----------- Ramp orchestration -----------
@@ -318,6 +328,7 @@ def run_loadtest(args) -> dict[str, Any]:
         "fallback", "request_index",
         "emitted_at_epoch", "responded_at_epoch", "elapsed_seconds",
         "n_keys_requested", "n_keys_received", "status_code", "success", "error",
+        "key_match",
     ])
     req_writer.writeheader()
     sae_writer = csv.DictWriter(sae_fp, fieldnames=[
@@ -493,6 +504,21 @@ def run_loadtest(args) -> dict[str, Any]:
     req_fp.close()
     sae_fp.close()
 
+    # F2.0: count key_mismatch from CSV. dec rows where key_match=="false".
+    key_mismatch_count = 0
+    key_match_count = 0
+    try:
+        with open(req_csv) as f:
+            for row in csv.DictReader(f):
+                if row.get("method") == "dec":
+                    km = row.get("key_match", "")
+                    if km == "false":
+                        key_mismatch_count += 1
+                    elif km == "true":
+                        key_match_count += 1
+    except Exception:
+        pass
+
     # Summary
     summary = {
         "test_id": test_id,
@@ -506,6 +532,8 @@ def run_loadtest(args) -> dict[str, Any]:
         "method_mix": method_mix,
         "broker_depth_end": broker.depth(),
         "runtime_url": runtime_url,
+        "key_mismatch_count": key_mismatch_count,
+        "key_match_count": key_match_count,
     }
     (output_dir / "loadtest_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"[par-loadtest] summary written → {output_dir}/loadtest_summary.json")
