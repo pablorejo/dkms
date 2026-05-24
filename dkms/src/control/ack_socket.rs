@@ -190,9 +190,18 @@ impl BatchedAckClient {
             }
         };
         if let Some(batch) = flush_now {
-            if let Err(e) = self.inner.send_batch(&peer_addr, &batch).await {
-                warn!(peer_addr = %peer_addr, error = %e, "ack_socket send_batch (full) failed");
-            }
+            // 2026-05-24 fix #2: spawn en vez de await para no bloquear el
+            // ORR delivery pump (single-threaded) mientras se hace el TCP
+            // connect+write+shutdown del send_batch. Antes, cada bucket que
+            // se llenaba (max_keys=32) congelaba el pump → keys entrantes
+            // se acumulaban en el broadcast channel → Lagged → expired.
+            let inner = self.inner.clone();
+            let addr = peer_addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = inner.send_batch(&addr, &batch).await {
+                    warn!(peer_addr = %addr, error = %e, "ack_socket send_batch (full) failed");
+                }
+            });
         }
     }
 
@@ -206,11 +215,21 @@ impl BatchedAckClient {
                 .collect();
             drained
         };
-        for (addr, batch) in snapshot {
-            if let Err(e) = self.inner.send_batch(&addr, &batch).await {
-                warn!(peer_addr = %addr, error = %e, "ack_socket send_batch (tick) failed");
-            }
-        }
+        // 2026-05-24: paralelizamos el flush por peer. Antes el bucle
+        // era secuencial y un peer lento (connect_timeout 2 s) bloqueaba
+        // los demás; con 19 peers en BA el flush llegaba a 38 s,
+        // superando el ack_timeout_ms del sender (30 s), que entonces
+        // borraba ack_pending con reaper → Generator::on_ack no-op →
+        // enc no crecía → observed_rate=0 con 72/380 commodities en BA.
+        let tasks = snapshot.into_iter().map(|(addr, batch)| {
+            let inner = self.inner.clone();
+            tokio::spawn(async move {
+                if let Err(e) = inner.send_batch(&addr, &batch).await {
+                    warn!(peer_addr = %addr, error = %e, "ack_socket send_batch (tick) failed");
+                }
+            })
+        });
+        futures::future::join_all(tasks).await;
     }
 }
 
