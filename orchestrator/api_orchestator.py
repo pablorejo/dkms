@@ -2153,7 +2153,8 @@ def _replace_simulation_graph(
                             "local_qkc_id": local_qkc_id,
                             "neighbor_qkc_id": neighbor_qkc_id,
                         }
-                    )
+                    ),
+                    id_simulation=int(simulation_id),
                 )
             )
         session.flush()
@@ -3181,6 +3182,7 @@ class SaeAdminBulkResponse(BaseModel):
     sdn_ok: int
     sdn_failed: int
     errors: list[dict[str, Any]] = []
+    bundles: list[dict[str, Any]] = []
 
 
 @app.post(
@@ -3190,6 +3192,9 @@ class SaeAdminBulkResponse(BaseModel):
 )
 def create_admin_sae_bulk(
     items: list[SaeAdminBulkItem],
+    issue_certs: bool = Query(default=False),
+    days_valid: int = Query(default=1, ge=1, le=825),
+    key_type: Literal["ec-p256", "rsa-2048"] = Query(default="ec-p256"),
     x_user_id: int = Depends(_require_user_id),
 ) -> SaeAdminBulkResponse:
     """Provision many SAEs in a single transaction + single SDN sync.
@@ -3301,6 +3306,51 @@ def create_admin_sae_bulk(
                 sdn_failed = len(created_entities)
                 errors.append({"sae_id": "*", "code": exc.status_code, "detail": str(exc.detail)})
 
+        bundles: list[dict[str, Any]] = []
+        if issue_certs and created_entities:
+            from persistence.sqlalchemy.data import SaeStatusEnum
+            now_ts = datetime.now(timezone.utc)
+            for ent in created_entities:
+                try:
+                    runtime_ca_cert_pem, runtime_ca_key_pem = _runtime_ca_material_for_sae(sae_entity=ent)
+                    issued = issue_sae_certificate(
+                        sae_id=str(ent.sae_id),
+                        key_type=key_type,
+                        days_valid=int(days_valid),
+                        ca_certificate_pem=runtime_ca_cert_pem,
+                        ca_private_key_pem=runtime_ca_key_pem,
+                    )
+                    _upsert_sae_tls_bundle(
+                        session,
+                        sae_entity=ent,
+                        certificate_pem=issued.certificate_pem,
+                        ca_chain_pem=issued.ca_chain_pem,
+                        private_key_pem=issued.private_key_pem,
+                    )
+                    ent.status = SaeStatusEnum.ACTIVE
+                    ent.cert_serial = issued.serial_hex
+                    ent.cert_fingerprint = issued.fingerprint_sha256
+                    ent.cert_subject = issued.subject_rfc4514
+                    ent.cert_not_before = issued.not_before
+                    ent.cert_not_after = issued.not_after
+                    ent.revoked_at = None
+                    ent.revocation_reason = None
+                    ent.updated_at = now_ts
+                    bundles.append({
+                        "sae_id": str(ent.sae_id),
+                        "dkms_id": int(ent.dkms_id) if ent.dkms_id is not None else None,
+                        "certificate_pem": issued.certificate_pem,
+                        "ca_chain_pem": issued.ca_chain_pem,
+                        "private_key_pem": issued.private_key_pem,
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    errors.append({"sae_id": str(ent.sae_id), "code": "issue_failed", "detail": str(exc)[:300]})
+            try:
+                session.flush()
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                raise HTTPException(status_code=500, detail=f"bulk issue flush failed: {exc}") from exc
+
         uow.commit()
     return SaeAdminBulkResponse(
         created=len(created_entities),
@@ -3308,6 +3358,7 @@ def create_admin_sae_bulk(
         sdn_ok=sdn_ok if created_entities else 0,
         sdn_failed=sdn_failed if created_entities else 0,
         errors=errors,
+        bundles=bundles,
     )
 
 
