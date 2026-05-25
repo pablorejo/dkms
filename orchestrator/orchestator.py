@@ -1038,10 +1038,23 @@ class Orchestator:
                     # busy Y topology — buffers saturate in < 15 s and the
                     # per-peer token cap pins emission at ~320 keys/s
                     # regardless of what the MCF solver allocates.
+                    #
+                    # Knobs configurables vía env (mantener compatibilidad
+                    # con defaults previos 65536 / 16384 / 2048 / 400):
+                    # cambiarlos via env evita tener que hacer `kubectl
+                    # set env` post-launch sobre los DKMS, lo que disparaba
+                    # un rollout y destruía el estado in-memory de los
+                    # ORR/QKC sidecars (race de master_secret + key_id
+                    # mismatch contra quditto-link). Ver post-mortem
+                    # tests/results/n10-fulllogs-repro-v2-3runs/run-1.
+                    _buf_cap = os.getenv("DKMS_BUFFER_CAPACITY_PER_PEER", "65536")
+                    _buf_low = os.getenv("DKMS_BUFFER_REFILL_LOW_WATERMARK", "16384")
+                    _buf_batch = os.getenv("DKMS_BUFFER_REFILL_BATCH", "2048")
+                    _gen_tokens = os.getenv("DKMS_GENERATOR_MAX_TOKENS_PER_PEER_PER_TICK", "400")
                     dkms_env.update({
-                        "DKMS__buffer__capacity_per_peer":   "65536",
-                        "DKMS__buffer__refill_low_watermark":"16384",
-                        "DKMS__buffer__refill_batch":         "2048",
+                        "DKMS__buffer__capacity_per_peer":   _buf_cap,
+                        "DKMS__buffer__refill_low_watermark": _buf_low,
+                        "DKMS__buffer__refill_batch":         _buf_batch,
                         "DKMS__generator__enabled":           "true",
                         "DKMS__generator__key_size_bytes":    "32",
                         "DKMS__generator__tick_ms":           "100",
@@ -1049,7 +1062,7 @@ class Orchestator:
                         "DKMS__generator__priority_refresh_ms":"200",
                         "DKMS__generator__ack_timeout_ms":    "30000",
                         "DKMS__generator__ack_reaper_ms":     "1000",
-                        "DKMS__generator__max_tokens_per_peer_per_tick": "400",
+                        "DKMS__generator__max_tokens_per_peer_per_tick": _gen_tokens,
                         "DKMS__generator__bucket_cap_seconds":"2.0",
                     })
                     # ORR↔ORR sessions are PQC (ML-KEM-768) over gRPC,
