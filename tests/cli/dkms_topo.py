@@ -229,6 +229,19 @@ def _add_global_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         help="kubectl namespace for the sim (default sim-<sim_id>-ns)",
     )
+    p.add_argument(
+        "--post-run-hook",
+        default=None,
+        metavar="PATH",
+        help=(
+            "ejecuta este script después de /run y antes de saturation. "
+            "El script recibe el namespace (== sim_id) como $1. Útil para "
+            "aplicar kubectl patch (imagen, recursos, env) sobre los Deployments "
+            "ANTES de que la fase de saturation observe los pods, así la "
+            "saturation mide el comportamiento con la config experimental "
+            "aplicada en lugar de la default del orchestator."
+        ),
+    )
     # ---- SAE ramp (OBJ-019) ---------------------------------------------
     p.add_argument(
         "--sae-test",
@@ -1336,6 +1349,19 @@ def _run_eks_session(
     try:
         sys.stderr.write("[dkms-topo] starting simulation\n")
         client.run_simulation(sim_id)
+
+        post_run_hook = getattr(args, "post_run_hook", None)
+        if post_run_hook:
+            sys.stderr.write(
+                f"[dkms-topo] running post-run hook: {post_run_hook} {namespace}\n"
+            )
+            hook_rc = subprocess.run(
+                [post_run_hook, namespace],
+                check=False,
+            ).returncode
+            sys.stderr.write(f"[dkms-topo] post-run hook exit={hook_rc}\n")
+            if hook_rc != 0 and rc == 0:
+                rc = hook_rc
 
         if do_saturate:
             sat_rc = _stage_saturate(args, namespace, output_dir, theory_node, topology)
