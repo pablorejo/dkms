@@ -234,7 +234,18 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
     }
 }
 
-async fn try_fetch_pubkey(addr: &str) -> std::result::Result<(Vec<u8>, String, String), String> {
+/// Pide la pubkey del peer vía `GetPublicKey` RPC. Re-fetcheable: el
+/// caller (`bootstrap_peer` initial o `trigger_passive_rebootstrap`)
+/// la usa para invalidar la pubkey cacheada cuando hay sospecha de
+/// que el peer reinició (e.g. tras un `decap_failed` en
+/// `EstablishSecret`).
+///
+/// `pub(crate)` para que `OrrService::trigger_passive_rebootstrap`
+/// pueda refrescar la pubkey antes de cada intento de re-handshake
+/// — sin esto, un peer que reinició produce ciphertexts que su nueva
+/// sk no puede decapsular y el rebootstrap se queda en bucle infinito
+/// (verificado smoke 2026-05-25 n10-real16k).
+pub(crate) async fn try_fetch_pubkey(addr: &str) -> std::result::Result<(Vec<u8>, String, String), String> {
     let ch = Channel::from_shared(addr.to_string())
         .map_err(|e| format!("addr inválido: {e}"))?
         .connect()

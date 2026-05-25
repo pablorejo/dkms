@@ -28,7 +28,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// cesan en ms; ver otro >30 s después indica un fallo real (no spam
 /// del mismo intento todavía no propagado). Configurable a futuro si
 /// algún cluster lento necesita más.
-const PASSIVE_REBOOTSTRAP_MIN_INTERVAL: Duration = Duration::from_secs(30);
+// Optimización 2026-05-25: bajado de 30 s a 5 s. Con el fix de pubkey
+// refresh (Nivel 1) el handshake se completa en <100 ms en condiciones
+// normales; 30 s era demasiado conservador y acumulaba minutos de
+// recovery cuando varios peers se reinician en cascada (smoke
+// n10-bootstrap-fix-buf8k: 17 min para que 9 commodities saliesen del
+// stuck). Además, el rate-limit ahora solo aplica si el intento previo
+// FALLÓ (ver `should_attempt_rebootstrap`), no a primeros intentos.
+const PASSIVE_REBOOTSTRAP_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use common::metrics::Metrics;
@@ -348,11 +355,26 @@ impl OrrService {
             .ok_or_else(|| OrrError::Relay(format!("ORR destino {dest_orr} no resoluble")))?;
         // OBJ-010: usar la última época poblada (típicamente 0 hasta que
         // la rotación esté cableada en OBJ-011/012; > 0 después).
-        let epoch_id = self.peers.latest_epoch_for(dest_orr).ok_or_else(|| {
-            OrrError::Relay(format!(
-                "ORR destino {dest_orr} sin master_secret (bootstrap aún no completo)"
-            ))
-        })?;
+        //
+        // FIX Nivel 2 (2026-05-25): si no tenemos master_secret para
+        // dest_orr, disparar trigger_passive_rebootstrap. Sin esto, el
+        // sender se quedaba para siempre con el error "sin master_secret"
+        // porque trigger_passive_rebootstrap solo se invocaba desde el
+        // receiver (handle_onion_in), creando una asimetría: si el sender
+        // perdía su master_secret y NO había tráfico entrante para
+        // disparar la auto-cura desde el receiver, quedaba stuck (5/90
+        // commodities en smoke 2026-05-25 n10-real16k). El próximo tick
+        // del generator reintenta el send; mientras tanto, la task
+        // spawnneada hace el re-handshake.
+        let epoch_id = match self.peers.latest_epoch_for(dest_orr) {
+            Some(e) => e,
+            None => {
+                self.trigger_passive_rebootstrap(dest_orr);
+                return Err(OrrError::Relay(format!(
+                    "ORR destino {dest_orr} sin master_secret (rebootstrap triggered, retry)"
+                )));
+            }
+        };
         let ms = self
             .peers
             .master_for_epoch(dest_orr, epoch_id)
@@ -785,7 +807,13 @@ impl OrrService {
             }
         };
 
-        self.peers.mark_rebootstrap_attempt(peer_id);
+        // Optimización 2026-05-25: el marcado "este intento ocurrió" se
+        // hace ahora dentro del task, condicionado al resultado:
+        //   - Err → mark_rebootstrap_failure (futuro intento rate-limited)
+        //   - Ok  → clear_rebootstrap_failure (siguientes intentos libres)
+        // Antes se marcaba aquí incondicionalmente y eso aplicaba
+        // rate-limit aunque el intento fuera a tener éxito.
+        //
         // Borrado de claves stale ANTES del handshake. Si el RPC
         // fallara, mejor estar sin clave que con una mezcla
         // viejo/nuevo que produzca frames imposibles de descifrar.
@@ -805,6 +833,59 @@ impl OrrService {
                 addr = %addr,
                 "orr.passive_rebootstrap start"
             );
+            // FIX Nivel 1 (2026-05-25): re-fetch pubkey ANTES del encap.
+            //
+            // Causa raíz: cada ORR genera un keypair ML-KEM fresco en
+            // boot (identity.rs:32). Cuando un peer reinicia (rolling
+            // update, OOM, kubectl set image), su pubkey CAMBIA pero
+            // los demás ORRs siguen con la pubkey cacheada del boot
+            // inicial (bootstrap.rs:94 — solo fetcha si is_none()).
+            //
+            // Sin este refresh: encap(pk_cached_OLD) produce ciphertext
+            // que la sk_NEW del peer reiniciado no puede decapsular.
+            // EstablishSecret retorna ok=false error="decap: ..."  y
+            // este rebootstrap loop entra en bucle infinito de fallos
+            // con rate-limit de 30s. Smoke 2026-05-25 n10-real16k dejó
+            // 5/90 commodities con observed=0 por esta causa.
+            //
+            // Con el refresh: si el peer reinició, obtenemos su pubkey
+            // actual y el encap subsiguiente produce un ciphertext que
+            // la sk fresca sí puede decapsular.
+            let pk = match bootstrap::try_fetch_pubkey(&addr).await {
+                Ok((fresh_pk, _suite, reported)) => {
+                    let reported_lc = reported.to_lowercase();
+                    if !reported_lc.is_empty() && reported_lc != peer_id_owned {
+                        warn!(
+                            expected = %peer_id_owned,
+                            reported = %reported,
+                            addr = %addr,
+                            "orr.passive_rebootstrap pubkey refresh reports different orr_id; aborting"
+                        );
+                        peers.clear_rebootstrap_inflight(&peer_id_owned);
+                        return;
+                    }
+                    if fresh_pk != pk {
+                        info!(
+                            peer = %peer_id_owned,
+                            old_len = pk.len(),
+                            new_len = fresh_pk.len(),
+                            "orr.passive_rebootstrap pubkey changed (peer restarted), updating cache",
+                        );
+                        peers.put_pubkey(peer_id_owned.clone(), fresh_pk.clone());
+                    }
+                    fresh_pk
+                }
+                Err(e) => {
+                    warn!(
+                        peer = %peer_id_owned,
+                        addr = %addr,
+                        error = %e,
+                        "orr.passive_rebootstrap pubkey refresh failed (will retry on next undecryptable frame after rate-limit window)"
+                    );
+                    peers.clear_rebootstrap_inflight(&peer_id_owned);
+                    return;
+                }
+            };
             let res = bootstrap::attempt_establish(
                 &identity,
                 &suite,
@@ -822,12 +903,19 @@ impl OrrService {
                     // workaround temporal de OBJ-011).
                     peers.set_bootstrap(peer_id_owned.clone(), secret);
                     peers.set_master_for_epoch(peer_id_owned.clone(), 0, secret);
+                    // Limpiamos cualquier marca de fallo previo: el
+                    // próximo trigger (si llega) no estará rate-limited.
+                    peers.clear_rebootstrap_failure(&peer_id_owned);
                     info!(
                         peer = %peer_id_owned,
                         "orr.passive_rebootstrap ok"
                     );
                 }
                 Err(e) => {
+                    // Marca este intento como fallido: el próximo trigger
+                    // dentro de PASSIVE_REBOOTSTRAP_MIN_INTERVAL (5 s) se
+                    // skip-eará. Tras la ventana se permite reintentar.
+                    peers.mark_rebootstrap_failure(&peer_id_owned);
                     warn!(
                         peer = %peer_id_owned,
                         addr = %addr,

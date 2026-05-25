@@ -70,11 +70,18 @@ pub struct PeerRegistry {
     /// initiator con el peer. Solo se mantiene en el lado lex-smaller
     /// (= initiator). La siguiente rotación usa este valor + 1.
     current_send_epochs: RwLock<HashMap<String, u32>>,
-    /// orr_id → último `Instant` en que disparamos un passive re-bootstrap
-    /// reactivo contra ese peer. Sirve para rate-limit (ver
-    /// `should_attempt_rebootstrap`) y evitar tormenta de re-handshakes
-    /// si llegan muchos frames undecryptable del mismo peer.
-    rebootstrap_last_attempt: RwLock<HashMap<String, Instant>>,
+    /// orr_id → último `Instant` en que un re-bootstrap reactivo
+    /// **FALLÓ** contra ese peer. Sirve para rate-limit (ver
+    /// `should_attempt_rebootstrap`) — el rate-limit solo aplica si
+    /// el intento anterior fracasó, así un primer intento (o un retry
+    /// tras éxito previo) procede sin espera.
+    ///
+    /// Cambio 2026-05-25 (optimización fix bootstrap): antes era
+    /// `last_attempt` y se marcaba SIEMPRE, lo que añadía 30 s de
+    /// latencia incluso cuando el intento previo había sido exitoso —
+    /// si el pod del peer reiniciaba poco después, había que esperar
+    /// el rate-limit aunque no hubiera ningún problema en curso.
+    rebootstrap_last_failure: RwLock<HashMap<String, Instant>>,
     /// orr_id → flag "rebootstrap en vuelo". Sirve para deduplicar: si
     /// llegan 100 frames undecryptable de orr_X en 50 ms, solo el
     /// primero dispara el handshake; los demás ven el flag y se
@@ -93,7 +100,7 @@ impl PeerRegistry {
             master_secrets: RwLock::new(HashMap::new()),
             ephemeral_sks: RwLock::new(HashMap::new()),
             current_send_epochs: RwLock::new(HashMap::new()),
-            rebootstrap_last_attempt: RwLock::new(HashMap::new()),
+            rebootstrap_last_failure: RwLock::new(HashMap::new()),
             rebootstrap_inflight: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
@@ -115,7 +122,7 @@ impl PeerRegistry {
             master_secrets: RwLock::new(HashMap::new()),
             ephemeral_sks: RwLock::new(HashMap::new()),
             current_send_epochs: RwLock::new(HashMap::new()),
-            rebootstrap_last_attempt: RwLock::new(HashMap::new()),
+            rebootstrap_last_failure: RwLock::new(HashMap::new()),
             rebootstrap_inflight: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
@@ -395,29 +402,39 @@ impl PeerRegistry {
     }
 
     /// Decide si vale la pena disparar un re-bootstrap reactivo para
-    /// este peer. Aplica una ventana mínima entre intentos
-    /// (`min_interval`); típicamente 30 s. La idea es que tras un
-    /// re-bootstrap exitoso los frames undecryptable cesan en pocos
-    /// ms, así que ver un frame undecryptable >30 s después del último
-    /// intento indica un fallo real (no spam del mismo intento).
+    /// este peer. Aplica `min_interval` SOLO si el último intento FALLÓ
+    /// recientemente; si nunca se intentó o el último fue exitoso, no
+    /// hay rate-limit.
+    ///
+    /// Optimización 2026-05-25: antes el rate-limit aplicaba siempre,
+    /// añadiendo 30 s de latencia incluso al primer intento. Con
+    /// múltiples peers afectados secuencialmente eso podía acumular
+    /// minutos de recovery time.
     pub fn should_attempt_rebootstrap(
         &self,
         orr_id: &str,
         min_interval: std::time::Duration,
     ) -> bool {
-        let r = self.rebootstrap_last_attempt.read();
+        let r = self.rebootstrap_last_failure.read();
         match r.get(orr_id) {
-            None => true,
+            None => true, // nunca falló (o se limpió tras éxito) → proceder
             Some(last) => last.elapsed() >= min_interval,
         }
     }
 
-    /// Registra ahora como el último intento de re-bootstrap. Llamar
-    /// inmediatamente antes de spawnear el task de handshake.
-    pub fn mark_rebootstrap_attempt(&self, orr_id: &str) {
-        self.rebootstrap_last_attempt
+    /// Registra que el último intento de re-bootstrap para este peer
+    /// FALLÓ. El próximo intento esperará `min_interval`. Llamar SOLO
+    /// en la rama Err del task.
+    pub fn mark_rebootstrap_failure(&self, orr_id: &str) {
+        self.rebootstrap_last_failure
             .write()
             .insert(orr_id.to_string(), Instant::now());
+    }
+
+    /// Limpia el marcador de fallo previo. Llamar en la rama Ok del
+    /// task: el próximo intento (si lo hay) procederá sin espera.
+    pub fn clear_rebootstrap_failure(&self, orr_id: &str) {
+        self.rebootstrap_last_failure.write().remove(orr_id);
     }
 }
 
@@ -615,15 +632,18 @@ mod tests {
     }
 
     #[test]
-    fn rebootstrap_rate_limit_blocks_within_window() {
+    fn rebootstrap_rate_limit_blocks_only_after_failure() {
         use std::time::Duration;
         let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
-        // Sin historial → siempre OK
+        // Sin historial → siempre OK (primer intento no espera)
         assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
-        reg.mark_rebootstrap_attempt("orr_2");
-        // Justo después de marcar → blocked
+        // Marcar fallo → rate-limited dentro de la ventana
+        reg.mark_rebootstrap_failure("orr_2");
         assert!(!reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
-        // Con ventana 0 ns → siempre OK
+        // Ventana 0 ns → siempre OK
         assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_nanos(0)));
+        // Limpiar marca de fallo (= intento previo exitoso) → libre de nuevo
+        reg.clear_rebootstrap_failure("orr_2");
+        assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
     }
 }
