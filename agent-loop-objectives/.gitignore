@@ -1,0 +1,4 @@
+# Ignorar TODO el contenido de este directorio (creado y gestionado por el agente).
+# Mantener solo este propio .gitignore versionado.
+*
+!.gitignore
