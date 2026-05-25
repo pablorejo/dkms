@@ -12,17 +12,36 @@
 
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use tokio::{net::TcpStream, sync::Notify};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use wire::{write_frame, Frame};
+
+/// Periodo entre logs INFO de stats periódicas del peer_out. Cada
+/// 30 s emite por peer: queue_depth, sent/dropped totales,
+/// sent_kps/drop_kps en la ventana, connected_state. Útil para
+/// diagnosticar stalls del link QKC↔QKC cuando los frames
+/// no llegan al destino (smoke 2026-05-25: 16 min de stall en
+/// silencio antes de añadir esto).
+const STATS_LOG_PERIOD: Duration = Duration::from_secs(30);
+
+/// Throttle para warn de drops en `send()`: como mucho 1 cada esta
+/// ventana por peer. Sin esto, un peer cuya cola se llena emitiría
+/// miles de warn/s y los logs se ahogarían.
+const DROP_WARN_THROTTLE: Duration = Duration::from_secs(1);
+
+/// Throttle equivalente para warn de connect_failed. Bajo backoff de
+/// 2 s entre intentos, eso es ~30 attempts/min. Sin throttle emitiría
+/// 1 WARN cada 2 s — muy útil para diagnóstico pero ruidoso. Logueamos
+/// el PRIMER fallo siempre y luego como máximo 1 cada 10 s.
+const CONNECT_FAILED_WARN_THROTTLE: Duration = Duration::from_secs(10);
 
 /// Capacidad de la cola por peer. Bajo ráfagas grandes (hub recibe
 /// frames de las 4 ramas en paralelo y re-encripta hacia cada destino)
@@ -36,6 +55,12 @@ struct PeerSlot {
     addr: String,
     sent: AtomicU64,
     dropped: AtomicU64,
+    /// Último Instant en que emitimos WARN de drop, en micros desde
+    /// UNIX_EPOCH (cabe en u64). Usado para throttle de drop warns.
+    last_drop_warn_micros: AtomicU64,
+    /// `true` mientras el writer_loop tiene un TCP stream abierto;
+    /// `false` si está en backoff de reconexión. Útil para stats.
+    connected: AtomicBool,
 }
 
 pub struct PeerOut {
@@ -50,7 +75,8 @@ impl PeerOut {
     }
 
     /// Encola un frame para `peer_id`. `false` si la cola está llena
-    /// (drop count incrementa).
+    /// (drop count incrementa). Emite WARN throttled cada
+    /// [`DROP_WARN_THROTTLE`] para no spammear bajo congestión.
     pub fn send(&self, peer_id: u32, peer_addr: &str, frame: Frame) -> bool {
         let slot = self.get_or_create(peer_id, peer_addr);
         match slot.queue.push(frame) {
@@ -60,7 +86,28 @@ impl PeerOut {
                 true
             }
             Err(_) => {
-                slot.dropped.fetch_add(1, Ordering::Relaxed);
+                let dropped_now = slot.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // Throttle de WARN: emitimos si pasaron > DROP_WARN_THROTTLE
+                // desde el último warn. Compare-and-swap evita doble warn
+                // si dos hilos chocan exactamente al filo.
+                let now_us = micros_since_epoch();
+                let last_us = slot.last_drop_warn_micros.load(Ordering::Relaxed);
+                let threshold_us = DROP_WARN_THROTTLE.as_micros() as u64;
+                if now_us.saturating_sub(last_us) >= threshold_us
+                    && slot
+                        .last_drop_warn_micros
+                        .compare_exchange(last_us, now_us, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    warn!(
+                        %peer_id,
+                        addr = %slot.addr,
+                        queue_capacity = QUEUE_CAPACITY,
+                        dropped_total = dropped_now,
+                        connected = slot.connected.load(Ordering::Relaxed),
+                        "qkc.peer_out.drop (queue full, frame discarded)"
+                    );
+                }
                 false
             }
         }
@@ -76,6 +123,8 @@ impl PeerOut {
             addr: peer_addr.to_string(),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            last_drop_warn_micros: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
         });
         let entry = self.peers.entry(peer_id).or_insert_with(|| candidate.clone());
         let stored = entry.value().clone();
@@ -89,9 +138,17 @@ impl PeerOut {
         // peers, observado en sim 16/17/18 / v14-validation).
         if Arc::ptr_eq(&stored, &candidate) {
             let writer_slot = stored.clone();
+            let stats_slot = stored.clone();
             let peer_id_for_log = peer_id;
             tokio::spawn(async move {
                 writer_loop(peer_id_for_log, writer_slot).await;
+            });
+            // Stats logger en background: emite INFO cada
+            // STATS_LOG_PERIOD con queue depth + sent/dropped totales
+            // y tasas instantáneas. Sobrevive a reconexiones porque
+            // observa el PeerSlot, no el stream TCP.
+            tokio::spawn(async move {
+                stats_logger(peer_id_for_log, stats_slot).await;
             });
         }
         stored
@@ -115,16 +172,46 @@ impl Default for PeerOut {
 
 async fn writer_loop(peer_id: u32, slot: Arc<PeerSlot>) {
     let mut backoff = Duration::from_millis(50);
+    let mut last_connect_warn = Instant::now() - CONNECT_FAILED_WARN_THROTTLE;
+    let mut consecutive_failures: u64 = 0;
     loop {
         let mut stream = match TcpStream::connect(&slot.addr).await {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
-                info!(%peer_id, addr = %slot.addr, "qkc.peer_out.connected");
+                if consecutive_failures > 0 {
+                    info!(
+                        %peer_id,
+                        addr = %slot.addr,
+                        recovered_after_failures = consecutive_failures,
+                        "qkc.peer_out.connected (recovered)"
+                    );
+                } else {
+                    info!(%peer_id, addr = %slot.addr, "qkc.peer_out.connected");
+                }
+                slot.connected.store(true, Ordering::Relaxed);
                 backoff = Duration::from_millis(50);
+                consecutive_failures = 0;
                 s
             }
             Err(e) => {
-                debug!(%peer_id, addr = %slot.addr, error = %e, "qkc.peer_out.connect_failed");
+                consecutive_failures += 1;
+                // Promovido de debug → warn con throttle. El primer
+                // fallo siempre se loguea. Los siguientes solo cada
+                // CONNECT_FAILED_WARN_THROTTLE. Esto da visibilidad
+                // de stalls de conexión sin spam bajo backoff intenso.
+                if consecutive_failures == 1
+                    || last_connect_warn.elapsed() >= CONNECT_FAILED_WARN_THROTTLE
+                {
+                    warn!(
+                        %peer_id,
+                        addr = %slot.addr,
+                        error = %e,
+                        consecutive_failures,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "qkc.peer_out.connect_failed"
+                    );
+                    last_connect_warn = Instant::now();
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(2));
                 continue;
@@ -142,9 +229,53 @@ async fn writer_loop(peer_id: u32, slot: Arc<PeerSlot>) {
                 }
             };
             if let Err(e) = write_frame(&mut stream, &frame).await {
-                warn!(%peer_id, error = %e, "qkc.peer_out.write_err");
+                slot.connected.store(false, Ordering::Relaxed);
+                warn!(%peer_id, addr = %slot.addr, error = %e, "qkc.peer_out.write_err");
                 break; // reconectar
             }
         }
     }
+}
+
+/// Background task: cada STATS_LOG_PERIOD emite un INFO con stats
+/// del peer. Diferencia respecto al snapshot anterior para mostrar
+/// tasas instantáneas. Permite observar stalls del link incluso
+/// cuando el writer no emite write_err (e.g. TCP half-open zombie).
+async fn stats_logger(peer_id: u32, slot: Arc<PeerSlot>) {
+    let mut prev_sent = slot.sent.load(Ordering::Relaxed);
+    let mut prev_dropped = slot.dropped.load(Ordering::Relaxed);
+    let mut tick = tokio::time::interval(STATS_LOG_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick.tick().await; // saltar el primer tick instantáneo
+    loop {
+        tick.tick().await;
+        let sent = slot.sent.load(Ordering::Relaxed);
+        let dropped = slot.dropped.load(Ordering::Relaxed);
+        let dt = STATS_LOG_PERIOD.as_secs_f64();
+        let sent_rate = (sent.saturating_sub(prev_sent)) as f64 / dt;
+        let drop_rate = (dropped.saturating_sub(prev_dropped)) as f64 / dt;
+        info!(
+            %peer_id,
+            addr = %slot.addr,
+            connected = slot.connected.load(Ordering::Relaxed),
+            queue_depth = slot.queue.len(),
+            queue_cap = QUEUE_CAPACITY,
+            sent_total = sent,
+            dropped_total = dropped,
+            sent_kps = format!("{sent_rate:.1}"),
+            drop_kps = format!("{drop_rate:.1}"),
+            "qkc.peer_out.stats",
+        );
+        prev_sent = sent;
+        prev_dropped = dropped;
+    }
+}
+
+#[inline]
+fn micros_since_epoch() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
