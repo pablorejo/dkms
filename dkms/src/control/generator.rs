@@ -403,10 +403,52 @@ impl Generator {
             if buf.enc.len() + self.ack_pending.pending_count(&peer) >= buf.enc.capacity() {
                 continue;
             }
-            for _ in 0..tokens {
-                if let Err(e) = self.clone().emit_key(&peer).await {
-                    warn!(peer = %peer, error = %e, "generator.emit failed");
+            // Concurrent fan-out de los `tokens` emits hacia este peer.
+            // El loop anterior era `for _ in 0..tokens { emit_key().await }`
+            // estrictamente secuencial, lo que pinaba el throughput per-peer
+            // a `tick_period / per_emit_latency`. En cluster K8s, con tonic
+            // gRPC al ORR sidecar a ~1-3 ms por send_key, el techo era
+            // ~330 kps por peer — incompatible con lo que la SDN dictaba
+            // a commodities en paths cortos (1.5 kkps). `join_all` lanza
+            // los futures concurrentemente sobre el mismo task tokio:
+            // tonic.Channel multiplexa HTTP/2 streams en paralelo sobre
+            // una sola conexión TCP, así que N emits concurrentes ≈ N×
+            // throughput vs el secuencial.
+            //
+            // Aggregamos los errores en una sola línea warn por tick por
+            // peer (en vez de N warns separadas) para evitar log storms
+            // durante el bootstrap ORR — verificado smoke 2026-05-25:
+            // con tokens=400 y peer ORR sin master_secret aún, el código
+            // anterior generaba 4000 warn/seg/pod = 752 MB de logs en
+            // ~10 min, saturando disk I/O del pod.
+            let futs = (0..tokens).map(|_| {
+                let me = self.clone();
+                let peer = peer.clone();
+                async move { me.emit_key(&peer).await }
+            });
+            let results = futures::future::join_all(futs).await;
+            let total = results.len();
+            let mut ok = 0usize;
+            let mut sample_err: Option<String> = None;
+            for r in results {
+                match r {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        if sample_err.is_none() {
+                            sample_err = Some(e.to_string());
+                        }
+                    }
                 }
+            }
+            let failed = total - ok;
+            if failed > 0 {
+                warn!(
+                    peer = %peer,
+                    ok,
+                    failed,
+                    sample_error = sample_err.as_deref().unwrap_or("?"),
+                    "generator.emit batch had failures",
+                );
             }
         }
     }
