@@ -1,0 +1,28 @@
+{
+  "n_workers": 30,
+  "total_requests": 2189544,
+  "enc_ok": 1702667,
+  "dec_ok": 1702655,
+  "match": 1702655,
+  "enc_ok_pct": 77.76,
+  "dec_ok_pct": 77.76,
+  "match_pct": 77.76,
+  "enc_latency_ms": {
+    "p50": 10.89,
+    "p95": 2646.72,
+    "p99": 4926.56,
+    "max": 10398.42
+  },
+  "dec_latency_ms": {
+    "p50": 3.76,
+    "p95": 2610.14,
+    "p99": 4863.81,
+    "max": 10340.45
+  },
+  "http_errors_from_server": {
+    "enc HTTP 429": 486865,
+    "enc HTTP 502": 12,
+    "dec HTTP 502": 12
+  },
+  "client_errors": {}
+}
