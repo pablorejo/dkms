@@ -46,7 +46,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="es" suppressHydrationWarning>
       <body
-        className={`${sans.variable} ${serif.variable} min-h-screen bg-background font-sans text-foreground antialiased`}
+        className={`${sans.variable} ${serif.variable} flex min-h-screen flex-col bg-background font-sans text-foreground antialiased`}
       >
         <ThemeProvider
           attribute="class"
@@ -57,7 +57,17 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <a href="#main-content" className="skip-link">
             Saltar al contenido principal
           </a>
-          {children}
+          <div className="flex-1">{children}</div>
+          <footer className="mt-8 border-t border-border/60 bg-background/70 py-10 backdrop-blur">
+            <div className="mx-auto flex max-w-7xl items-center justify-center px-6">
+              <img
+                src={withBasePath("/logo_retech.png")}
+                alt="Retech"
+                height={96}
+                className="h-24 w-auto opacity-90"
+              />
+            </div>
+          </footer>
         </ThemeProvider>
       </body>
     </html>
