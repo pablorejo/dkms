@@ -8,6 +8,7 @@ cd "$REPO"
 source "$LUSTRE/dkms-build/buildenv.sh" 2>/dev/null
 OUT="$REPO/tests/results/seclevels-campaign"
 mkdir -p "$OUT"
+mkdir -p "$LUSTRE/dkms-build/camp"
 RES="$OUT/campaign.tsv"
 echo -e "cell\ttopo\tN\tpqc\tdual\tsolver\tedges_qkd\tedges_pqc\tqkd_comps\tlaunch\te2e_pass\te2e_total\tverdict" > "$RES"
 
