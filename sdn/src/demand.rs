@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 
+use common::security::KeyGrade;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,15 @@ pub struct CommodityDemand {
     /// the solver to drop stale entries (e.g., a peer DKMS that
     /// crashed and stopped reporting).
     pub timestamp_ms: i64,
+
+    /// Security grade this demand must be served at: [`KeyGrade::Qkd`] routes
+    /// only over QKD arcs, [`KeyGrade::Pqc`] over any arc. `#[serde(default)]`
+    /// → reports from a DKMS that predates security levels deserialize as
+    /// `Qkd`. The solver currently overrides this from QKD-subgraph
+    /// connectivity (see `McmcfInputs::build`); once the DKMS splits demand
+    /// per grade this field carries the real per-grade split.
+    #[serde(default)]
+    pub grade: KeyGrade,
 }
 
 impl CommodityDemand {
@@ -215,6 +225,7 @@ mod tests {
             capacity: cap,
             drain_rate: drain,
             timestamp_ms: ts,
+            grade: Default::default(),
         }
     }
 

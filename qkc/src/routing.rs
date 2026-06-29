@@ -47,19 +47,37 @@ impl NextHop {
 }
 
 pub struct ForwardingTable {
-    /// `dest_qkc → ordered list of weighted next hops`. Empty `Vec`
-    /// means "destination known but no path" (would surface as
-    /// `next_hop = None` to the caller).
+    /// `dest_qkc → ordered list of weighted next hops` over the **full**
+    /// graph (QKD + PQC arcs). Used for PQC-grade frames and as the legacy
+    /// single table. Empty `Vec` means "destination known but no path".
     table: ArcSwap<HashMap<u32, Vec<NextHop>>>,
-    /// Direct neighbours short-circuit table lookup.
+    /// Same shape, but restricted to **QKD-only** routes. Used for QKD-grade
+    /// frames so they never traverse a PQC link. Empty (never pushed) → grade
+    /// routing is inert and `next_hop_graded` behaves like the legacy table.
+    qkd_table: ArcSwap<HashMap<u32, Vec<NextHop>>>,
+    /// Direct neighbours short-circuit table lookup (any link type).
     direct: HashSet<u32>,
+    /// Subset of `direct` reachable over a **QKD** link. A QKD-grade frame may
+    /// only short-circuit through these (a direct PQC neighbour must go via
+    /// the QKD table, which may route around through a multi-hop QKD path).
+    direct_qkd: HashSet<u32>,
 }
 
 impl ForwardingTable {
+    /// Construct with all direct neighbours and no QKD-specific routing
+    /// (grade routing inert until a QKD table / QKD direct set is provided).
     pub fn new(direct_neighbors: HashSet<u32>) -> Self {
+        Self::new_with_grades(direct_neighbors, HashSet::new())
+    }
+
+    /// Construct with the full direct-neighbour set plus the subset reachable
+    /// over a QKD link (for QKD-grade short-circuiting).
+    pub fn new_with_grades(direct_neighbors: HashSet<u32>, direct_qkd: HashSet<u32>) -> Self {
         Self {
             table: ArcSwap::from_pointee(HashMap::new()),
+            qkd_table: ArcSwap::from_pointee(HashMap::new()),
             direct: direct_neighbors,
+            direct_qkd,
         }
     }
 
@@ -78,12 +96,47 @@ impl ForwardingTable {
         pick(entries, hash)
     }
 
+    /// Grade-aware next hop. `qkd_only = true` (the frame carries a QKD-grade
+    /// key) routes strictly over QKD links: short-circuit only via a direct
+    /// QKD neighbour, otherwise the QKD-only table; it never falls through to
+    /// the full table (which could include a PQC hop). `qkd_only = false`
+    /// (PQC-grade) is the legacy full-graph behaviour.
+    ///
+    /// Backward-compat: if the QKD table was never pushed (empty), QKD-grade
+    /// frames fall back to the full-table path so a half-deployed cluster
+    /// keeps routing exactly as before grades existed.
+    #[inline]
+    pub fn next_hop_graded(&self, dest_id: u32, hash: u64, qkd_only: bool) -> Option<u32> {
+        if qkd_only {
+            let qkd = self.qkd_table.load();
+            if !qkd.is_empty() {
+                if self.direct_qkd.contains(&dest_id) {
+                    return Some(dest_id);
+                }
+                return pick(qkd.get(&dest_id)?, hash);
+            }
+            // QKD table not yet pushed → legacy behaviour below.
+        }
+        self.next_hop(dest_id, hash)
+    }
+
     /// Replace the whole table. Entries with `weight = 0` are
     /// filtered out — they would never be selected and complicate
     /// the runtime branch.
     pub fn replace(&self, new: HashMap<u32, Vec<NextHop>>) {
         let sanitised = sanitise(new);
         self.table.store(Arc::new(sanitised));
+    }
+
+    /// Replace the QKD-only table (routes for QKD-grade frames). Same
+    /// sanitisation as [`Self::replace`].
+    pub fn replace_qkd(&self, new: HashMap<u32, Vec<NextHop>>) {
+        self.qkd_table.store(Arc::new(sanitise(new)));
+    }
+
+    /// Snapshot of the QKD-only table. Clones — not for hot paths.
+    pub fn snapshot_qkd(&self) -> HashMap<u32, Vec<NextHop>> {
+        (**self.qkd_table.load()).clone()
     }
 
     /// Apply a delta: insert/replace per-destination entries and
@@ -280,5 +333,49 @@ mod tests {
         let t2 = HashMap::new();
         ft.replace(t2);
         assert_eq!(ft.next_hop(5, 0), None);
+    }
+
+    #[test]
+    fn qkd_grade_uses_qkd_table_not_full() {
+        let ft = ForwardingTable::new([].into_iter().collect());
+        let mut full = HashMap::new();
+        full.insert(9, entries(&[(2, 1)])); // PQC/full route to 9 via 2
+        ft.replace(full);
+        let mut qkd = HashMap::new();
+        qkd.insert(9, entries(&[(3, 1)])); // QKD-only route to 9 via 3
+        ft.replace_qkd(qkd);
+        // QKD-grade → QKD table (hop 3); PQC-grade → full table (hop 2).
+        assert_eq!(ft.next_hop_graded(9, 0, true), Some(3));
+        assert_eq!(ft.next_hop_graded(9, 0, false), Some(2));
+    }
+
+    #[test]
+    fn qkd_grade_falls_back_to_full_when_qkd_table_empty() {
+        // No QKD table pushed → grade routing inert (backward-compat).
+        let ft = ForwardingTable::new([].into_iter().collect());
+        let mut full = HashMap::new();
+        full.insert(9, entries(&[(2, 1)]));
+        ft.replace(full);
+        assert_eq!(ft.next_hop_graded(9, 0, true), Some(2));
+    }
+
+    #[test]
+    fn qkd_grade_short_circuits_only_via_qkd_direct_neighbor() {
+        // direct {2,3}; only 2 is a QKD neighbour. 3 is a direct PQC neighbour.
+        let ft = ForwardingTable::new_with_grades(
+            [2u32, 3].into_iter().collect(),
+            [2u32].into_iter().collect(),
+        );
+        // Engage grade routing by pushing a (non-empty) QKD table.
+        let mut qkd = HashMap::new();
+        qkd.insert(50, entries(&[(2, 1)]));
+        ft.replace_qkd(qkd);
+        // QKD-grade to the QKD direct neighbour → short-circuit.
+        assert_eq!(ft.next_hop_graded(2, 0, true), Some(2));
+        // QKD-grade to the PQC direct neighbour 3 → must NOT use the direct
+        // PQC link; 3 isn't in the QKD table → no route.
+        assert_eq!(ft.next_hop_graded(3, 0, true), None);
+        // PQC-grade to 3 → legacy direct short-circuit is fine.
+        assert_eq!(ft.next_hop_graded(3, 0, false), Some(3));
     }
 }

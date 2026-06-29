@@ -26,7 +26,7 @@ use std::{
 };
 
 use uuid::Uuid;
-use wire::{Frame, FRAME_LOCAL_DELIVER, FRAME_RECV, FRAME_RELAY};
+use wire::{Frame, FRAME_LOCAL_DELIVER, FRAME_RECV, FRAME_RELAY, GRADE_QKD};
 
 /// Stable hash for a frame used as the bucket key into a WCMP next-hop
 /// entry. We pick fields that vary per-frame (so different keys hit
@@ -112,15 +112,17 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
     }
 
     let hash = frame_hash(&frame);
+    let grade = frame.grade;
     let next_hop = svc
         .routing
-        .next_hop(frame.dest_final, hash)
+        .next_hop_graded(frame.dest_final, hash, grade == GRADE_QKD)
         .ok_or(QkcError::NoRoute(frame.dest_final))?;
     forward_plaintext(
         svc,
         next_hop,
         frame.dest_final,
         &plaintext,
+        grade,
         frame.header_orr_mp,
         frame.header_dkms_mp,
     )
@@ -152,15 +154,17 @@ async fn handle_local_send_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         ));
     }
     let hash = frame_hash(&frame);
+    let grade = frame.grade;
     let next_hop = svc
         .routing
-        .next_hop(dest, hash)
+        .next_hop_graded(dest, hash, grade == GRADE_QKD)
         .ok_or(QkcError::NoRoute(dest))?;
     forward_plaintext(
         svc,
         next_hop,
         dest,
         &frame.payload,
+        grade,
         frame.header_orr_mp,
         frame.header_dkms_mp,
     )
@@ -172,6 +176,7 @@ async fn forward_plaintext(
     next_hop: u32,
     dest_final: u32,
     plaintext: &[u8],
+    grade: u8,
     header_orr_mp: Vec<u8>,
     header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
@@ -188,17 +193,20 @@ async fn forward_plaintext(
         dest_final,
         ciphertext,
         ids,
+        grade,
         header_orr_mp,
         header_dkms_mp,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_frame_to_peer(
     svc: &QkcService,
     next_hop: u32,
     dest_final: u32,
     ciphertext: Vec<u8>,
     key_ids: Vec<Uuid>,
+    grade: u8,
     header_orr_mp: Vec<u8>,
     header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
@@ -214,6 +222,7 @@ fn send_frame_to_peer(
     out.sender_id = svc.qkc_id();
     out.receiver_id = next_hop;
     out.dest_final = dest_final;
+    out.grade = grade; // preserve the key grade across the relay hop
     out.key_size_bits = out_link.cfg.key_size_bits as u16;
     out.key_ids = key_ids.iter().map(|u| u.to_string()).collect();
     out.header_orr_mp = header_orr_mp;

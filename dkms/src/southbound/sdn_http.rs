@@ -23,6 +23,19 @@ pub struct SdnHttpClient {
 pub struct PeerRate {
     pub enc: f64,
     pub dec: f64,
+    /// El SDN ve un camino estrictamente-QKD a este peer (mismo componente
+    /// del subgrafo QKD). Si no, una clave QKD-grade no es entregable y una
+    /// petición `strict_qkd` a este destino debe rechazarse (4xx). Default
+    /// `true` (no rechazar) para tolerar un SDN antiguo que no emita el campo.
+    #[serde(default = "default_true")]
+    pub qkd_available: bool,
+    /// Existe algún camino (grafo completo, incl. PQC) a este peer.
+    #[serde(default = "default_true")]
+    pub reachable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

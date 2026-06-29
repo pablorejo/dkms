@@ -55,10 +55,12 @@ use good_lp::{
 };
 use tracing::{debug, info, warn};
 
+use common::security::KeyGrade;
+
 use crate::{
     demand::{CommodityDemand, DemandRegistry},
     mcf::{flow_id, BufferRole, McfSnapshot, WcmpNextHop},
-    topology::Topology,
+    topology::{edge_key, Topology},
 };
 
 /// Buffer capacity (keys) assumed when no DKMS has yet reported for
@@ -77,13 +79,21 @@ pub struct McmcfInputs {
     /// produce the same edge-flow vector.
     pub commodities: Vec<CommodityDemand>,
 
-    /// `(qkc_a, qkc_b) -> u_ij`, lexicographically ordered (a < b)
-    /// so undirected edges aren't double-counted.
+    /// `(qkc_a, qkc_b) -> u_ij`, lexicographically ordered (a < b) so
+    /// undirected edges aren't double-counted. QKD edges carry their
+    /// distance-attenuated rate; PQC edges carry [`PQC_EDGE_CAPACITY_KEYS_PER_SECOND`]
+    /// (effectively unbounded — see the note there).
     pub edge_capacity: HashMap<(String, String), f64>,
 
     /// `dkms_id -> qkc_id` for every DKMS in the topology that has
     /// a resolvable QKC anchor.
     pub dkms_to_qkc: HashMap<String, String>,
+
+    /// Canonical `(qkc_a, qkc_b)` (a < b) of every **PQC** edge. The LP
+    /// forbids QKD-grade commodities from using these arcs (their flow
+    /// variables are pinned to 0), so a QKD-grade key never traverses a
+    /// PQC link. QKD edges are absent from this set.
+    pub pqc_edges: HashSet<(String, String)>,
 }
 
 impl McmcfInputs {
@@ -102,14 +112,32 @@ impl McmcfInputs {
             }
         }
 
-        // Edge capacity table (canonical key form a < b).
+        // Edge capacity table (canonical key form a < b). QKD edges carry
+        // their distance-attenuated rate; PQC edges get an effectively
+        // unbounded sentinel so they never bound λ (a true ∞ would make the
+        // max-λ LP unbounded → solver returns Unbounded → zero fallback,
+        // the opposite of intended).
         let mut edge_capacity: HashMap<(String, String), f64> = HashMap::new();
+        let mut pqc_edges: HashSet<(String, String)> = HashSet::new();
         for ((a, b), meta) in &topology.edges {
-            let cap = meta.quditto_capacity_keys_per_second();
+            let cap = if meta.is_pqc() {
+                PQC_EDGE_CAPACITY_KEYS_PER_SECOND
+            } else {
+                meta.quditto_capacity_keys_per_second()
+            };
             if cap > 0.0 {
                 edge_capacity.insert((a.clone(), b.clone()), cap);
+                if meta.is_pqc() {
+                    pqc_edges.insert((a.clone(), b.clone()));
+                }
             }
         }
+
+        // QKD-subgraph components: a pair routes QKD-grade iff its two QKCs
+        // share a component (a strictly-QKD path connects them). Pairs that
+        // are only PQC-connected get grade PQC so the LP may use PQC arcs —
+        // exactly the `qkd_prefer` default (QKD where reachable, else PQC).
+        let qkd_comp = topology.qkd_components();
 
         // Commodity set: every ordered pair (src, dst) of DKMSs in
         // distinct QKCs gets a slot. Override with registry entries
@@ -128,7 +156,7 @@ impl McmcfInputs {
                     // between them at all.
                     continue;
                 }
-                let entry =
+                let mut entry =
                     registry
                         .get(src.as_str(), dst.as_str())
                         .unwrap_or_else(|| CommodityDemand {
@@ -138,7 +166,15 @@ impl McmcfInputs {
                             capacity: DEFAULT_BUFFER_CAPACITY,
                             drain_rate: 0.0,
                             timestamp_ms: 0,
+                            grade: KeyGrade::Qkd,
                         });
+                // Override the grade from QKD-subgraph connectivity (until the
+                // DKMS splits demand per security level, the grade of a pair is
+                // purely a function of whether a QKD path exists).
+                entry.grade = match (qkd_comp.get(src_qkc), qkd_comp.get(dst_qkc)) {
+                    (Some(x), Some(y)) if x == y => KeyGrade::Qkd,
+                    _ => KeyGrade::Pqc,
+                };
                 commodities.push(entry);
             }
         }
@@ -151,6 +187,7 @@ impl McmcfInputs {
             commodities,
             edge_capacity,
             dkms_to_qkc,
+            pqc_edges,
         }
     }
 }
@@ -189,6 +226,18 @@ pub struct McmcfSolution {
 /// smallest meaningful rate in practice is `δ_k > 0`, which is at
 /// least 1 key/s for any active SAE.
 const FLOW_EPSILON: f64 = 1e-6;
+
+/// Capacity assigned to PQC edges in the MCF. PQC links are not
+/// QKD-rate-limited, so conceptually they're "unbounded" — but a literal
+/// ∞ (omitting the capacity constraint) makes the `max λ` LP unbounded for
+/// any commodity whose path is all-PQC, which microlp/clarabel report as
+/// Unbounded → the solve falls back to zero rates. A large finite sentinel
+/// keeps the LP well-posed while never binding: it's ~50× above any
+/// realistic aggregate per-edge flow (≤ N²·DEFAULT_BUFFER_CAPACITY ≈ 4e7 at
+/// N=100), so a PQC edge never lowers λ — exactly "PQC removes the
+/// bottleneck". λ then stays bounded by the real QKD edges (or, in an
+/// all-PQC topology, by this sentinel — rates the DKMS generator caps anyway).
+const PQC_EDGE_CAPACITY_KEYS_PER_SECOND: f64 = 1e9;
 
 /// Horizon (seconds) over which a single LP solve is considered
 /// authoritative. The LP delivers `r_k = δ_k + λ·R_k + η_k` for the
@@ -291,7 +340,9 @@ fn solve_lp_clarabel(
                     warn!("clarabel exited AlmostSolved; using reduced-accuracy solution");
                 }
                 other => {
-                    return Err(format!("clarabel terminated with non-optimal status {other:?}"))
+                    return Err(format!(
+                        "clarabel terminated with non-optimal status {other:?}"
+                    ))
                 }
             }
             Ok(wanted.iter().map(|v| sol.value(*v)).collect())
@@ -418,6 +469,46 @@ pub fn wcmp_from_edge_flows(
         out.entry(transit).or_default().insert(dst, hops);
     }
     out
+}
+
+/// Build the per-commodity flow-variable matrix `x[k][arc]` shared by both LP
+/// phases, **pinning to 0** the cells `(k, arc)` where commodity `k` is
+/// QKD-grade and `arc` is a PQC arc. A fixed `[0, 0]` bound (rather than
+/// dropping the variable) keeps the dense `x[k][arc]` indexing — and thus the
+/// conservation/capacity constraint builders — untouched; the LP simply never
+/// routes QKD-grade flow over a PQC link.
+///
+/// Invariant relied upon elsewhere: a QKD-grade commodity is only ever created
+/// for a QKD-connected pair (see `McmcfInputs::build` + the DKMS never reports
+/// `strict_qkd` demand for a QKD-disconnected pair), so pinning its PQC arcs to
+/// 0 never makes its conservation infeasible — there is always a QKD path — and
+/// the shared global `λ` cannot collapse.
+fn build_flow_vars(
+    vars: &mut ProblemVariables,
+    active: &[&CommodityDemand],
+    arcs: &[(String, String)],
+    pqc_edges: &HashSet<(String, String)>,
+) -> Vec<Vec<Variable>> {
+    let arc_is_pqc: Vec<bool> = arcs
+        .iter()
+        .map(|(a, b)| pqc_edges.contains(&edge_key(a, b)))
+        .collect();
+    active
+        .iter()
+        .map(|c| {
+            (0..arcs.len())
+                .map(|a_idx| {
+                    let def = variable().min(0.0);
+                    let def = if c.grade == KeyGrade::Qkd && arc_is_pqc[a_idx] {
+                        def.max(0.0) // pin to 0: QKD-grade never uses a PQC arc
+                    } else {
+                        def
+                    };
+                    vars.add(def)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// MCMCF-λ solver handle. Stateless today — the LP is built fresh on
@@ -628,14 +719,7 @@ impl McmcfSolver {
     ) -> Option<(f64, Vec<f64>)> {
         let mut vars = ProblemVariables::new();
         let lambda = vars.add(variable().min(0.0));
-        let x: Vec<Vec<Variable>> = active
-            .iter()
-            .map(|_| {
-                (0..arcs.len())
-                    .map(|_| vars.add(variable().min(0.0)))
-                    .collect()
-            })
-            .collect();
+        let x: Vec<Vec<Variable>> = build_flow_vars(&mut vars, active, arcs, &inputs.pqc_edges);
         // σ_k ∈ [0, δ_k] — "unmet drain" per commodity. Active only
         // for commodities with δ_k > 0 (a fill-only commodity can't
         // have unmet drain).
@@ -747,14 +831,7 @@ impl McmcfSolver {
         // the drift source entirely: the LP has only x (flow) and η (lex)
         // variables now.
         let mut vars = ProblemVariables::new();
-        let x: Vec<Vec<Variable>> = active
-            .iter()
-            .map(|_| {
-                (0..arcs.len())
-                    .map(|_| vars.add(variable().min(0.0)))
-                    .collect()
-            })
-            .collect();
+        let x: Vec<Vec<Variable>> = build_flow_vars(&mut vars, active, arcs, &inputs.pqc_edges);
         // Lex refinement (paper §4): one `η_k ≥ 0` per commodity.
         // Upper bound `R_k / T_REPLAN_SECONDS` prevents the
         // residual rate from overfilling the buffer within one
@@ -896,7 +973,7 @@ fn zero_rate_fallback(active: &[&CommodityDemand]) -> McmcfSolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc, Topology};
+    use crate::topology::{Dkms, EdgeMeta, HostEndpoint, LinkType, Orr, Qkc, Topology};
 
     /// Phase 2 (lex refinement / η / edge_flows → WCMP) is forced off
     /// on the Clarabel backend — interior-point solutions put
@@ -959,7 +1036,112 @@ mod tests {
                 r0_keys_per_second: r0,
                 alpha: 0.2,
                 max_buffer_size: 10,
+                ..Default::default()
             },
+        );
+    }
+
+    fn pqc_link(t: &mut Topology, a: &str, b: &str) {
+        t.add_edge(
+            a,
+            b,
+            EdgeMeta {
+                link_type: LinkType::Pqc,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// A PQC edge enters the MCF with the unbounded sentinel capacity.
+    #[test]
+    fn pqc_edge_gets_sentinel_capacity() {
+        let mut t = Topology::default();
+        add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+        pqc_link(&mut t, "1", "2");
+        let inputs = McmcfInputs::build(&t, &DemandRegistry::new());
+        let cap = inputs
+            .edge_capacity
+            .get(&("1".to_string(), "2".to_string()))
+            .copied()
+            .expect("PQC edge present in edge_capacity");
+        assert_eq!(cap, PQC_EDGE_CAPACITY_KEYS_PER_SECOND);
+    }
+
+    /// A PQC link does not bound λ: with the same demand it yields a far
+    /// higher rate than a finite-capacity QKD link, and well above the QKD
+    /// edge's per-direction share (~50). This is "PQC removes the bottleneck".
+    #[test]
+    fn pqc_edge_does_not_bound_lambda() {
+        let solve = |pqc: bool| {
+            let mut t = Topology::default();
+            add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+            if pqc {
+                pqc_link(&mut t, "1", "2");
+            } else {
+                link(&mut t, "1", "2", 100.0);
+            }
+            McmcfSolver::new().solve(&McmcfInputs::build(&t, &DemandRegistry::new()))
+        };
+        let r_qkd = solve(false).rates[&flow_id("dA", "dB")];
+        let r_pqc = solve(true).rates[&flow_id("dA", "dB")];
+        assert!(r_qkd > 0.0, "QKD rate should be positive, got {r_qkd}");
+        assert!(
+            r_pqc > 100.0,
+            "PQC rate {r_pqc} must exceed the QKD edge's finite bound (~50/dir)"
+        );
+        assert!(
+            r_pqc > r_qkd * 100.0,
+            "PQC rate {r_pqc} should vastly exceed QKD rate {r_qkd}"
+        );
+    }
+
+    /// Per-grade arc eligibility: a QKD-grade commodity must NOT use a PQC
+    /// shortcut even when one exists. Topology `1=2 (QKD,1000) 2=3 (QKD,1000)
+    /// 1~3 (PQC,1e9)`, commodity d1→d3 (R_k=4096, δ=0):
+    ///   * QKD-grade → may only route 1-2-3 ⇒ λ bounded by the QKD min-cut
+    ///     1000/4096 ≈ 0.244 (the PQC arc's flow vars are pinned to 0).
+    ///   * PQC-grade → may take the 1e9 shortcut ⇒ λ explodes.
+    #[test]
+    fn qkd_grade_commodity_cannot_use_pqc_shortcut() {
+        let mut edge_capacity: HashMap<(String, String), f64> = HashMap::new();
+        edge_capacity.insert(("1".into(), "2".into()), 1000.0);
+        edge_capacity.insert(("2".into(), "3".into()), 1000.0);
+        edge_capacity.insert(("1".into(), "3".into()), 1e9); // PQC shortcut
+        let pqc_edges: HashSet<(String, String)> =
+            [("1".to_string(), "3".to_string())].into_iter().collect();
+        let dkms_to_qkc: HashMap<String, String> =
+            [("d1".to_string(), "1".to_string()), ("d3".to_string(), "3".to_string())]
+                .into_iter()
+                .collect();
+        let commodity = |grade| CommodityDemand {
+            src_dkms: "d1".into(),
+            dst_dkms: "d3".into(),
+            level: 0.0,
+            capacity: 4096.0,
+            drain_rate: 0.0,
+            timestamp_ms: 0,
+            grade,
+        };
+        let inputs = |grade| McmcfInputs {
+            commodities: vec![commodity(grade)],
+            edge_capacity: edge_capacity.clone(),
+            dkms_to_qkc: dkms_to_qkc.clone(),
+            pqc_edges: pqc_edges.clone(),
+        };
+
+        let lam_qkd = McmcfSolver::new().solve(&inputs(KeyGrade::Qkd)).lambda;
+        let lam_pqc = McmcfSolver::new().solve(&inputs(KeyGrade::Pqc)).lambda;
+
+        // QKD-grade is pinned off the PQC shortcut → bounded by the QKD path.
+        let qkd_bound = 1000.0 / 4096.0; // ≈ 0.244
+        assert!(
+            lam_qkd > 0.0 && lam_qkd < qkd_bound * 1.1,
+            "QKD-grade λ={lam_qkd} should be ≈ QKD min-cut {qkd_bound}, not the PQC shortcut"
+        );
+        // PQC-grade rides the 1e9 shortcut → vastly larger λ.
+        assert!(
+            lam_pqc > lam_qkd * 100.0,
+            "PQC-grade λ={lam_pqc} should dwarf QKD-grade λ={lam_qkd}"
         );
     }
 
@@ -974,6 +1156,7 @@ mod tests {
                 capacity: cap,
                 drain_rate: drain,
                 timestamp_ms: 1,
+                grade: Default::default(),
             }],
         });
     }

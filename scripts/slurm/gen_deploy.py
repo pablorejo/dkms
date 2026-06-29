@@ -209,6 +209,15 @@ def main() -> None:
                     help="round-trip campaign: generate P SAE pairs (2P EC certs) cross-node + "
                          "roundtrip_pairs.json (consumed by roundtrip.py). 0 = no round-trip.")
     ap.add_argument("--key-bits", type=int, default=256, help="QKD key size (QKC links + quditto)")
+    ap.add_argument("--pqc-distance-threshold-km", type=float, default=0.0,
+                    help="edges with distance_km >= threshold become PQC links (no quditto; the two "
+                         "QKCs run an ML-KEM handshake and derive keys in-process). Mirrors the real "
+                         "motivation: long links can't do QKD. 0 = disabled (all edges QKD).")
+    ap.add_argument("--pqc-fraction", type=float, default=0.0,
+                    help="when --pqc-distance-threshold-km is 0: make the longest FRACTION (0..1) of "
+                         "edges PQC, deterministic by descending distance then (lo,hi). 0 = disabled.")
+    ap.add_argument("--pqc-suite", default="ml-kem-768",
+                    help="ML-KEM parameter set for PQC links (ml-kem-512|768|1024)")
     ap.add_argument("--qd-r0", type=float, default=2000.0)
     ap.add_argument("--qd-alpha", type=float, default=0.2)
     ap.add_argument("--qd-max-buffer", type=int, default=65536)
@@ -223,6 +232,10 @@ def main() -> None:
                          "backpressure deterministically, topology-independent. 0 = no cap.")
     ap.add_argument("--deliver-queue", type=int, default=65536, help="ORR deliver_queue_capacity")
     ap.add_argument("--max-hops", type=int, default=1, help="DKMS southbound.default_max_hops (1 = E2E PQC)")
+    ap.add_argument("--security-level", default="qkd_prefer",
+                    choices=["strict_qkd", "qkd_prefer", "no_worry"],
+                    help="DKMS default_security_level when a request omits one (per-request "
+                         "ETSI extensions still override). qkd_prefer = QKD if a QKD path exists, else PQC.")
     ap.add_argument("--mcf-period-ms", type=int, default=5000)
     ap.add_argument("--binaries", default=str(Path(os.environ.get("LUSTRE", "")) / "dkms-build/target/release"),
                     help="dir with the 5 release binaries")
@@ -240,7 +253,24 @@ def main() -> None:
     host_of = {nid: hosts[i % len(hosts)] for i, nid in enumerate(ids)}
     sdn_ip = hosts[0]
 
-    # Per-edge quditto: placed on the lower-id endpoint's host.
+    # Classify which edges are PQC (no quditto, ML-KEM handshake in QKC).
+    # Threshold takes precedence over fraction; both off → all QKD.
+    def _edge_dist(ln: dict) -> float:
+        return float(ln.get("distance_km", 0) or 0)
+
+    pqc_edges: set[tuple[int, int]] = set()
+    if args.pqc_distance_threshold_km and args.pqc_distance_threshold_km > 0:
+        for (a, b, ln) in edges:
+            if _edge_dist(ln) >= args.pqc_distance_threshold_km:
+                pqc_edges.add((a, b))
+    elif args.pqc_fraction and args.pqc_fraction > 0:
+        frac = min(max(args.pqc_fraction, 0.0), 1.0)
+        ordered = sorted(edges, key=lambda e: (-_edge_dist(e[2]), e[0], e[1]))
+        for (a, b, _ln) in ordered[: round(len(ordered) * frac)]:
+            pqc_edges.add((a, b))
+
+    # Per-edge quditto: placed on the lower-id endpoint's host. PQC edges
+    # carry the same metadata for record-keeping but spawn no quditto.
     edge_qd: dict[tuple[int, int], dict] = {}
     for e_idx, (a, b, ln) in enumerate(edges):
         edge_qd[(a, b)] = {
@@ -250,6 +280,7 @@ def main() -> None:
             "alpha": ln.get("quditto_rate_alpha", args.qd_alpha),
             "distance": ln.get("distance_km", 0),
             "max_buffer": args.qd_max_buffer,
+            "is_pqc": (a, b) in pqc_edges,
         }
 
     def qd_for(i: int, j: int) -> dict:
@@ -309,6 +340,7 @@ def main() -> None:
                     "quditto_rate_r0": qd["r0"],
                     "quditto_rate_alpha": qd["alpha"],
                     "quditto_max_buffer_size": qd["max_buffer"],
+                    "link_type": "pqc" if qd["is_pqc"] else "qkd",
                 },
             })
         (topo / "QKC" / f"qkc-{nid}.json").write_text(json.dumps({
@@ -354,11 +386,17 @@ def main() -> None:
         for j in adj[nid]:
             pj = site_ports(idx_of[j])
             qd = qd_for(nid, j)
+            # neighbor_peer_addr siempre (los PQC usan ese TCP para el
+            # handshake ML-KEM); quditto_url SOLO en QKD.
             links += (f'\n[[links]]\n'
                       f'neighbor_id = {j}\n'
-                      f'neighbor_peer_addr = "{host_of[j]}:{pj["qkc_peer"]}"\n'
-                      f'quditto_url = "http://{qd["host_ip"]}:{qd["port"]}"\n'
-                      f'key_size_bits = {args.key_bits}\n')
+                      f'neighbor_peer_addr = "{host_of[j]}:{pj["qkc_peer"]}"\n')
+            if qd["is_pqc"]:
+                links += (f'link_type = "pqc"\n'
+                          f'pqc_suite = "{args.pqc_suite}"\n')
+            else:
+                links += f'quditto_url = "http://{qd["host_ip"]}:{qd["port"]}"\n'
+            links += f'key_size_bits = {args.key_bits}\n'
         write(out / "sites" / f"site-{nid}" / "qkc.toml",
               f'qkc_id = {nid}\n'
               f'peer_listen = "0.0.0.0:{p["qkc_peer"]}"\n'
@@ -395,7 +433,8 @@ def main() -> None:
                            f'orr_id = "orr_{j}"\n')
         binds = "".join(f'{sid} = "{did}"\n' for sid, did in sorted(sae_bindings.items()))
         write(out / "sites" / f"site-{nid}" / "dkms" / "default.toml",
-              f'node_id = "dkms-{nid}"\n\n'
+              f'node_id = "dkms-{nid}"\n'
+              f'default_security_level = "{args.security_level}"\n\n'
               f'[listen]\n'
               f'sae_addr = "0.0.0.0:{p["dkms_sae"]}"\n'
               f'peer_addr = "0.0.0.0:{p["dkms_peer"]}"\n'
@@ -440,6 +479,8 @@ def main() -> None:
     })
     for (a, b, ln) in edges:
         qd = edge_qd[(a, b)]
+        if qd["is_pqc"]:
+            continue  # PQC edge: no quditto process (keys derived in-QKC)
         procs.append({
             "name": f"qd-{a}-{b}", "role": "quditto", "phase": 1, "host_ip": qd["host_ip"],
             "host_index": idx_of[a],
@@ -497,7 +538,8 @@ def main() -> None:
         (out / "roundtrip_pairs.json").write_text(json.dumps(roundtrip_pairs, indent=2))
 
     plan = {
-        "meta": {"topo": args.topo, "N": N, "edges": len(edges), "hosts": hosts,
+        "meta": {"topo": args.topo, "N": N, "edges": len(edges),
+                 "pqc_edges": sorted([list(e) for e in pqc_edges]), "hosts": hosts,
                  "saes_per_dkms": args.saes_per_dkms, "key_bits": args.key_bits,
                  "out": str(out), "binaries": str(bindir)},
         "ids": ids, "host_of": {str(k): v for k, v in host_of.items()},
@@ -508,8 +550,9 @@ def main() -> None:
     }
     (out / "plan.json").write_text(json.dumps(plan, indent=2))
 
-    print(f"[gen] topo={args.topo} N={N} edges={len(edges)} hosts={hosts}")
-    print(f"[gen] sites={N} qudittos={len(edges)} saes={len(sae_specs)} procs={len(procs)}")
+    n_pqc = len(pqc_edges)
+    print(f"[gen] topo={args.topo} N={N} edges={len(edges)} (qkd={len(edges) - n_pqc} pqc={n_pqc}) hosts={hosts}")
+    print(f"[gen] sites={N} qudittos={len(edges) - n_pqc} saes={len(sae_specs)} procs={len(procs)}")
     print(f"[gen] out={out}")
     print(f"[gen] plan={out / 'plan.json'}")
 

@@ -14,10 +14,12 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::{
-    config::{LinkConfig, QkcConfig},
+    config::{LinkConfig, LinkType, QkcConfig},
     error::QkcError,
     keystore::{self, KeyStore},
-    kme::KmeClient,
+    kme::{KeySource, KmeClient},
+    pqc_handshake::PqcHandshake,
+    pqc_source::PqcKeySource,
     routing::ForwardingTable,
     transport::peer_client::PeerOut,
 };
@@ -58,10 +60,16 @@ pub struct ServiceStats {
 /// Estado por enlace al vecino directo.
 pub struct LinkRuntime {
     pub cfg: LinkConfig,
-    pub kme: Arc<KmeClient>,
+    /// Fuente de claves del enlace: quditto-QKD ([`KmeClient`]) o PQC
+    /// ([`PqcKeySource`]). El KeyStore solo la usa vía el trait.
+    pub kme: Arc<dyn KeySource>,
     /// Buffers ENC/DEC + workers que mantienen las claves en memoria
     /// para no pasar por HTTP en el hot path.
     pub keys: Arc<KeyStore>,
+    /// Coordinador del handshake ML-KEM (solo enlaces PQC; `None` en QKD).
+    /// Lo consulta `peer_server` al recibir frames de handshake y lo
+    /// arranca `bootstrap_keystores`.
+    pub pqc: Option<Arc<PqcHandshake>>,
 }
 
 #[derive(Clone)]
@@ -81,12 +89,40 @@ impl QkcService {
         let peer_out = Arc::new(PeerOut::new());
         let mut links = HashMap::with_capacity(cfg.links.len());
         let mut direct = HashSet::with_capacity(cfg.links.len());
+        // Direct neighbours reachable over a QKD link — a QKD-grade frame may
+        // short-circuit only through these (a direct PQC neighbour must route
+        // via the QKD table, possibly around a multi-hop QKD path).
+        let mut direct_qkd = HashSet::with_capacity(cfg.links.len());
         for link in &cfg.links {
-            let kme = Arc::new(KmeClient::new(
-                link.quditto_url.clone(),
-                cfg.qkc_id.to_string(),
-                link.key_size_bits,
-            )?);
+            // La fuente de claves depende del tipo de enlace; el resto del
+            // KeyStore es idéntico (mismo hot path, mismo NOTIFY).
+            let (kme, pqc): (Arc<dyn KeySource>, Option<Arc<PqcHandshake>>) = match link.link_type {
+                LinkType::Qkd => {
+                    let url = link.quditto_url.clone().ok_or_else(|| {
+                        QkcError::BadRequest(format!(
+                            "QKD link to {} missing quditto_url",
+                            link.neighbor_id
+                        ))
+                    })?;
+                    let c = Arc::new(KmeClient::new(
+                        url,
+                        cfg.qkc_id.to_string(),
+                        link.key_size_bits,
+                    )?);
+                    (c as Arc<dyn KeySource>, None)
+                }
+                LinkType::Pqc => {
+                    let (hs, secret_rx) = PqcHandshake::new(
+                        link.pqc_suite.clone(),
+                        cfg.qkc_id,
+                        link.neighbor_id,
+                        link.neighbor_peer_addr.clone(),
+                        Arc::clone(&peer_out),
+                    );
+                    let src = Arc::new(PqcKeySource::new(link.key_size_bits, secret_rx));
+                    (src as Arc<dyn KeySource>, Some(hs))
+                }
+            };
             let keys = KeyStore::new(
                 Arc::clone(&kme),
                 Arc::clone(&peer_out),
@@ -101,11 +137,15 @@ impl QkcService {
                     cfg: link.clone(),
                     kme,
                     keys,
+                    pqc,
                 },
             );
             direct.insert(link.neighbor_id);
+            if link.link_type == LinkType::Qkd {
+                direct_qkd.insert(link.neighbor_id);
+            }
         }
-        let routing = ForwardingTable::new(direct);
+        let routing = ForwardingTable::new_with_grades(direct, direct_qkd);
         Ok(Self {
             cfg: Arc::new(cfg),
             routing: Arc::new(routing),
@@ -122,6 +162,13 @@ impl QkcService {
         let mut for_logger = Vec::with_capacity(self.links.len());
         for (peer_id, link) in self.links.iter() {
             link.keys.spawn_workers();
+            // Enlaces PQC: arranca el handshake ML-KEM (no-op en el lado
+            // respondedor; el iniciador es el de qkc_id menor). Los workers
+            // del KeyStore ya esperan el secreto vía el watch, así que no
+            // hay carrera con el orden de arranque.
+            if let Some(pqc) = &link.pqc {
+                pqc.spawn_initiator();
+            }
             for_logger.push((*peer_id, Arc::clone(&link.keys)));
         }
         keystore::spawn_level_logger(for_logger, Duration::from_secs(5));

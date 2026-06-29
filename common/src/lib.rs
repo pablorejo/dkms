@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod logging;
 pub mod metrics;
 pub mod net;
+pub mod security;
 pub mod tls;
 
 /// Auto-generated protobuf types and gRPC stubs.
@@ -58,5 +59,6 @@ pub mod prelude {
         error::CommonError,
         ids::{KeyId, LinkId, NodeId, SaeId},
         logging,
+        security::{GradeResolution, KeyGrade, SecurityLevel},
     };
 }

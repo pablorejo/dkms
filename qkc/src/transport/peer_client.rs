@@ -126,7 +126,10 @@ impl PeerOut {
             last_drop_warn_micros: AtomicU64::new(0),
             connected: AtomicBool::new(false),
         });
-        let entry = self.peers.entry(peer_id).or_insert_with(|| candidate.clone());
+        let entry = self
+            .peers
+            .entry(peer_id)
+            .or_insert_with(|| candidate.clone());
         let stored = entry.value().clone();
         drop(entry);
         // Solo arrancar el writer si nuestro candidato fue el que quedó

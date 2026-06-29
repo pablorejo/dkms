@@ -29,6 +29,7 @@ pub mod etsi_http;
 pub mod grpc_server;
 pub mod peer_client;
 pub mod sae_binding;
+pub mod security_level;
 pub mod service;
 pub mod southbound;
 pub mod state;

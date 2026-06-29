@@ -53,6 +53,13 @@ tracing-subscriber = { workspace = true }
 # Crypto + IDs.
 uuid   = { workspace = true }
 base64 = { workspace = true }
+# PQC links: ML-KEM llega vía `common::crypto::pqc`; aquí solo el KDF
+# (HKDF-SHA256) para derivar el flujo de claves y el borrado seguro del
+# secreto compartido.
+async-trait = { workspace = true }
+hkdf        = { workspace = true }
+sha2        = { workspace = true }
+zeroize     = { version = "1.8", features = ["zeroize_derive"] }
 
 # Concurrencia: ArcSwap para la forwarding table (lectura lock-free),
 # DashMap para tablas de conexiones y mapas por peer, crossbeam-queue

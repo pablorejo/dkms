@@ -49,6 +49,10 @@ pub fn compute(
     let mut bottleneck = f64::INFINITY;
     for w in nodes.windows(2) {
         if let Some(meta) = topo.edge(&w[0], &w[1]) {
+            // PQC hops are uncapacitated; they must not cap the bottleneck.
+            if meta.is_pqc() {
+                continue;
+            }
             bottleneck = bottleneck.min(meta.quditto_capacity_keys_per_second());
         }
     }

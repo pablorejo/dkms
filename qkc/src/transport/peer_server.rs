@@ -13,7 +13,10 @@ use std::sync::Arc;
 use tokio::{net::TcpStream, sync::Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use wire::{decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_RECV, FRAME_RELAY};
+use wire::{
+    decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_PQC_KEM_INIT,
+    FRAME_PQC_KEM_RESP, FRAME_RECV, FRAME_RELAY,
+};
 
 use crate::{relay, service::QkcService};
 
@@ -89,6 +92,11 @@ async fn handle_conn(
                 // bloquear el flujo de datos por backpressure.
                 handle_notify(svc.clone(), frame);
             }
+            // Handshake ML-KEM de enlaces PQC. Síncrono (encap/decap son
+            // µs de CPU); los frames de un peer se procesan en orden, así
+            // que no hay encap/decap concurrentes para un mismo enlace.
+            FRAME_PQC_KEM_INIT => handle_pqc(svc.clone(), frame, true),
+            FRAME_PQC_KEM_RESP => handle_pqc(svc.clone(), frame, false),
             other => {
                 debug!(kind = other, "qkc.peer_server.unknown_kind");
             }
@@ -116,4 +124,24 @@ fn handle_notify(svc: QkcService, frame: wire::Frame) {
     let n = ids.len();
     link.keys.notify_remote_enc(ids);
     debug!(sender, ids = n, "qkc.notify");
+}
+
+/// Handshake ML-KEM de un enlace PQC. `is_init = true` → el frame es un
+/// `FRAME_PQC_KEM_INIT` (somos respondedor); `false` → `FRAME_PQC_KEM_RESP`
+/// (somos iniciador). El payload lleva la pubkey o el ciphertext.
+fn handle_pqc(svc: QkcService, frame: wire::Frame, is_init: bool) {
+    let sender = frame.sender_id;
+    let Some(link) = svc.link_to(sender) else {
+        warn!(sender, "qkc.pqc: unknown neighbor");
+        return;
+    };
+    let Some(pqc) = &link.pqc else {
+        warn!(sender, "qkc.pqc: frame on non-PQC link, ignoring");
+        return;
+    };
+    if is_init {
+        pqc.handle_init(&frame.payload);
+    } else {
+        pqc.handle_resp(&frame.payload);
+    }
 }

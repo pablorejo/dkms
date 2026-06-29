@@ -441,6 +441,7 @@ pub(crate) mod tests {
                 r0_keys_per_second: 100.0,
                 alpha: 0.2,
                 max_buffer_size: 10,
+                ..Default::default()
             },
         );
         t.add_edge(
@@ -451,6 +452,7 @@ pub(crate) mod tests {
                 r0_keys_per_second: 100.0,
                 alpha: 0.2,
                 max_buffer_size: 10,
+                ..Default::default()
             },
         );
         t.upsert_orr(Orr {
@@ -526,6 +528,7 @@ pub(crate) mod tests {
                 capacity: cap,
                 drain_rate: drain,
                 timestamp_ms: 1,
+                grade: Default::default(),
             }],
         });
     }

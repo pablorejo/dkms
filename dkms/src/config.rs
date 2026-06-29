@@ -15,6 +15,7 @@
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
+use common::security::SecurityLevel;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,24 @@ pub struct DkmsConfig {
 
     #[serde(default)]
     pub generator: GeneratorCfg,
+
+    /// Nivel de seguridad por defecto cuando una petición no especifica uno
+    /// (vía extensions ETSI 014) y el peer destino no tiene override. Default
+    /// `qkd_prefer`: usar QKD si hay camino QKD, si no PQC. Ver
+    /// [`common::security::SecurityLevel`].
+    #[serde(default)]
+    pub default_security_level: SecurityLevel,
+}
+
+impl DkmsConfig {
+    /// Nivel de seguridad por defecto a aplicar para un peer destino: su
+    /// override en [`PeerCfg`] si existe, si no el global del DKMS.
+    pub fn security_level_for(&self, peer: &str) -> SecurityLevel {
+        self.peers
+            .get(peer)
+            .and_then(|p| p.security_level)
+            .unwrap_or(self.default_security_level)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +152,13 @@ pub struct PeerCfg {
     /// la SDN no calcule paths en Rust.
     #[serde(default)]
     pub orr_path: Option<String>,
+
+    /// Override del nivel de seguridad por defecto para peticiones cuyo
+    /// destino es este peer. Si ausente, usa `DkmsConfig.default_security_level`.
+    /// Una petición ETSI 014 con `security_level` en sus extensions tiene
+    /// precedencia sobre este default. Ver [`DkmsConfig::security_level_for`].
+    #[serde(default)]
+    pub security_level: Option<SecurityLevel>,
 }
 
 /// Selector de transporte por peer.

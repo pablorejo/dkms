@@ -134,6 +134,16 @@ async fn get_rate(
             Json(json!({"error": format!("dkms {dkms_id} unknown")})),
         );
     }
+    // Per-destination connectivity, so the polling DKMS can resolve a
+    // request's security level (`strict_qkd`/`qkd_prefer`/`no_worry`) into a
+    // key grade via `common::security::SecurityLevel::resolve_grade`:
+    //   * `qkd_available` — a strictly-QKD path exists to the peer (same QKD
+    //     component) → QKD-grade keys are routable.
+    //   * `reachable` — any path exists (full graph) → at least PQC-grade.
+    // Both are topology properties (immutable until restart), independent of
+    // whether the LP has produced rates yet.
+    let my_qkc = topology.qkc_of_dkms(&dkms_id);
+    let qkd_comp = topology.qkd_components();
     let mut peers = serde_json::Map::new();
     if let Some(my_rates) = snap.rates_by_dkms.get(&dkms_id) {
         let mut grouped: std::collections::HashMap<String, (f64, f64)> =
@@ -146,7 +156,28 @@ async fn get_rate(
             }
         }
         for (peer, (enc, dec)) in grouped {
-            peers.insert(peer, json!({"enc": enc, "dec": dec}));
+            let peer_qkc = topology.qkc_of_dkms(&peer);
+            let (qkd_available, reachable) = match (my_qkc, peer_qkc) {
+                (Some(a), Some(b)) => {
+                    let qkd = a == b
+                        || matches!(
+                            (qkd_comp.get(a), qkd_comp.get(b)),
+                            (Some(x), Some(y)) if x == y
+                        );
+                    let reach = topology.shortest_path_qkc(a, b).is_some();
+                    (qkd, reach)
+                }
+                _ => (false, false),
+            };
+            peers.insert(
+                peer,
+                json!({
+                    "enc": enc,
+                    "dec": dec,
+                    "qkd_available": qkd_available,
+                    "reachable": reachable,
+                }),
+            );
         }
     }
     let topo_version = topology.version;
@@ -173,7 +204,14 @@ async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
                 "r0_keys_per_second": meta.r0_keys_per_second,
                 "alpha":              meta.alpha,
                 "max_buffer_size":    meta.max_buffer_size,
-                "capacity_keys_per_second": meta.quditto_capacity_keys_per_second(),
+                "link_type":          if meta.is_pqc() { "pqc" } else { "qkd" },
+                // PQC edges are uncapacitated → report null instead of a
+                // misleading finite QKD-rate.
+                "capacity_keys_per_second": if meta.is_pqc() {
+                    serde_json::Value::Null
+                } else {
+                    json!(meta.quditto_capacity_keys_per_second())
+                },
             })
         })
         .collect();
@@ -549,7 +587,7 @@ mod tests {
     async fn spawn_server(svc: SdnService) -> String {
         let app = Router::new()
             .route("/demand", post(post_demand).get(get_demand))
-        .route("/wcmp", get(get_wcmp))
+            .route("/wcmp", get(get_wcmp))
             .with_state(svc);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

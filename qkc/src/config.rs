@@ -10,16 +10,27 @@
 //! admin_http   = "0.0.0.0:7200"
 //!
 //! # Una entrada por enlace (vecino directo).
+//! #
+//! # Cada enlace es QKD (default) o PQC:
+//! #   * QKD — pide claves al quditto compartido por ETSI 014. Requiere
+//! #     `quditto_url`.
+//! #   * PQC — sin quditto: los dos QKC hacen un handshake ML-KEM sobre el
+//! #     canal TCP QKC↔QKC y derivan de él un flujo de claves. NO lleva
+//! #     `quditto_url`; opcionalmente `pqc_suite` (default ml-kem-768).
+//!
 //! [[links]]
 //! neighbor_id        = 2
 //! neighbor_peer_addr = "127.0.0.1:7002"
+//! link_type          = "qkd"                     # default si se omite
 //! quditto_url        = "http://127.0.0.1:8081"   # el quditto compartido del enlace 1↔2
 //! key_size_bits      = 256
 //!
 //! [[links]]
 //! neighbor_id        = 3
 //! neighbor_peer_addr = "127.0.0.1:7003"
-//! quditto_url        = "http://127.0.0.1:8082"   # quditto distinto, del enlace 1↔3
+//! link_type          = "pqc"                     # enlace PQC: sin quditto
+//! pqc_suite          = "ml-kem-768"              # opcional
+//! key_size_bits      = 256
 //! ```
 
 use std::path::Path;
@@ -27,6 +38,20 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::QkcError;
+
+/// Tipo de canal de un enlace QKC↔QKC.
+///
+/// * `Qkd` (default) — material OTP servido por el quditto compartido del
+///   enlace (ETSI 014). Es el comportamiento histórico.
+/// * `Pqc` — sin quditto: los dos QKC acuerdan un secreto vía ML-KEM y
+///   derivan de él un flujo determinista de claves que imita al feed QKD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkType {
+    #[default]
+    Qkd,
+    Pqc,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QkcConfig {
@@ -51,23 +76,42 @@ pub struct LinkConfig {
     /// ID del QKC vecino al otro lado del enlace.
     pub neighbor_id: u32,
 
-    /// `host:port` del listener TCP-peer de ese QKC.
+    /// `host:port` del listener TCP-peer de ese QKC. Necesario para AMBOS
+    /// tipos de enlace: los QKD relayean frames por él y los PQC además
+    /// hacen el handshake ML-KEM por este mismo canal.
     pub neighbor_peer_addr: String,
+
+    /// Tipo de canal: `qkd` (default) o `pqc`. Ver [`LinkType`].
+    #[serde(default)]
+    pub link_type: LinkType,
 
     /// URL base del quditto compartido por los dos QKCs (este lado y
     /// el vecino apuntan al mismo). Sirve ETSI 014 en
-    /// `/api/v1/keys/{sae_id}/{enc,dec}_keys`.
-    pub quditto_url: String,
+    /// `/api/v1/keys/{sae_id}/{enc,dec}_keys`. **Solo para enlaces QKD**
+    /// (obligatorio); los PQC no lo llevan.
+    #[serde(default)]
+    pub quditto_url: Option<String>,
+
+    /// Parameter set ML-KEM para el handshake de los enlaces PQC. Ignorado
+    /// en enlaces QKD. Default: `ml-kem-768`. Ver
+    /// [`common::crypto::pqc::suite`].
+    #[serde(default = "default_pqc_suite")]
+    pub pqc_suite: String,
 
     /// Tamaño de la clave OTP en bits. Default: 1024 (mejor amortización
     /// del HTTP a quditto que con 256, ya que 1 clave cubre 128 B de
-    /// payload).
+    /// payload). En enlaces PQC fija la longitud del material derivado por
+    /// clave; debe ser idéntico en ambos extremos.
     #[serde(default = "default_key_size")]
     pub key_size_bits: u32,
 }
 
 fn default_key_size() -> u32 {
     1024
+}
+
+fn default_pqc_suite() -> String {
+    common::crypto::pqc::suite::ML_KEM_768.to_string()
 }
 
 impl QkcConfig {
@@ -94,7 +138,100 @@ impl QkcConfig {
                     link.key_size_bits
                 )));
             }
+            match link.link_type {
+                LinkType::Qkd => {
+                    if link.quditto_url.is_none() {
+                        return Err(QkcError::BadRequest(format!(
+                            "QKD link to {} requires quditto_url",
+                            link.neighbor_id
+                        )));
+                    }
+                }
+                LinkType::Pqc => {
+                    if link.quditto_url.is_some() {
+                        return Err(QkcError::BadRequest(format!(
+                            "PQC link to {} must not set quditto_url",
+                            link.neighbor_id
+                        )));
+                    }
+                    // Rechaza un suite desconocido en carga, no en el handshake.
+                    common::crypto::pqc::kem_for(&link.pqc_suite).map_err(|e| {
+                        QkcError::BadRequest(format!(
+                            "PQC link to {}: invalid pqc_suite {:?}: {e}",
+                            link.neighbor_id, link.pqc_suite
+                        ))
+                    })?;
+                }
+            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "qkc_id = 1\n\
+        peer_listen = \"0.0.0.0:7001\"\n\
+        local_listen = \"0.0.0.0:7100\"\n\
+        admin_http = \"0.0.0.0:7200\"\n";
+
+    fn parse(toml_str: &str) -> QkcConfig {
+        toml::from_str(toml_str).expect("valid TOML")
+    }
+
+    #[test]
+    fn link_without_type_defaults_to_qkd_and_needs_quditto() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             quditto_url = \"http://127.0.0.1:8081\"\nkey_size_bits = 256\n"
+        ));
+        assert_eq!(cfg.links[0].link_type, LinkType::Qkd);
+        cfg.validate().expect("QKD link with quditto_url is valid");
+    }
+
+    #[test]
+    fn qkd_link_without_quditto_url_is_rejected() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             key_size_bits = 256\n"
+        ));
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pqc_link_parses_without_quditto_and_validates() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"pqc\"\nkey_size_bits = 256\n"
+        ));
+        assert_eq!(cfg.links[0].link_type, LinkType::Pqc);
+        assert!(cfg.links[0].quditto_url.is_none());
+        // suite por defecto.
+        assert_eq!(
+            cfg.links[0].pqc_suite,
+            common::crypto::pqc::suite::ML_KEM_768
+        );
+        cfg.validate()
+            .expect("PQC link without quditto_url is valid");
+    }
+
+    #[test]
+    fn pqc_link_with_quditto_url_is_rejected() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"pqc\"\nquditto_url = \"http://127.0.0.1:8081\"\nkey_size_bits = 256\n"
+        ));
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pqc_link_with_unknown_suite_is_rejected() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"pqc\"\npqc_suite = \"kyber-classic\"\nkey_size_bits = 256\n"
+        ));
+        assert!(cfg.validate().is_err());
     }
 }

@@ -90,6 +90,10 @@ pub struct Generator {
     peers_orr: Arc<HashMap<String, String>>,
     /// Rate cacheada por (peer, role). Solo usamos role=Enc para refill.
     rates_enc: Arc<Mutex<HashMap<String, f64>>>,
+    /// `peer_dkms_id → qkd_available`, refrescado de `/rate` junto a las
+    /// rates. Lo consulta `DkmsService::handle_enc_keys` para el admission
+    /// de `strict_qkd` (rechaza si el SDN reporta que no hay camino QKD).
+    qkd_avail: Arc<Mutex<HashMap<String, bool>>>,
     buckets: Arc<Mutex<HashMap<String, BucketState>>>,
     /// Contador acumulativo de claves que llegaron a `buffer_enc[peer]`
     /// vía ACK. Permite calcular la **rate efectiva de fill** comparando
@@ -149,6 +153,7 @@ impl Generator {
             my_dkms_id: cfg.node_id.clone(),
             peers_orr: Arc::new(peers_orr),
             rates_enc: Arc::new(Mutex::new(HashMap::new())),
+            qkd_avail: Arc::new(Mutex::new(HashMap::new())),
             buckets: Arc::new(Mutex::new(HashMap::new())),
             emit_counters: Arc::new(Mutex::new(HashMap::new())),
             pool,
@@ -167,6 +172,13 @@ impl Generator {
     /// para calcular `refill = capacity / N_active_SAEs`.
     pub fn rates_handle(&self) -> Arc<Mutex<HashMap<String, f64>>> {
         self.rates_enc.clone()
+    }
+
+    /// Conectividad QKD del peer según el último `/rate`: `Some(true|false)`
+    /// si el SDN ya respondió, `None` en bootstrap (aún sin info). El
+    /// admission de `strict_qkd` solo rechaza ante `Some(false)`.
+    pub fn qkd_available(&self, peer: &str) -> Option<bool> {
+        self.qkd_avail.lock().get(peer).copied()
     }
 
     /// Obtiene (o crea) el counter acumulativo para un peer.
@@ -324,14 +336,17 @@ impl Generator {
             match self.sdn_http.get_rates(&self.my_dkms_id).await {
                 Ok(resp) => {
                     let mut by_peer: HashMap<String, f64> = HashMap::new();
+                    let mut qkd: HashMap<String, bool> = HashMap::new();
                     for (peer, rate) in resp.peers.iter() {
                         // Solo nos interesa la rate de ENC (generación).
                         // DEC la lleva el SDN simétricamente pero no la
                         // usamos para refill del bucket local.
                         by_peer.insert(peer.clone(), rate.enc);
+                        qkd.insert(peer.clone(), rate.qkd_available);
                     }
                     let n = by_peer.len();
                     *self.rates_enc.lock() = by_peer;
+                    *self.qkd_avail.lock() = qkd;
                     backoff_ms = 500;
                     debug!(
                         peers = n,

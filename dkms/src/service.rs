@@ -290,6 +290,30 @@ impl DkmsService {
         let remote_peer_ids: Vec<String> =
             remote_groups.iter().map(|(n, _)| n.to_string()).collect();
 
+        // Security-level admission. Resolve the requested level (validates a
+        // mandatory `security_level` extension — an unknown token → 4xx). A
+        // `strict_qkd` request to a peer the SDN reports as QKD-unreachable
+        // cannot be served (no QKD-grade key path exists), so reject it up
+        // front rather than hand back a weaker PQC-grade key. Unknown
+        // connectivity (bootstrap, or no generator wired) is permissive —
+        // enforcement kicks in once the first `/rate` poll lands.
+        let requested_level =
+            crate::security_level::requested(&body).map_err(DkmsError::BadRequest)?;
+        for peer_id in &remote_peer_ids {
+            let level = requested_level.unwrap_or_else(|| self.cfg.security_level_for(peer_id));
+            if level == common::security::SecurityLevel::StrictQkd
+                && self
+                    .generator
+                    .as_ref()
+                    .and_then(|g| g.qkd_available(peer_id))
+                    == Some(false)
+            {
+                return Err(DkmsError::BadRequest(format!(
+                    "strict_qkd requested but SDN reports no QKD path to dkms {peer_id}"
+                )));
+            }
+        }
+
         // Record SAE demand for the MCMCF-λ solver — keys/s per
         // (self, peer) commodity. Done BEFORE the bucket admission
         // call below, so a rate-limited request still shows up as

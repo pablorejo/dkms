@@ -34,7 +34,7 @@ use uuid::Uuid;
 use wire::{encode_notify_payload, Frame, FRAME_KEY_IDS_NOTIFY};
 
 use crate::{
-    kme::{KmeClient, OtpKey},
+    kme::{KeySource, OtpKey},
     transport::peer_client::PeerOut,
 };
 
@@ -65,8 +65,9 @@ pub struct KeyStore {
     /// Mapa de claves esperadas para descifrar (las del peer hacia mí).
     dec: DashMap<Uuid, Vec<u8>>,
 
-    /// Cliente HTTP al quditto compartido.
-    kme: Arc<KmeClient>,
+    /// Fuente de claves del enlace (quditto-QKD o PQC). El KeyStore es
+    /// agnóstico al tipo: solo llama a `enc_keys`/`dec_keys`.
+    kme: Arc<dyn KeySource>,
 
     /// Para mandar `FRAME_KEY_IDS_NOTIFY` al peer cuando rellenamos
     /// nuestro buffer ENC.
@@ -121,7 +122,7 @@ pub struct KeyStore {
 
 impl KeyStore {
     pub fn new(
-        kme: Arc<KmeClient>,
+        kme: Arc<dyn KeySource>,
         peer_out: Arc<PeerOut>,
         peer_id: u32,
         peer_addr: String,

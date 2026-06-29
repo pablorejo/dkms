@@ -28,7 +28,7 @@
 //! ```text
 //! Prefijo fijo (10 B):
 //!   MAGIC      4 B  = b"\x51\x4B\x43\x03"   ('Q','K','C', v3)
-//!   FRAME_TYPE 1 B  = 0x01..0x20
+//!   FRAME_TYPE 1 B  = 0x01..0x22
 //!   RESERVED   1 B  = 0x00
 //!   TOTAL_LEN  4 B  u32 LE — bytes restantes (no incluye prefijo)
 //!
@@ -99,6 +99,21 @@ pub const FRAME_LOCAL_DELIVER: u8 = 0x11;
 /// `key_ids` y los tres headers van vacíos en este tipo de frame.
 pub const FRAME_KEY_IDS_NOTIFY: u8 = 0x20;
 
+/// QKC_A → QKC_B (enlace **PQC**): primer paso del handshake ML-KEM. El
+/// iniciador (qkc_id menor) manda su clave pública ML-KEM en `payload`.
+/// `key_ids` y los tres headers van vacíos.
+pub const FRAME_PQC_KEM_INIT: u8 = 0x21;
+/// QKC_B → QKC_A (enlace **PQC**): respuesta del handshake ML-KEM. El
+/// respondedor manda el ciphertext de la encapsulación en `payload`; ambos
+/// extremos quedan con el mismo secreto de 32 B. `key_ids` y los tres
+/// headers van vacíos.
+pub const FRAME_PQC_KEM_RESP: u8 = 0x22;
+
+/// Valores del campo [`Frame::grade`] (byte RESERVED del prefijo).
+/// `0` = QKD-grade (todo el camino QKD; default), `1` = PQC-grade (≥1 salto PQC).
+pub const GRADE_QKD: u8 = 0;
+pub const GRADE_PQC: u8 = 1;
+
 const FIXED_PREFIX: usize = 4 + 1 + 1 + 4;
 const MAX_TOTAL_LEN: u32 = 64 * 1024 * 1024; // 64 MiB safety cap
 
@@ -118,6 +133,12 @@ pub enum WireError {
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub kind: u8,
+    /// Grado de seguridad de la clave que transporta el frame, en el byte
+    /// RESERVED del prefijo: `0` = QKD-grade (default), `1` = PQC-grade. El
+    /// QKC lo usa para elegir la tabla de forwarding (solo-QKD vs full) y así
+    /// preservar la invariante "una clave QKD-grade nunca cruza un enlace PQC".
+    /// El reader lo rellena desde el prefijo (igual que `kind`).
+    pub grade: u8,
     pub sender_id: u32,
     pub receiver_id: u32,
     pub dest_final: u32,
@@ -146,6 +167,7 @@ impl Frame {
     pub fn empty(kind: u8) -> Self {
         Self {
             kind,
+            grade: 0,
             sender_id: 0,
             receiver_id: 0,
             dest_final: 0,
@@ -185,7 +207,7 @@ impl Frame {
         let mut buf = BytesMut::with_capacity(FIXED_PREFIX + body_len);
         buf.put_slice(&MAGIC);
         buf.put_u8(self.kind);
-        buf.put_u8(0);
+        buf.put_u8(self.grade); // RESERVED byte now carries the key grade
         buf.put_u32_le(body_len as u32);
 
         buf.put_u32_le(self.sender_id);
@@ -242,7 +264,8 @@ impl Frame {
         let payload = body[..payload_len].to_vec();
 
         Ok(Frame {
-            kind: 0, // caller fills in
+            kind: 0,  // caller fills in (from prefix)
+            grade: 0, // caller fills in (from prefix RESERVED byte)
             sender_id,
             receiver_id,
             dest_final,
@@ -287,6 +310,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Frame, W
     stream.read_exact(&mut body).await?;
     let mut f = Frame::decode_body(&body)?;
     f.kind = kind;
+    f.grade = prefix[5]; // RESERVED byte carries the key grade
     Ok(f)
 }
 
@@ -342,8 +366,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grade_rides_reserved_prefix_byte() {
+        // Default grade is 0 (QKD-grade).
+        assert_eq!(Frame::empty(FRAME_RELAY).grade, 0);
+        assert_eq!(Frame::empty(FRAME_RELAY).encode()[5], 0);
+        // A PQC-grade frame writes 1 at the RESERVED prefix byte (index 5),
+        // which `read_frame` reads back into `Frame::grade`.
+        let mut f = Frame::empty(FRAME_RELAY);
+        f.grade = 1;
+        f.payload = vec![1, 2, 3];
+        let bytes = f.encode();
+        assert_eq!(bytes[5], 1, "grade must ride the RESERVED prefix byte");
+    }
+
+    #[test]
     fn roundtrip_all_three_headers() {
         let f = Frame {
+            grade: 0,
             kind: FRAME_RECV,
             sender_id: 1,
             receiver_id: 2,
@@ -374,6 +413,7 @@ mod tests {
         // Caso típico de FRAME_LOCAL_SEND inicial donde ni ORR ni DKMS
         // han metido aún sus headers.
         let f = Frame {
+            grade: 0,
             kind: FRAME_LOCAL_SEND,
             sender_id: 0,
             receiver_id: 0,
@@ -430,6 +470,7 @@ mod tests {
         // OBJ-003: roundtrip con epoch_id distinto de cero verifica que
         // el campo se escribe y se lee en BE correctamente.
         let f = Frame {
+            grade: 0,
             kind: FRAME_LOCAL_SEND,
             sender_id: 7,
             receiver_id: 11,
@@ -492,6 +533,34 @@ mod tests {
         assert_ne!(FRAME_LOCAL_SEND, FRAME_LOCAL_DELIVER);
         assert_ne!(FRAME_KEY_IDS_NOTIFY, FRAME_RECV);
         assert_ne!(FRAME_KEY_IDS_NOTIFY, FRAME_LOCAL_SEND);
+        // PQC handshake kinds distintos de todo lo demás y entre sí.
+        for k in [
+            FRAME_RECV,
+            FRAME_RELAY,
+            FRAME_ACK,
+            FRAME_LOCAL_SEND,
+            FRAME_LOCAL_DELIVER,
+            FRAME_KEY_IDS_NOTIFY,
+        ] {
+            assert_ne!(FRAME_PQC_KEM_INIT, k);
+            assert_ne!(FRAME_PQC_KEM_RESP, k);
+        }
+        assert_ne!(FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_RESP);
+    }
+
+    #[test]
+    fn pqc_kem_frame_round_trips_large_payload() {
+        // Una pubkey ML-KEM-768 son 1184 B; debe sobrevivir encode/decode.
+        let mut f = Frame::empty(FRAME_PQC_KEM_INIT);
+        f.sender_id = 7;
+        f.receiver_id = 9;
+        f.dest_final = 9;
+        f.payload = vec![0xABu8; 1184];
+        let bytes = f.encode();
+        let back = Frame::decode_body(&bytes[FIXED_PREFIX..]).unwrap();
+        assert_eq!(back.sender_id, 7);
+        assert_eq!(back.payload.len(), 1184);
+        assert_eq!(back.payload, f.payload);
     }
 
     #[test]

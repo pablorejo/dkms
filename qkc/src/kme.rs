@@ -59,6 +59,29 @@ pub struct KmeClient {
     inner: Arc<KmeInner>,
 }
 
+/// Fuente de claves OTP de un enlace QKC↔QKC.
+///
+/// Abstrae de dónde salen las claves para que el [`KeyStore`] sea
+/// agnóstico al tipo de canal:
+///
+/// * [`KmeClient`] — canal **QKD**: pide al quditto compartido por ETSI 014.
+/// * [`crate::pqc_source::PqcKeySource`] — canal **PQC**: deriva un flujo
+///   determinista de un secreto ML-KEM compartido (sin red).
+///
+/// Las dos únicas operaciones del hot path de relleno son `enc_keys`
+/// (claves frescas para cifrar) y `dec_keys` (recuperar las que el peer
+/// anunció vía `FRAME_KEY_IDS_NOTIFY`). Ambos extremos del enlace
+/// obtienen material idéntico para un mismo `key_id`.
+///
+/// [`KeyStore`]: crate::keystore::KeyStore
+#[async_trait::async_trait]
+pub trait KeySource: Send + Sync {
+    /// Devuelve `number` claves frescas (con sus `key_id`) para cifrar.
+    async fn enc_keys(&self, number: u32) -> Result<Vec<OtpKey>>;
+    /// Recupera el material de los `key_id` que anunció el peer.
+    async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>>;
+}
+
 impl KmeClient {
     pub fn new(base: String, sae_id: String, key_size_bits: u32) -> Result<Self> {
         // HTTP/1.1 con pool grande (compat con simple_quditto Python que
@@ -84,12 +107,15 @@ impl KmeClient {
     pub fn key_size_bits(&self) -> u32 {
         self.inner.key_size_bits
     }
+}
 
+#[async_trait::async_trait]
+impl KeySource for KmeClient {
     /// `GET /api/v1/keys/{sae_id}/enc_keys?number=N&size=B` con
     /// `Accept: application/json` (compat con simple_quditto Python que solo
     /// sirve ETSI 014 JSON; el path binario `application/octet-stream` se
     /// reactivará cuando el quditto Rust multi-link esté disponible).
-    pub async fn enc_keys(&self, number: u32) -> Result<Vec<OtpKey>> {
+    async fn enc_keys(&self, number: u32) -> Result<Vec<OtpKey>> {
         if number == 0 {
             return Ok(vec![]);
         }
@@ -142,7 +168,7 @@ impl KmeClient {
     }
 
     /// `POST /api/v1/keys/{sae_id}/dec_keys` con body JSON ETSI 014.
-    pub async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>> {
+    async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }

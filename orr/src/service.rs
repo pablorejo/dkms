@@ -317,6 +317,7 @@ impl OrrService {
         let header = OrrHeader::passthrough(&self.cfg.orr_id, dest_orr);
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
+            grade: 0,
             sender_id: self.cfg.qkc_id,
             receiver_id: self.cfg.qkc_id,
             dest_final: dest_qkc,
@@ -545,6 +546,7 @@ impl OrrService {
         );
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
+            grade: 0,
             sender_id: self.cfg.qkc_id,
             receiver_id: self.cfg.qkc_id,
             dest_final: next_qkc,
@@ -662,6 +664,7 @@ impl OrrService {
         );
         let out = Frame {
             kind: FRAME_LOCAL_SEND,
+            grade: 0,
             sender_id: self.cfg.qkc_id,
             receiver_id: self.cfg.qkc_id,
             dest_final: next_qkc_id,

@@ -90,6 +90,21 @@ pub enum BulkSaeOutcome {
     },
 }
 
+/// Channel kind of a QKC↔QKC link.
+///
+/// * `Qkd` (default) — keys come from the shared quditto; capacity is the
+///   distance-attenuated QKD rate (see [`EdgeMeta::quditto_capacity_keys_per_second`]).
+/// * `Pqc` — keys are derived from an ML-KEM secret in the QKC; the link is
+///   not QKD-rate-limited, so the MCMCF-λ solver treats it as **uncapacitated**
+///   (routable, no capacity constraint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkType {
+    #[default]
+    Qkd,
+    Pqc,
+}
+
 /// Physical metadata of a QKC↔QKC link.
 ///
 /// `r0_keys_per_second` × 10^(−α·d/10) gives the link's effective key-rate
@@ -104,6 +119,9 @@ pub struct EdgeMeta {
     pub alpha: f64,
     #[serde(default = "default_buf_size")]
     pub max_buffer_size: u32,
+    /// QKD (default) or PQC. PQC edges are uncapacitated in the MCF.
+    #[serde(default)]
+    pub link_type: LinkType,
 }
 
 fn default_r0() -> f64 {
@@ -123,6 +141,7 @@ impl Default for EdgeMeta {
             r0_keys_per_second: default_r0(),
             alpha: default_alpha(),
             max_buffer_size: default_buf_size(),
+            link_type: LinkType::default(),
         }
     }
 }
@@ -132,6 +151,11 @@ impl EdgeMeta {
     pub fn quditto_capacity_keys_per_second(&self) -> f64 {
         let exp = -self.alpha * self.distance_km as f64 / 10.0;
         (self.r0_keys_per_second * 10f64.powf(exp)).max(0.0)
+    }
+
+    /// `true` for PQC links (uncapacitated in the MCF).
+    pub fn is_pqc(&self) -> bool {
+        self.link_type == LinkType::Pqc
     }
 }
 
@@ -256,6 +280,64 @@ impl Topology {
     pub fn edge(&self, a: &str, b: &str) -> Option<&EdgeMeta> {
         self.edges.get(&edge_key(a, b))
     }
+
+    // ---------- QKD-subgraph connectivity (security grades)
+
+    /// Connected components of the **QKD-only subgraph** (edges with
+    /// `!is_pqc()`), as QKC id → component index. A QKC with no QKD edge is
+    /// its own singleton component. PQC edges are ignored: two QKCs share a
+    /// component iff a strictly-QKD path links them. Component ids are stable
+    /// (assigned in sorted QKC order) so the map is deterministic.
+    ///
+    /// This is the primitive behind the per-request security grade: a pair is
+    /// QKD-reachable (so `strict_qkd`/`qkd_prefer` can be served QKD-grade)
+    /// iff its two QKCs land in the same component.
+    pub fn qkd_components(&self) -> HashMap<String, usize> {
+        let mut comp: HashMap<String, usize> = HashMap::new();
+        let mut nodes: Vec<&String> = self.qkcs.keys().collect();
+        nodes.sort();
+        let mut next = 0usize;
+        for start in nodes {
+            if comp.contains_key(start) {
+                continue;
+            }
+            let id = next;
+            next += 1;
+            comp.insert(start.clone(), id);
+            let mut queue: VecDeque<String> = VecDeque::from([start.clone()]);
+            while let Some(node) = queue.pop_front() {
+                let Some(neigh) = self.graph.get(&node) else {
+                    continue;
+                };
+                let mut ns: Vec<&String> = neigh.iter().collect();
+                ns.sort();
+                for n in ns {
+                    if comp.contains_key(n) {
+                        continue;
+                    }
+                    // Traverse only strictly-QKD links. Missing edge meta
+                    // (shouldn't happen for a graph edge) is treated as non-QKD.
+                    if self.edge(&node, n).is_none_or(EdgeMeta::is_pqc) {
+                        continue;
+                    }
+                    comp.insert(n.clone(), id);
+                    queue.push_back(n.clone());
+                }
+            }
+        }
+        comp
+    }
+
+    /// `true` iff a strictly-QKD path connects the two QKCs (same QKD
+    /// component). `a == b` is trivially true. Recomputes components on each
+    /// call — for many pairs, call [`Self::qkd_components`] once and compare.
+    pub fn qkd_connected_qkc(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let comp = self.qkd_components();
+        matches!((comp.get(a), comp.get(b)), (Some(x), Some(y)) if x == y)
+    }
 }
 
 // ---------------------------------------------------------------- mutations
@@ -369,6 +451,10 @@ impl Topology {
         }
         let key = edge_key(a, b);
         let edge = self.edges.get_mut(&key)?;
+        // PQC edges are uncapacitated: capacity edits are a no-op.
+        if edge.is_pqc() {
+            return Some(false);
+        }
         let current = edge.quditto_capacity_keys_per_second();
         let threshold = (current * 0.05).max(0.5);
         if (current - capacity_kps).abs() < threshold {
@@ -458,6 +544,10 @@ fn parse_edge_meta(channel: &Value) -> EdgeMeta {
             .and_then(Value::as_i64)
             .unwrap_or(default_buf_size() as i64)
             .max(0) as u32,
+        link_type: match m("link_type").and_then(Value::as_str) {
+            Some(s) if s.eq_ignore_ascii_case("pqc") => LinkType::Pqc,
+            _ => LinkType::Qkd, // ausente o cualquier otro valor → QKD (compat)
+        },
     }
 }
 
@@ -1152,6 +1242,7 @@ mod tests {
             r0_keys_per_second: 100.0,
             alpha: 0.2,
             max_buffer_size: 10,
+            ..Default::default()
         };
         let far = EdgeMeta {
             distance_km: 50,
@@ -1159,6 +1250,70 @@ mod tests {
         };
         assert!((near.quditto_capacity_keys_per_second() - 100.0).abs() < 1e-9);
         assert!(far.quditto_capacity_keys_per_second() < near.quditto_capacity_keys_per_second());
+    }
+
+    /// QKD-subgraph connectivity: `1=2 (QKD)  2~3 (PQC)  3=4 (QKD)`.
+    /// The PQC edge 2~3 splits the QKD subgraph into {1,2} and {3,4}, even
+    /// though the full graph is fully connected.
+    fn make_mixed_topo() -> Topology {
+        let mut t = Topology::default();
+        for id in ["1", "2", "3", "4"] {
+            t.upsert_qkc(Qkc {
+                id: id.into(),
+                host: dummy_host(id.parse().unwrap(), 9000 + id.parse::<u16>().unwrap()),
+                kme_host: None,
+            });
+        }
+        let qkd = |d: u32| EdgeMeta {
+            distance_km: d,
+            link_type: LinkType::Qkd,
+            ..EdgeMeta::default()
+        };
+        let pqc = EdgeMeta {
+            link_type: LinkType::Pqc,
+            ..EdgeMeta::default()
+        };
+        t.add_edge("1", "2", qkd(10));
+        t.add_edge("2", "3", pqc);
+        t.add_edge("3", "4", qkd(10));
+        t
+    }
+
+    #[test]
+    fn qkd_components_split_on_pqc_edges() {
+        let t = make_mixed_topo();
+        let comp = t.qkd_components();
+        // 1 and 2 share a QKD component; 3 and 4 share another.
+        assert_eq!(comp["1"], comp["2"]);
+        assert_eq!(comp["3"], comp["4"]);
+        // The PQC edge does NOT join the two QKD components.
+        assert_ne!(comp["1"], comp["3"]);
+    }
+
+    #[test]
+    fn qkd_connectivity_ignores_pqc_links() {
+        let t = make_mixed_topo();
+        assert!(t.qkd_connected_qkc("1", "2"));
+        assert!(t.qkd_connected_qkc("3", "4"));
+        assert!(t.qkd_connected_qkc("2", "2")); // reflexive
+        // 1↔3 and 1↔4 only via the PQC edge → NOT QKD-connected.
+        assert!(!t.qkd_connected_qkc("1", "3"));
+        assert!(!t.qkd_connected_qkc("1", "4"));
+        // …but the full graph IS connected (PQC path exists).
+        assert!(t.shortest_path_qkc("1", "4").is_some());
+    }
+
+    #[test]
+    fn parse_edge_meta_reads_link_type() {
+        use serde_json::json;
+        // Ausente → QKD (backward-compatible).
+        let qkd = parse_edge_meta(&json!({"distance": 5, "quditto_rate_r0": 2000.0}));
+        assert_eq!(qkd.link_type, LinkType::Qkd);
+        assert!(!qkd.is_pqc());
+        // "pqc" (case-insensitive) → PQC.
+        let pqc = parse_edge_meta(&json!({"link_type": "PQC"}));
+        assert_eq!(pqc.link_type, LinkType::Pqc);
+        assert!(pqc.is_pqc());
     }
 
     #[test]
