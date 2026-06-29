@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+use common::security::KeyGrade;
 use serde::Serialize;
 
 /// Build the canonical id used to key a flow `(src_dkms → dst_dkms)`.
@@ -117,7 +118,22 @@ pub struct McfSnapshot {
     /// * `rates_by_dkms[B][(A, Dec)] = r` — what B receives from A.
     ///
     /// Flows `A → B` and `B → A` are independent and may differ.
+    ///
+    /// **Aggregate over grades** — when a pair carries both a QKD-grade and a
+    /// PQC-grade commodity this is their sum. Per-grade rates live in
+    /// [`Self::rates_by_dkms_grade`].
     pub rates_by_dkms: HashMap<String, HashMap<(String, BufferRole), f64>>,
+
+    /// Per-**grade** view of [`Self::rates_by_dkms`]:
+    /// `dkms_id → (peer_dkms, role, grade) → r`. The DKMS uses this to fill its
+    /// separate `(peer, grade)` buffers at the right rate per grade.
+    pub rates_by_dkms_grade: HashMap<String, HashMap<(String, BufferRole, KeyGrade), f64>>,
+
+    /// QKD-only WCMP tables: `qkc_id → dst_qkc → Vec<WcmpNextHop>`, built from
+    /// the QKD-grade commodities' edge flows alone. Pushed to each QKC's
+    /// `/forwarding-table` as `replace_qkd` so QKD-grade frames route strictly
+    /// over QKD links. [`Self::wcmp`] remains the full-graph (any-grade) table.
+    pub wcmp_qkd: HashMap<String, HashMap<String, Vec<WcmpNextHop>>>,
 }
 
 impl McfSnapshot {

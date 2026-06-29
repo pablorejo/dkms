@@ -122,8 +122,10 @@ pub struct IngestSummary {
 /// on the hot path.
 #[derive(Debug, Default)]
 pub struct DemandRegistry {
-    /// `(src_dkms, dst_dkms) -> latest CommodityDemand`.
-    inner: DashMap<(String, String), CommodityDemand>,
+    /// `(src_dkms, dst_dkms, grade) -> latest CommodityDemand`. Keyed by grade
+    /// too so a DKMS can report distinct demand for QKD-grade vs PQC-grade
+    /// traffic on the same pair (e.g. `strict_qkd` and `no_worry` SAEs).
+    inner: DashMap<(String, String, KeyGrade), CommodityDemand>,
 }
 
 impl DemandRegistry {
@@ -151,18 +153,18 @@ impl DemandRegistry {
                 ));
                 continue;
             }
-            let key = (entry.src_dkms.clone(), entry.dst_dkms.clone());
+            let key = (entry.src_dkms.clone(), entry.dst_dkms.clone(), entry.grade);
             self.inner.insert(key, entry);
             s.accepted += 1;
         }
         s
     }
 
-    /// Look up a single commodity. Returns `None` if no DKMS has
-    /// reported for that pair yet.
-    pub fn get(&self, src_dkms: &str, dst_dkms: &str) -> Option<CommodityDemand> {
+    /// Look up a single commodity by pair **and grade**. Returns `None` if no
+    /// DKMS has reported for that (pair, grade) yet.
+    pub fn get(&self, src_dkms: &str, dst_dkms: &str, grade: KeyGrade) -> Option<CommodityDemand> {
         self.inner
-            .get(&(src_dkms.to_string(), dst_dkms.to_string()))
+            .get(&(src_dkms.to_string(), dst_dkms.to_string(), grade))
             .map(|r| r.value().clone())
     }
 
@@ -280,10 +282,10 @@ mod tests {
         assert_eq!(s.accepted, 2);
         assert!(s.errors.is_empty());
         assert_eq!(reg.len(), 2);
-        let got = reg.get("A", "B").unwrap();
+        let got = reg.get("A", "B", KeyGrade::Qkd).unwrap();
         assert_eq!(got.level, 100.0);
         assert_eq!(got.drain_rate, 30.0);
-        assert!(reg.get("A", "Z").is_none());
+        assert!(reg.get("A", "Z", KeyGrade::Qkd).is_none());
     }
 
     #[test]
@@ -298,7 +300,7 @@ mod tests {
             entries: vec![demand("A", "B", 200.0, 4096.0, 50.0, 2000)],
         });
         assert_eq!(reg.len(), 1);
-        let got = reg.get("A", "B").unwrap();
+        let got = reg.get("A", "B", KeyGrade::Qkd).unwrap();
         assert_eq!(got.level, 200.0);
         assert_eq!(got.drain_rate, 50.0);
         assert_eq!(got.timestamp_ms, 2000);
@@ -320,7 +322,7 @@ mod tests {
         assert_eq!(s.accepted, 2);
         assert_eq!(s.errors.len(), 1);
         assert_eq!(reg.len(), 2);
-        assert!(reg.get("B", "C").is_none());
+        assert!(reg.get("B", "C", KeyGrade::Qkd).is_none());
     }
 
     #[test]
@@ -391,7 +393,7 @@ mod tests {
         // now=10000, max_age=5000 → cutoff=5000 → A→B (ts=1000) evicted.
         let n = reg.evict_older_than(10_000, 5_000);
         assert_eq!(n, 1);
-        assert!(reg.get("A", "B").is_none());
-        assert!(reg.get("A", "C").is_some());
+        assert!(reg.get("A", "B", KeyGrade::Qkd).is_none());
+        assert!(reg.get("A", "C", KeyGrade::Qkd).is_some());
     }
 }

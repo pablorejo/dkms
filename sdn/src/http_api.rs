@@ -144,6 +144,7 @@ async fn get_rate(
     // whether the LP has produced rates yet.
     let my_qkc = topology.qkc_of_dkms(&dkms_id);
     let qkd_comp = topology.qkd_components();
+    let my_rates_grade = snap.rates_by_dkms_grade.get(&dkms_id);
     let mut peers = serde_json::Map::new();
     if let Some(my_rates) = snap.rates_by_dkms.get(&dkms_id) {
         let mut grouped: std::collections::HashMap<String, (f64, f64)> =
@@ -169,6 +170,25 @@ async fn get_rate(
                 }
                 _ => (false, false),
             };
+            // Per-grade enc/dec so the DKMS fills its enc_qkd / enc_pqc buffers
+            // at the right rate per grade.
+            let mut grades = serde_json::Map::new();
+            if let Some(mg) = my_rates_grade {
+                for grade in [
+                    common::security::KeyGrade::Qkd,
+                    common::security::KeyGrade::Pqc,
+                ] {
+                    let g_enc = mg
+                        .get(&(peer.clone(), crate::mcf::BufferRole::EncKeys, grade))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let g_dec = mg
+                        .get(&(peer.clone(), crate::mcf::BufferRole::DecKeys, grade))
+                        .copied()
+                        .unwrap_or(0.0);
+                    grades.insert(grade.as_str().to_string(), json!({"enc": g_enc, "dec": g_dec}));
+                }
+            }
             peers.insert(
                 peer,
                 json!({
@@ -176,6 +196,7 @@ async fn get_rate(
                     "dec": dec,
                     "qkd_available": qkd_available,
                     "reachable": reachable,
+                    "grades": grades,
                 }),
             );
         }
@@ -726,7 +747,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let g = svc.demand_registry.get("dA", "dB").unwrap();
+        let g = svc
+            .demand_registry
+            .get("dA", "dB", common::security::KeyGrade::Qkd)
+            .unwrap();
         assert_eq!(g.level, 500.0);
         assert_eq!(g.timestamp_ms, 2000);
         assert_eq!(svc.demand_registry.len(), 1);

@@ -139,9 +139,18 @@ impl McmcfInputs {
         // exactly the `qkd_prefer` default (QKD where reachable, else PQC).
         let qkd_comp = topology.qkd_components();
 
-        // Commodity set: every ordered pair (src, dst) of DKMSs in
-        // distinct QKCs gets a slot. Override with registry entries
-        // where they exist.
+        // Commodity set: for every ordered pair (src, dst) in distinct QKCs we
+        // emit up to TWO commodities, one per key grade:
+        //   * QKD-grade — only when a QKD path connects the pair (else it could
+        //     never route and would force the shared λ to 0). Bootstrapped with
+        //     zero demand on every QKD-connected pair.
+        //   * PQC-grade — emitted on a QKD-disconnected pair (its natural,
+        //     bootstrapped grade) OR on a QKD-connected pair only when actual
+        //     PQC-grade demand was reported (`no_worry` traffic). Routes over the
+        //     full graph.
+        // So a fully-QKD-connected topology with no `no_worry` demand keeps one
+        // commodity per pair (the LP stays the size verified earlier); PQC
+        // commodities appear only where genuinely needed.
         let mut commodities: Vec<CommodityDemand> = Vec::new();
         let dkms_ids: Vec<&String> = dkms_to_qkc.keys().collect();
         for src in &dkms_ids {
@@ -152,35 +161,52 @@ impl McmcfInputs {
                 let src_qkc = &dkms_to_qkc[*src];
                 let dst_qkc = &dkms_to_qkc[*dst];
                 if src_qkc == dst_qkc {
-                    // Same QKC anchor — no network flow needed
-                    // between them at all.
+                    // Same QKC anchor — no network flow needed between them.
                     continue;
                 }
-                let mut entry =
-                    registry
-                        .get(src.as_str(), dst.as_str())
-                        .unwrap_or_else(|| CommodityDemand {
-                            src_dkms: (*src).clone(),
-                            dst_dkms: (*dst).clone(),
-                            level: 0.0,
-                            capacity: DEFAULT_BUFFER_CAPACITY,
-                            drain_rate: 0.0,
-                            timestamp_ms: 0,
-                            grade: KeyGrade::Qkd,
-                        });
-                // Override the grade from QKD-subgraph connectivity (until the
-                // DKMS splits demand per security level, the grade of a pair is
-                // purely a function of whether a QKD path exists).
-                entry.grade = match (qkd_comp.get(src_qkc), qkd_comp.get(dst_qkc)) {
-                    (Some(x), Some(y)) if x == y => KeyGrade::Qkd,
-                    _ => KeyGrade::Pqc,
+                let qkd_connected = matches!(
+                    (qkd_comp.get(src_qkc), qkd_comp.get(dst_qkc)),
+                    (Some(x), Some(y)) if x == y
+                );
+                let natural = if qkd_connected {
+                    KeyGrade::Qkd
+                } else {
+                    KeyGrade::Pqc
                 };
-                commodities.push(entry);
+                for grade in [KeyGrade::Qkd, KeyGrade::Pqc] {
+                    // A QKD-grade commodity is impossible without a QKD path.
+                    if grade == KeyGrade::Qkd && !qkd_connected {
+                        continue;
+                    }
+                    match registry.get(src.as_str(), dst.as_str(), grade) {
+                        Some(mut d) => {
+                            d.grade = grade; // authoritative
+                            commodities.push(d);
+                        }
+                        None if grade == natural => {
+                            // Bootstrap the natural grade with zero demand.
+                            commodities.push(CommodityDemand {
+                                src_dkms: (*src).clone(),
+                                dst_dkms: (*dst).clone(),
+                                level: 0.0,
+                                capacity: DEFAULT_BUFFER_CAPACITY,
+                                drain_rate: 0.0,
+                                timestamp_ms: 0,
+                                grade,
+                            });
+                        }
+                        // Non-natural grade with no reported demand → no commodity.
+                        None => {}
+                    }
+                }
             }
         }
         commodities.sort_by(|a, b| {
-            (a.src_dkms.as_str(), a.dst_dkms.as_str())
-                .cmp(&(b.src_dkms.as_str(), b.dst_dkms.as_str()))
+            (a.src_dkms.as_str(), a.dst_dkms.as_str(), a.grade.as_str()).cmp(&(
+                b.src_dkms.as_str(),
+                b.dst_dkms.as_str(),
+                b.grade.as_str(),
+            ))
         });
 
         Self {
@@ -200,6 +226,9 @@ pub struct EdgeFlow {
     pub src_qkc: String,
     pub dst_qkc: String,
     pub flow: f64,
+    /// Grade of the commodity this flow belongs to. Lets the snapshot build a
+    /// QKD-only WCMP table (grade == Qkd flows) distinct from the full table.
+    pub grade: KeyGrade,
 }
 
 /// What the LP returns: the global scale factor, the edge-flow
@@ -215,9 +244,14 @@ pub struct McmcfSolution {
     /// omitted (ε = `FLOW_EPSILON`).
     pub edge_flows: Vec<EdgeFlow>,
 
-    /// `flow_id → r_k`. Includes flows with `r_k = 0` (so callers
-    /// can distinguish "known commodity, no rate" from "unknown").
+    /// `flow_id → r_k`, **aggregated over grades** (a pair carrying both a
+    /// QKD-grade and PQC-grade commodity sums them). Includes flows with
+    /// `r_k = 0` so callers can distinguish "known commodity, no rate" from
+    /// "unknown".
     pub rates: HashMap<String, f64>,
+
+    /// `(flow_id, grade) → r_k` — the per-grade breakdown of [`Self::rates`].
+    pub rates_grade: HashMap<(String, KeyGrade), f64>,
 }
 
 /// Flows smaller than this in absolute value get truncated to 0.
@@ -376,7 +410,7 @@ impl McmcfSolution {
     pub fn into_mcf_snapshot(self, topology: &Topology) -> McfSnapshot {
         let mut snap = McfSnapshot::default();
 
-        // Rates: flat + ENC/DEC mirror.
+        // Aggregate rates (summed over grades): flat + ENC/DEC mirror.
         for (flow_id_str, rate) in self.rates.iter() {
             let Some((src, dst)) = flow_id_str.split_once("->") else {
                 warn!(flow_id = %flow_id_str, "malformed flow_id in solution");
@@ -393,8 +427,26 @@ impl McmcfSolution {
                 .insert((src.to_string(), BufferRole::DecKeys), *rate);
         }
 
-        // WCMP: aggregate edge-flows per `(transit_qkc, commodity_dst_qkc)`.
-        snap.wcmp = wcmp_from_edge_flows(&self.edge_flows, topology);
+        // Per-grade rates: the DKMS fills its (peer, grade) buffers from these.
+        for ((flow_id_str, grade), rate) in self.rates_grade.iter() {
+            let Some((src, dst)) = flow_id_str.split_once("->") else {
+                continue;
+            };
+            snap.rates_by_dkms_grade
+                .entry(src.to_string())
+                .or_default()
+                .insert((dst.to_string(), BufferRole::EncKeys, *grade), *rate);
+            snap.rates_by_dkms_grade
+                .entry(dst.to_string())
+                .or_default()
+                .insert((src.to_string(), BufferRole::DecKeys, *grade), *rate);
+        }
+
+        // WCMP: full table from ALL edge-flows (any grade — used by PQC-grade
+        // frames), plus a QKD-only table from the QKD-grade flows alone (used
+        // by QKD-grade frames so they never touch a PQC link).
+        snap.wcmp = wcmp_from_edge_flows(&self.edge_flows, topology, None);
+        snap.wcmp_qkd = wcmp_from_edge_flows(&self.edge_flows, topology, Some(KeyGrade::Qkd));
         snap
     }
 }
@@ -423,13 +475,21 @@ const WCMP_MIN_WEIGHT: u32 = 1;
 /// `qkc_id → dst_qkc → Vec<WcmpNextHop>`. Pairs not represented in
 /// the input are omitted — the push loop fills the gaps with
 /// shortest-path entries.
+/// `grade_filter`: when `Some(g)`, only edge-flows of grade `g` contribute
+/// (used to build the QKD-only table); `None` aggregates all grades.
 pub fn wcmp_from_edge_flows(
     edge_flows: &[EdgeFlow],
     topology: &Topology,
+    grade_filter: Option<KeyGrade>,
 ) -> HashMap<String, HashMap<String, Vec<WcmpNextHop>>> {
     // (transit_qkc, commodity_dst_qkc) → (neighbour → cumulative flow)
     let mut buckets: HashMap<(String, String), HashMap<String, f64>> = HashMap::new();
     for ef in edge_flows {
+        if let Some(g) = grade_filter {
+            if ef.grade != g {
+                continue;
+            }
+        }
         let Some((_src_dkms, dst_dkms)) = ef.flow_id.split_once("->") else {
             continue;
         };
@@ -553,13 +613,18 @@ impl McmcfSolver {
         // interpret as "DKMS unknown").
         if !active.iter().any(|c| c.remaining() > 0.0) {
             let mut rates: HashMap<String, f64> = HashMap::with_capacity(active.len());
+            let mut rates_grade: HashMap<(String, KeyGrade), f64> =
+                HashMap::with_capacity(active.len());
             for c in &active {
-                rates.insert(flow_id(&c.src_dkms, &c.dst_dkms), c.drain_rate);
+                let fid = flow_id(&c.src_dkms, &c.dst_dkms);
+                *rates.entry(fid.clone()).or_insert(0.0) += c.drain_rate;
+                rates_grade.insert((fid, c.grade), c.drain_rate);
             }
             return McmcfSolution {
                 lambda: 0.0,
                 edge_flows: Vec::new(),
                 rates,
+                rates_grade,
             };
         }
 
@@ -651,6 +716,8 @@ impl McmcfSolver {
 
         // ----- assemble final solution ------------------------------------
         let mut rates: HashMap<String, f64> = HashMap::with_capacity(active.len());
+        let mut rates_grade: HashMap<(String, KeyGrade), f64> =
+            HashMap::with_capacity(active.len());
         let mut total_eta = 0.0;
         let mut total_sigma = 0.0;
         for (k_idx, c) in active.iter().enumerate() {
@@ -667,7 +734,8 @@ impl McmcfSolver {
             let r_k = delivered_drain + lambda_star * c.remaining() + eta_k;
             let fid = flow_id(&c.src_dkms, &c.dst_dkms);
             let r_k_clean = if r_k.abs() < FLOW_EPSILON { 0.0 } else { r_k };
-            rates.insert(fid, r_k_clean);
+            *rates.entry(fid.clone()).or_insert(0.0) += r_k_clean;
+            rates_grade.insert((fid, c.grade), r_k_clean);
         }
 
         debug!(
@@ -685,6 +753,7 @@ impl McmcfSolver {
             lambda: lambda_star,
             edge_flows: phase2.edge_flows,
             rates,
+            rates_grade,
         }
     }
 
@@ -919,6 +988,7 @@ impl McmcfSolver {
                                 src_qkc: a.clone(),
                                 dst_qkc: b.clone(),
                                 flow: v,
+                                grade: c.grade,
                             });
                         }
                     }
@@ -959,13 +1029,17 @@ struct Phase2Output {
 /// don't see an empty `peers` map and conclude "DKMS unknown".
 fn zero_rate_fallback(active: &[&CommodityDemand]) -> McmcfSolution {
     let mut rates: HashMap<String, f64> = HashMap::with_capacity(active.len());
+    let mut rates_grade: HashMap<(String, KeyGrade), f64> = HashMap::with_capacity(active.len());
     for c in active {
-        rates.insert(flow_id(&c.src_dkms, &c.dst_dkms), 0.0);
+        let fid = flow_id(&c.src_dkms, &c.dst_dkms);
+        rates.entry(fid.clone()).or_insert(0.0);
+        rates_grade.insert((fid, c.grade), 0.0);
     }
     McmcfSolution {
         lambda: 0.0,
         edge_flows: Vec::new(),
         rates,
+        rates_grade,
     }
 }
 
@@ -1101,6 +1175,43 @@ mod tests {
     ///   * QKD-grade → may only route 1-2-3 ⇒ λ bounded by the QKD min-cut
     ///     1000/4096 ≈ 0.244 (the PQC arc's flow vars are pinned to 0).
     ///   * PQC-grade → may take the 1e9 shortcut ⇒ λ explodes.
+    #[test]
+    fn build_splits_pair_into_two_grade_commodities() {
+        use crate::demand::DemandReport;
+        // QKD-connected pair dA-dB (QKD link) with demand reported at BOTH
+        // grades (e.g. a strict_qkd SAE and a no_worry SAE) → two commodities.
+        let mut t = Topology::default();
+        add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+        link(&mut t, "1", "2", 100.0); // QKD link → pair is QKD-connected
+        let reg = DemandRegistry::new();
+        let mk = |grade, drain| CommodityDemand {
+            src_dkms: "dA".into(),
+            dst_dkms: "dB".into(),
+            level: 0.0,
+            capacity: 4096.0,
+            drain_rate: drain,
+            timestamp_ms: 1,
+            grade,
+        };
+        reg.ingest(DemandReport {
+            dkms_id: "dA".into(),
+            entries: vec![mk(KeyGrade::Qkd, 10.0), mk(KeyGrade::Pqc, 20.0)],
+        });
+        let inputs = McmcfInputs::build(&t, &reg);
+        let dab: Vec<_> = inputs
+            .commodities
+            .iter()
+            .filter(|c| c.src_dkms == "dA" && c.dst_dkms == "dB")
+            .collect();
+        assert_eq!(dab.len(), 2, "both-grade demand → two commodities");
+        assert!(dab
+            .iter()
+            .any(|c| c.grade == KeyGrade::Qkd && (c.drain_rate - 10.0).abs() < 1e-9));
+        assert!(dab
+            .iter()
+            .any(|c| c.grade == KeyGrade::Pqc && (c.drain_rate - 20.0).abs() < 1e-9));
+    }
+
     #[test]
     fn qkd_grade_commodity_cannot_use_pqc_shortcut() {
         let mut edge_capacity: HashMap<(String, String), f64> = HashMap::new();
@@ -1329,6 +1440,7 @@ mod tests {
             lambda: 0.5,
             edge_flows: vec![],
             rates,
+            rates_grade: HashMap::new(),
         };
         let snap = sol.into_mcf_snapshot(&t);
         // Flat view.
@@ -1599,7 +1711,7 @@ mod tests {
         let sol = McmcfSolver::new().solve(&inputs);
         assert!(sol.lambda > 0.0);
 
-        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t);
+        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t, None);
         let hops = wcmp
             .get("1")
             .expect("qkc 1 has a WCMP table")
@@ -1633,7 +1745,7 @@ mod tests {
         report(&reg, "dA", "dB", 0.0, 4096.0, 0.0);
         report(&reg, "dB", "dA", 4096.0, 4096.0, 0.0);
         let sol = McmcfSolver::new().solve(&McmcfInputs::build(&t, &reg));
-        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t);
+        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t, None);
         let hops = wcmp
             .get("11")
             .and_then(|table| table.get("2"))
@@ -1656,8 +1768,9 @@ mod tests {
             src_qkc: "1".into(),
             dst_qkc: "11".into(),
             flow: 0.005,
+            grade: KeyGrade::Qkd,
         }];
-        let wcmp = wcmp_from_edge_flows(&flows, &t);
+        let wcmp = wcmp_from_edge_flows(&flows, &t, None);
         let hops = &wcmp["1"]["2"];
         assert_eq!(hops.len(), 1);
         assert_eq!(hops[0].qkc_id, 11);
@@ -1856,7 +1969,7 @@ mod tests {
         // WCMP at the source corner QKC `00`, for destination `23`:
         // both adjacent neighbours (`01` east and `10` south) carry
         // non-zero flow toward D.
-        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t);
+        let wcmp = wcmp_from_edge_flows(&sol.edge_flows, &t, None);
         let hops = wcmp
             .get("00")
             .expect("qkc 00 has wcmp")

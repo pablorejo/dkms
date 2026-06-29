@@ -76,9 +76,13 @@ impl NextHopValue {
 
 #[derive(Debug, Deserialize)]
 struct TableBody {
-    /// Si está presente, reemplaza la tabla completa.
+    /// Si está presente, reemplaza la tabla completa (full graph / PQC-grade).
     #[serde(default)]
     replace: Option<HashMap<String, NextHopValue>>,
+
+    /// Si está presente, reemplaza la tabla **QKD-only** (QKD-grade frames).
+    #[serde(default)]
+    replace_qkd: Option<HashMap<String, NextHopValue>>,
 
     /// Delta: inserta/sobreescribe estas entradas.
     #[serde(default)]
@@ -93,16 +97,29 @@ async fn post_table(
     State(svc): State<QkcService>,
     Json(body): Json<TableBody>,
 ) -> impl IntoResponse {
-    // Soporta dos modos: replace completo o delta.
+    // Soporta dos modos: replace completo (full y/o QKD) o delta.
+    let mut did_replace = false;
+    if let Some(replace_qkd) = body.replace_qkd {
+        let parsed = match parse_map(replace_qkd) {
+            Ok(m) => m,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+        svc.routing.replace_qkd(parsed);
+        did_replace = true;
+    }
     if let Some(replace) = body.replace {
         let parsed = match parse_map(replace) {
             Ok(m) => m,
             Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
         };
         svc.routing.replace(parsed);
+        did_replace = true;
+    }
+    if did_replace {
         return Json(serde_json::json!({
             "mode": "replace",
             "size": svc.routing.snapshot().len(),
+            "qkd_size": svc.routing.snapshot_qkd().len(),
         }))
         .into_response();
     }
