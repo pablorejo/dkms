@@ -36,7 +36,10 @@
 //! MCF solve never blocks the async runtime.
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -70,6 +73,17 @@ struct Inner {
     state: Mutex<State>,
     notify: Notify,
     fire: FireFn,
+    /// `true` while a fire callback is running on its blocking thread.
+    /// Together with `fire_rerun` this caps the debouncer at ONE fire
+    /// in flight: when the fire (an MCF solve) outlives the debounce
+    /// window, overlapping fires would otherwise stack unbounded
+    /// concurrent solves (er-n60: 10 simultaneous ~6-min solves of a
+    /// 1.13M-variable LP starved the whole SDN node and every SAE
+    /// binding lookup 404'd).
+    fire_inflight: AtomicBool,
+    /// Set when a fire was requested while one was in flight; the
+    /// running fire re-runs once on completion so no trigger is lost.
+    fire_rerun: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -103,6 +117,8 @@ impl Debouncer {
             }),
             notify: Notify::new(),
             fire: Arc::new(fire),
+            fire_inflight: AtomicBool::new(false),
+            fire_rerun: AtomicBool::new(false),
         });
         let worker_inner = inner.clone();
         tokio::spawn(async move { run_worker(worker_inner).await });
@@ -218,16 +234,37 @@ impl Debouncer {
 }
 
 fn spawn_fire(inner: &Arc<Inner>) {
-    let f = inner.fire.clone();
+    // At most ONE fire in flight. A fire requested while another runs
+    // coalesces into a single re-run after it finishes — keeping the
+    // debouncer's contract ("bursts → one solve") even when the solve
+    // outlives the debounce window. A rerun flag set in the narrow gap
+    // between the runner's final check and clearing `fire_inflight` is
+    // picked up by the NEXT spawn_fire; during load those arrive
+    // continuously, so staleness is bounded by one debounce cycle.
+    if inner.fire_inflight.swap(true, Ordering::AcqRel) {
+        inner.fire_rerun.store(true, Ordering::Release);
+        return;
+    }
+    let inner = inner.clone();
     // spawn_blocking so a long MCF solve doesn't tie up a tokio worker.
     // We don't await the JoinHandle — fires are fire-and-forget. Bound
     // it with a name (vs `let _ = ...`) so clippy doesn't think we're
     // dropping an un-awaited future without spawning.
     let _handle = tokio::task::spawn_blocking(move || {
-        // Catch panics so a buggy fire fn can't kill the runtime.
-        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
-            warn!(?payload, "debouncer fire panicked");
+        loop {
+            inner.fire_rerun.store(false, Ordering::Release);
+            // Catch panics so a buggy fire fn can't kill the runtime.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (inner.fire)()))
+            {
+                warn!(?payload, "debouncer fire panicked");
+            }
+            if !inner.fire_rerun.swap(false, Ordering::AcqRel) {
+                break;
+            }
+            trace!("debouncer fire re-run (triggers coalesced during previous fire)");
         }
+        inner.fire_inflight.store(false, Ordering::Release);
     });
 }
 
