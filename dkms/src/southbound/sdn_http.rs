@@ -101,6 +101,9 @@ pub struct CommodityDemand {
     pub capacity: f64,
     pub drain_rate: f64,
     pub timestamp_ms: i64,
+    /// Security grade of this demand (serialises to "qkd"/"pqc"). The SDN keys
+    /// its registry by (src,dst,grade) and builds a per-grade commodity.
+    pub grade: common::security::KeyGrade,
 }
 
 /// Wire payload for `POST /demand` — one batch per DKMS reporting all
@@ -219,6 +222,7 @@ mod tests {
             capacity: 4096.0,
             drain_rate: drain,
             timestamp_ms: 1_000,
+            grade: common::security::KeyGrade::Qkd,
         }
     }
 

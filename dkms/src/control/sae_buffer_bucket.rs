@@ -198,7 +198,7 @@ impl SaeBufferBuckets {
             .iter()
             .map(|peer| {
                 let active = self.active_sae_count(peer, &state, now);
-                let occupancy = self.pool.for_peer(peer).enc.len() as f64;
+                let occupancy = self.pool.for_peer(peer).enc_len() as f64;
                 (peer.clone(), active, occupancy)
             })
             .collect();
@@ -361,7 +361,10 @@ mod tests {
                 common::ids::KeyId::new(format!("k{i}")),
                 vec![0xAB; 32],
             );
-            pool.for_peer(peer).enc.try_push(key).unwrap();
+            pool.for_peer(peer)
+                .enc(common::security::KeyGrade::Qkd)
+                .try_push(key)
+                .unwrap();
         }
     }
 

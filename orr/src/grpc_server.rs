@@ -66,13 +66,20 @@ impl OrrControl for OrrGrpc {
         };
         let app_header: std::collections::BTreeMap<String, String> =
             m.app_header.into_iter().collect();
+        // Key grade for the relayed frame (0 = QKD, 1 = PQC). Clamp unknown
+        // proto values to QKD (the safe default).
+        let grade = if m.grade == u32::from(wire::GRADE_PQC) {
+            wire::GRADE_PQC
+        } else {
+            wire::GRADE_QKD
+        };
 
         tracing::Span::current().record("dest", tracing::field::display(&dest));
         tracing::Span::current().record("max_hops", max_hops);
 
         let outcome = self
             .svc
-            .send_message(&dest, m.payload, max_hops, app_header)
+            .send_message(&dest, m.payload, max_hops, app_header, grade)
             .await
             .map_err(map_err)?;
 

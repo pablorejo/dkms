@@ -142,6 +142,7 @@ async fn do_stress(
                 has_max_hops: true,
                 app_header: app_header.clone(),
                 fire_and_forget: true,
+                grade: 0,
             })
             .await;
         if let Err(s) = resp {
@@ -202,6 +203,7 @@ async fn do_send(
             has_max_hops: true,
             app_header,
             fire_and_forget: false,
+            grade: 0,
         })
         .await?
         .into_inner();

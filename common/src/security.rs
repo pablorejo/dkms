@@ -37,6 +37,15 @@ impl KeyGrade {
             KeyGrade::Pqc => "pqc",
         }
     }
+
+    /// Byte que viaja en el frame `wire` (debe coincidir con
+    /// `wire::GRADE_QKD` = 0 / `wire::GRADE_PQC` = 1).
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            KeyGrade::Qkd => 0,
+            KeyGrade::Pqc => 1,
+        }
+    }
 }
 
 impl std::fmt::Display for KeyGrade {
@@ -90,6 +99,22 @@ impl SecurityLevel {
             "qkd_prefer" => Some(SecurityLevel::QkdPrefer),
             "no_worry" => Some(SecurityLevel::NoWorry),
             _ => None,
+        }
+    }
+
+    /// Orden de preferencia de grados al SERVIR una petición desde los buffers
+    /// `(peer, grade)` del DKMS: se popea del primer grado con claves.
+    ///
+    /// * `strict_qkd` → solo `[Qkd]` (jamás PQC).
+    /// * `qkd_prefer` → `[Qkd, Pqc]`: QKD primero; en un par QKD-conexo el
+    ///   buffer PQC está vacío, así que nunca degrada a PQC por "solo
+    ///   conectividad"; en un par inconexo el QKD está vacío y sirve PQC.
+    /// * `no_worry`   → `[Pqc, Qkd]`: prefiere PQC para conservar las QKD.
+    pub fn serve_pref(self) -> &'static [KeyGrade] {
+        match self {
+            SecurityLevel::StrictQkd => &[KeyGrade::Qkd],
+            SecurityLevel::QkdPrefer => &[KeyGrade::Qkd, KeyGrade::Pqc],
+            SecurityLevel::NoWorry => &[KeyGrade::Pqc, KeyGrade::Qkd],
         }
     }
 

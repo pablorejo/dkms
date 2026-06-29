@@ -132,6 +132,7 @@ impl OrrClient {
         body: Vec<u8>,
         header_dkms: std::collections::BTreeMap<String, String>,
         max_hops: i32,
+        grade: u8,
     ) -> Result<SendMessageResponse> {
         let mut client = OrrControlClient::new(self.channel.clone());
         let req = SendMessageRequest {
@@ -143,6 +144,7 @@ impl OrrClient {
             has_max_hops: true,
             app_header: header_dkms.into_iter().collect(),
             fire_and_forget: false,
+            grade: u32::from(grade),
         };
         let mut request = Request::new(req);
         request.set_timeout(self.rpc_timeout);

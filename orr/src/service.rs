@@ -265,6 +265,7 @@ impl OrrService {
         payload: Vec<u8>,
         max_hops: i32,
         app_header: BTreeMap<String, String>,
+        grade: u8,
     ) -> Result<SendOutcome> {
         // Normaliza el destino a lowercase para que el lookup en
         // `peers` (lowercased al boot — ver `lowercase_keys`) acepte
@@ -285,14 +286,20 @@ impl OrrService {
         }
 
         match max_hops {
-            0 => self.send_passthrough(dest_orr, payload, app_header).await,
-            1 => self.send_onion_e2e(dest_orr, payload, app_header).await,
+            0 => {
+                self.send_passthrough(dest_orr, payload, app_header, grade)
+                    .await
+            }
+            1 => {
+                self.send_onion_e2e(dest_orr, payload, app_header, grade)
+                    .await
+            }
             -1 => {
-                self.send_onion_path(dest_orr, payload, app_header, None)
+                self.send_onion_path(dest_orr, payload, app_header, None, grade)
                     .await
             }
             n if n >= 2 => {
-                self.send_onion_path(dest_orr, payload, app_header, Some(n as usize))
+                self.send_onion_path(dest_orr, payload, app_header, Some(n as usize), grade)
                     .await
             }
             n => Err(OrrError::InvalidPath(format!("max_hops inválido: {n}"))),
@@ -308,6 +315,7 @@ impl OrrService {
         dest_orr: &str,
         payload: Vec<u8>,
         app_header: BTreeMap<String, String>,
+        grade: u8,
     ) -> Result<SendOutcome> {
         let dest_qkc = self.peers.qkc_id(dest_orr).ok_or_else(|| {
             OrrError::Relay(format!(
@@ -317,7 +325,7 @@ impl OrrService {
         let header = OrrHeader::passthrough(&self.cfg.orr_id, dest_orr);
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
-            grade: 0,
+            grade,
             sender_id: self.cfg.qkc_id,
             receiver_id: self.cfg.qkc_id,
             dest_final: dest_qkc,
@@ -349,6 +357,7 @@ impl OrrService {
         dest_orr: &str,
         payload: Vec<u8>,
         app_header: BTreeMap<String, String>,
+        grade: u8,
     ) -> Result<SendOutcome> {
         let dest_qkc = self
             .peers
@@ -390,7 +399,7 @@ impl OrrService {
             epoch_id,
         }];
         let onion = onion::build_onion(&path, payload)?;
-        self.send_onion_frame(dest_orr, dest_qkc, onion, app_header)
+        self.send_onion_frame(dest_orr, dest_qkc, onion, app_header, grade)
             .await?;
         debug!(dest = %dest_orr, dest_qkc, "orr.send pqc_e2e");
         Ok(SendOutcome {
@@ -417,6 +426,7 @@ impl OrrService {
         payload: Vec<u8>,
         app_header: BTreeMap<String, String>,
         cap: Option<usize>,
+        grade: u8,
     ) -> Result<SendOutcome> {
         // Resolución de path en orden de prioridad:
         //   1. `app_header["orr_path"]` si viene (override explícito).
@@ -509,7 +519,7 @@ impl OrrService {
         let remaining = onion.max_hops;
         let first_orr = onion.first_hop_orr.clone();
         let n_hops = hops.len();
-        self.send_onion_frame(dest_orr, first_qkc, onion, app_header)
+        self.send_onion_frame(dest_orr, first_qkc, onion, app_header, grade)
             .await?;
         debug!(
             dest = %dest_orr,
@@ -536,6 +546,7 @@ impl OrrService {
         next_qkc: u32,
         onion: OnionWire,
         app_header: BTreeMap<String, String>,
+        grade: u8,
     ) -> Result<()> {
         let header = OrrHeader::onion(
             &self.cfg.orr_id,
@@ -546,7 +557,7 @@ impl OrrService {
         );
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
-            grade: 0,
+            grade,
             sender_id: self.cfg.qkc_id,
             receiver_id: self.cfg.qkc_id,
             dest_final: next_qkc,

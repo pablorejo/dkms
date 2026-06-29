@@ -22,6 +22,7 @@ use parking_lot::Mutex;
 use zeroize::Zeroizing;
 
 use common::ids::KeyId;
+use common::security::KeyGrade;
 
 /// Una clave a la espera de ACK desde el peer.
 pub struct AckPendingEntry {
@@ -29,13 +30,17 @@ pub struct AckPendingEntry {
     pub bytes: Zeroizing<Vec<u8>>,
     /// Instante monotónico tras el cual la entrada expira.
     pub deadline: Instant,
+    /// Grado con el que se bombeó la clave: al recibir el ACK, `on_ack` la
+    /// mueve al buffer ENC de ESTE grado (`enc_qkd` vs `enc_pqc`).
+    pub grade: KeyGrade,
 }
 
 impl AckPendingEntry {
-    pub fn new(bytes: Vec<u8>, deadline: Instant) -> Self {
+    pub fn new(bytes: Vec<u8>, deadline: Instant, grade: KeyGrade) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
             deadline,
+            grade,
         }
     }
 
@@ -131,7 +136,7 @@ mod tests {
     fn insert_and_take() {
         let store = AckPendingStore::new();
         let now = Instant::now();
-        let entry = AckPendingEntry::new(vec![0xAB; 32], now + Duration::from_secs(30));
+        let entry = AckPendingEntry::new(vec![0xAB; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
         store.insert("dkms-22", id("k1"), entry);
         assert_eq!(store.pending_count("dkms-22"), 1);
         let got = store.take("dkms-22", &id("k1")).expect("present");
@@ -149,8 +154,8 @@ mod tests {
     fn reap_expired_drops_old_entries() {
         let store = AckPendingStore::new();
         let now = Instant::now();
-        let alive = AckPendingEntry::new(vec![0xCD; 32], now + Duration::from_secs(30));
-        let dead = AckPendingEntry::new(vec![0xEF; 32], now - Duration::from_secs(1));
+        let alive = AckPendingEntry::new(vec![0xCD; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
+        let dead = AckPendingEntry::new(vec![0xEF; 32], now - Duration::from_secs(1), KeyGrade::Qkd);
         store.insert("dkms-22", id("alive"), alive);
         store.insert("dkms-22", id("dead"), dead);
         let n = store.reap_expired(now);

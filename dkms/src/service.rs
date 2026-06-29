@@ -202,7 +202,7 @@ impl DkmsService {
             .await
             .unwrap_or_else(|_| self.self_node());
 
-        let stored_key_count = self.pool.for_peer(target_node.as_str()).enc.len() as u64;
+        let stored_key_count = self.pool.for_peer(target_node.as_str()).enc_len() as u64;
 
         Ok(Etsi014Status {
             source_kme_id: self.cfg.node_id.clone(),
@@ -384,8 +384,17 @@ impl DkmsService {
             Vec::with_capacity(remote_groups.len());
         let mut transport_keys_consumed = 0usize;
         for (peer_node, peer_saes) in remote_groups.iter() {
-            let envelope =
-                self.build_ext_keys_envelope(master, peer_node, peer_saes, &session_keys)?;
+            // Grade preference to serve this peer = the request's security
+            // level (per-request override, else per-peer/global default).
+            let level =
+                requested_level.unwrap_or_else(|| self.cfg.security_level_for(peer_node.as_str()));
+            let envelope = self.build_ext_keys_envelope(
+                master,
+                peer_node,
+                peer_saes,
+                &session_keys,
+                level.serve_pref(),
+            )?;
             transport_keys_consumed += envelope.keys.len();
             envelopes.push((peer_node.clone(), envelope));
         }
@@ -577,17 +586,19 @@ impl DkmsService {
         peer_node: &NodeId,
         peer_saes: &[SaeId],
         session_keys: &[(Uuid, KeyId, Zeroizing<Vec<u8>>)],
+        serve_pref: &[common::security::KeyGrade],
     ) -> Result<Etsi020ExtKeyContainer> {
         let peer_buffers = self.pool.for_peer(peer_node.as_str());
         let mut etsi_keys = Vec::with_capacity(session_keys.len());
         for (uuid, _kid, k_bytes) in session_keys {
-            let tk =
-                peer_buffers
-                    .enc
-                    .pop_oldest()
-                    .ok_or_else(|| DkmsError::TransportBufferEmpty {
-                        peer: peer_node.to_string(),
-                    })?;
+            // Pop a transport key of the preferred grade (the request's
+            // security level decides the order). A QKD-grade key never comes
+            // from a PQC buffer and vice-versa.
+            let tk = peer_buffers.enc_pop_pref(serve_pref).ok_or_else(|| {
+                DkmsError::TransportBufferEmpty {
+                    peer: peer_node.to_string(),
+                }
+            })?;
             if tk.bytes.len() < TRANSPORT_KEY_BYTES {
                 return Err(DkmsError::Crypto(format!(
                     "transport key too short ({} bytes, need {})",

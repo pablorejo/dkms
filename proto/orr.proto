@@ -108,6 +108,11 @@ message SendMessageRequest {
   map<string, string> app_header    = 5;
   // Fire-and-forget: don't wait for the QKC ACK before returning.
   bool fire_and_forget              = 6;
+  // Key grade for the relayed frame: 0 = QKD-grade (default), 1 = PQC-grade.
+  // The ORR writes it into the wire frame's RESERVED byte so the QKC routes
+  // the key over the grade-appropriate path (QKD-only vs full). See
+  // wire::GRADE_QKD / GRADE_PQC.
+  uint32 grade                      = 7;
 }
 
 message SendMessageResponse {

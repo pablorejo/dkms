@@ -17,23 +17,48 @@
 
 use std::sync::Arc;
 
+use common::security::KeyGrade;
 use dashmap::DashMap;
 
 use super::buffer::SecureKeyBuffer;
 
-/// Par de buffers (ENC para enviar a un peer, DEC para descifrar lo que el
-/// peer manda) más capacidad declarada.
+/// Buffers de un peer. El lado **ENC** está separado por grado
+/// (`enc_qkd`/`enc_pqc`) para que una petición `strict_qkd` reciba una clave
+/// QKD-grade y `no_worry` consuma PQC-grade conservando las QKD. El lado
+/// **DEC** es un único buffer: las claves entrantes se buscan por `key_id`
+/// (`take_by_id`), así que el grado no cambia la recuperación.
 pub struct PeerBuffers {
-    pub enc: Arc<SecureKeyBuffer>,
+    enc_qkd: Arc<SecureKeyBuffer>,
+    enc_pqc: Arc<SecureKeyBuffer>,
     pub dec: Arc<SecureKeyBuffer>,
 }
 
 impl PeerBuffers {
     fn new(capacity: usize) -> Self {
         Self {
-            enc: Arc::new(SecureKeyBuffer::new(capacity)),
+            enc_qkd: Arc::new(SecureKeyBuffer::new(capacity)),
+            enc_pqc: Arc::new(SecureKeyBuffer::new(capacity)),
             dec: Arc::new(SecureKeyBuffer::new(capacity)),
         }
+    }
+
+    /// Buffer ENC del grado dado.
+    pub fn enc(&self, grade: KeyGrade) -> &Arc<SecureKeyBuffer> {
+        match grade {
+            KeyGrade::Qkd => &self.enc_qkd,
+            KeyGrade::Pqc => &self.enc_pqc,
+        }
+    }
+
+    /// Total de claves ENC en ambos grados (métricas / nivel de demanda).
+    pub fn enc_len(&self) -> usize {
+        self.enc_qkd.len() + self.enc_pqc.len()
+    }
+
+    /// Popea una clave ENC del PRIMER grado con stock según el orden de
+    /// preferencia (`SecurityLevel::serve_pref`). `None` si todos vacíos.
+    pub fn enc_pop_pref(&self, prefs: &[KeyGrade]) -> Option<super::buffer::TransportKey> {
+        prefs.iter().find_map(|&g| self.enc(g).pop_oldest())
     }
 }
 
@@ -69,14 +94,15 @@ impl BufferPool {
     pub fn snapshot(&self) -> Vec<(String, usize, usize)> {
         self.peers
             .iter()
-            .map(|e| (e.key().clone(), e.value().enc.len(), e.value().dec.len()))
+            .map(|e| (e.key().clone(), e.value().enc_len(), e.value().dec.len()))
             .collect()
     }
 
     /// Forzar borrado de todos los buffers (drain/shutdown).
     pub fn clear_all(&self) {
         for e in self.peers.iter() {
-            e.value().enc.clear();
+            e.value().enc_qkd.clear();
+            e.value().enc_pqc.clear();
             e.value().dec.clear();
         }
     }

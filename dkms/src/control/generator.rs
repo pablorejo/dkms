@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use common::ids::KeyId;
+use common::security::KeyGrade;
 
 use crate::{
     config::{DkmsConfig, GeneratorCfg, PeerTransport},
@@ -306,11 +307,12 @@ impl Generator {
             return false;
         };
         let buf = self.pool.for_peer(peer_dkms_id);
+        let grade = entry.grade;
         let key = TransportKey {
             id: key_id.clone(),
             bytes: entry.bytes,
         };
-        if let Err(rejected) = buf.enc.try_push(key) {
+        if let Err(rejected) = buf.enc(grade).try_push(key) {
             // Buffer lleno: la clave se descarta (zeroize en Drop).
             warn!(
                 peer = peer_dkms_id,
@@ -433,7 +435,8 @@ impl Generator {
             // de consumo. Esto evita acumular keys que se zeroizan al
             // expirar el ack_pending sin uso.
             let buf = self.pool.for_peer(&peer);
-            if buf.enc.len() + self.ack_pending.pending_count(&peer) >= buf.enc.capacity() {
+            if buf.enc_len() + self.ack_pending.pending_count(&peer) >= self.buffer_capacity_per_peer
+            {
                 continue;
             }
             // Concurrent fan-out de los `tokens` emits hacia este peer.
@@ -500,11 +503,26 @@ impl Generator {
         // Registramos ANTES de mandar — si el ACK llega antes del .await
         // del send (poco probable pero existe), el on_ack ya tiene la
         // entrada.
+        // Grade of this transport key = the peer's QKD reachability per the
+        // SDN /rate: QKD-reachable → QKD-grade (relayed strictly over QKD
+        // links), else PQC-grade. The frame carries it (QKC routes per grade)
+        // and `on_ack` files the key in the matching enc buffer.
+        let grade = if self
+            .qkd_avail
+            .lock()
+            .get(peer_dkms_id)
+            .copied()
+            .unwrap_or(true)
+        {
+            KeyGrade::Qkd
+        } else {
+            KeyGrade::Pqc
+        };
         let entry_bytes = bytes.clone();
         self.ack_pending.insert(
             peer_dkms_id,
             key_id.clone(),
-            AckPendingEntry::new(entry_bytes, deadline),
+            AckPendingEntry::new(entry_bytes, deadline, grade),
         );
 
         let mut header: BTreeMap<String, String> = BTreeMap::new();
@@ -529,7 +547,7 @@ impl Generator {
         }
         if let Err(e) = self
             .orr
-            .send_key(&dest_orr_id, bytes, header, self.default_max_hops)
+            .send_key(&dest_orr_id, bytes, header, self.default_max_hops, grade.wire_byte())
             .await
         {
             // Si el ORR falla, no esperamos ACK — retiramos del pending.
@@ -570,8 +588,16 @@ impl Generator {
             // otherwise.
             .filter(|peer| peer.as_str() != self.my_dkms_id.as_str())
             .map(|peer| {
-                let level = self.pool.for_peer(peer).enc.len() as f64;
+                let level = self.pool.for_peer(peer).enc_len() as f64;
                 let drain_rate = self.demand_tracker.rate(peer, now_ms);
+                // Grade of this commodity = the peer's QKD reachability, so the
+                // SDN builds a QKD-grade commodity for QKD-reachable peers and
+                // a PQC-grade one otherwise (matches how the keys are pumped).
+                let grade = if self.qkd_avail.lock().get(peer).copied().unwrap_or(true) {
+                    KeyGrade::Qkd
+                } else {
+                    KeyGrade::Pqc
+                };
                 CommodityDemand {
                     src_dkms: self.my_dkms_id.clone(),
                     dst_dkms: peer.clone(),
@@ -579,6 +605,7 @@ impl Generator {
                     capacity: cap,
                     drain_rate,
                     timestamp_ms: now_ms,
+                    grade,
                 }
             })
             .collect();

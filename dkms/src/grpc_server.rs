@@ -144,7 +144,7 @@ impl DkmsControl for DkmsGrpc {
         let peer_node = self.svc.sae_binding.resolve(&SaeId::new(remote)).await.ok();
         let snapshot = peer_node
             .map(|n| self.svc.pool.for_peer(n.as_str()))
-            .map(|pb| (pb.enc.len(), pb.dec.len()))
+            .map(|pb| (pb.enc_len(), pb.dec.len()))
             .unwrap_or((0, 0));
         Ok(Response::new(BufferState {
             keys_available: snapshot.0 as u64,
