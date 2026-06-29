@@ -248,6 +248,17 @@ impl SdnService {
                     }
                     // 1) Forwarding push: una POST por QKC. Concurrent
                     //    via join_all para no serializar 9 QKCs.
+                    //
+                    // The QKD-only table (`replace_qkd`) is OPT-IN via
+                    // `SDN_DUAL_GRADE_TABLES`: pushing a non-empty QKD table
+                    // engages the QKC's grade routing, which only behaves
+                    // correctly once the DKMS tags pumped frames per grade
+                    // (Opt-D). Until then the default (flag off) sends only the
+                    // full table, keeping the QKC on its legacy single-table
+                    // path. See [[project-qkc-security-levels-design]].
+                    let dual_grade = std::env::var("SDN_DUAL_GRADE_TABLES")
+                        .map(|v| v != "0" && !v.is_empty())
+                        .unwrap_or(false);
                     let mut futures = Vec::new();
                     for (qkc_id, qkc) in &snap.qkcs {
                         let mut table: std::collections::HashMap<String, Vec<WcmpNextHop>> =
@@ -285,7 +296,11 @@ impl SdnService {
                             .unwrap_or_default();
                         let url =
                             format!("http://{}:{}/forwarding-table", qkc.host.ip, qkc.host.port);
-                        let body = serde_json::json!({"replace": table, "replace_qkd": qkd_table});
+                        let body = if dual_grade {
+                            serde_json::json!({"replace": table, "replace_qkd": qkd_table})
+                        } else {
+                            serde_json::json!({"replace": table})
+                        };
                         let client = http.clone();
                         let qid = qkc_id.clone();
                         futures.push(async move {
