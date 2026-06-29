@@ -177,10 +177,7 @@ mod tests {
             (SecurityLevel::NoWorry, "\"no_worry\""),
         ] {
             assert_eq!(serde_json::to_string(&lvl).unwrap(), tok);
-            assert_eq!(
-                serde_json::from_str::<SecurityLevel>(tok).unwrap(),
-                lvl
-            );
+            assert_eq!(serde_json::from_str::<SecurityLevel>(tok).unwrap(), lvl);
             // from_token coincide con la representación serde (sin comillas).
             assert_eq!(SecurityLevel::from_token(lvl.as_str()), Some(lvl));
         }

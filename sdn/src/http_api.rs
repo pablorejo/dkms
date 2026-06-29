@@ -186,7 +186,10 @@ async fn get_rate(
                         .get(&(peer.clone(), crate::mcf::BufferRole::DecKeys, grade))
                         .copied()
                         .unwrap_or(0.0);
-                    grades.insert(grade.as_str().to_string(), json!({"enc": g_enc, "dec": g_dec}));
+                    grades.insert(
+                        grade.as_str().to_string(),
+                        json!({"enc": g_enc, "dec": g_dec}),
+                    );
                 }
             }
             peers.insert(

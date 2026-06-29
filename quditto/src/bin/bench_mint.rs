@@ -67,11 +67,11 @@ fn main() {
     let ns_per_key = elapsed * 1e9 / n as f64;
 
     println!("─── quditto mint benchmark ───");
-    println!("elapsed:           {:.3} s", elapsed);
-    println!("keys minted:       {}", n);
-    println!("keys/s:            {:>12.0}", keys_per_s);
+    println!("elapsed:           {elapsed:.3} s");
+    println!("keys minted:       {n}");
+    println!("keys/s:            {keys_per_s:>12.0}");
     println!("material MB/s:     {:>12.2}", bytes_per_s / 1_048_576.0);
-    println!("ns per mint:       {:>12.1}", ns_per_key);
+    println!("ns per mint:       {ns_per_key:>12.1}");
     // Imprime los sumideros para que LTO no los borre.
     std::hint::black_box(id_xor);
     std::hint::black_box(byte_xor);

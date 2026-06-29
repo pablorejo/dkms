@@ -1220,10 +1220,12 @@ mod tests {
         edge_capacity.insert(("1".into(), "3".into()), 1e9); // PQC shortcut
         let pqc_edges: HashSet<(String, String)> =
             [("1".to_string(), "3".to_string())].into_iter().collect();
-        let dkms_to_qkc: HashMap<String, String> =
-            [("d1".to_string(), "1".to_string()), ("d3".to_string(), "3".to_string())]
-                .into_iter()
-                .collect();
+        let dkms_to_qkc: HashMap<String, String> = [
+            ("d1".to_string(), "1".to_string()),
+            ("d3".to_string(), "3".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let commodity = |grade| CommodityDemand {
             src_dkms: "d1".into(),
             dst_dkms: "d3".into(),
@@ -1892,7 +1894,7 @@ mod tests {
         let mut t = Topology::default();
         for row in 0..3 {
             for col in 0..4 {
-                let id = format!("{}{}", row, col);
+                let id = format!("{row}{col}");
                 let host_id = (row * 4 + col + 1) as i64;
                 t.upsert_qkc(Qkc {
                     id: id.clone(),
@@ -1904,7 +1906,7 @@ mod tests {
         // Horizontal edges (within each row).
         for row in 0..3 {
             for col in 0..3 {
-                let a = format!("{}{}", row, col);
+                let a = format!("{row}{col}");
                 let b = format!("{}{}", row, col + 1);
                 link(&mut t, &a, &b, 1_000.0);
             }
@@ -1912,7 +1914,7 @@ mod tests {
         // Vertical edges (between adjacent rows).
         for row in 0..2 {
             for col in 0..4 {
-                let a = format!("{}{}", row, col);
+                let a = format!("{row}{col}");
                 let b = format!("{}{}", row + 1, col);
                 link(&mut t, &a, &b, 1_000.0);
             }
@@ -1985,8 +1987,7 @@ mod tests {
         );
         assert!(
             hop_ids.contains(&1) && hop_ids.contains(&10),
-            "expected fan-out via both 01 and 10, got {:?}",
-            hop_ids
+            "expected fan-out via both 01 and 10, got {hop_ids:?}"
         );
     }
 

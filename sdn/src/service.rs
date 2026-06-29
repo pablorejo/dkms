@@ -289,11 +289,8 @@ impl SdnService {
                         // QKD-only table (for QKD-grade frames). LP-derived
                         // ONLY — no shortest-path fallback, which could route
                         // over a PQC hop and break the QKD-grade invariant.
-                        let qkd_table: std::collections::HashMap<String, Vec<WcmpNextHop>> = mcf
-                            .wcmp_qkd
-                            .get(qkc_id)
-                            .cloned()
-                            .unwrap_or_default();
+                        let qkd_table: std::collections::HashMap<String, Vec<WcmpNextHop>> =
+                            mcf.wcmp_qkd.get(qkc_id).cloned().unwrap_or_default();
                         let url =
                             format!("http://{}:{}/forwarding-table", qkc.host.ip, qkc.host.port);
                         let body = if dual_grade {

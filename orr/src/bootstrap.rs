@@ -245,7 +245,9 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
 /// — sin esto, un peer que reinició produce ciphertexts que su nueva
 /// sk no puede decapsular y el rebootstrap se queda en bucle infinito
 /// (verificado smoke 2026-05-25 n10-real16k).
-pub(crate) async fn try_fetch_pubkey(addr: &str) -> std::result::Result<(Vec<u8>, String, String), String> {
+pub(crate) async fn try_fetch_pubkey(
+    addr: &str,
+) -> std::result::Result<(Vec<u8>, String, String), String> {
     let ch = Channel::from_shared(addr.to_string())
         .map_err(|e| format!("addr inválido: {e}"))?
         .connect()

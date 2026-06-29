@@ -1296,7 +1296,7 @@ mod tests {
         assert!(t.qkd_connected_qkc("1", "2"));
         assert!(t.qkd_connected_qkc("3", "4"));
         assert!(t.qkd_connected_qkc("2", "2")); // reflexive
-        // 1↔3 and 1↔4 only via the PQC edge → NOT QKD-connected.
+                                                // 1↔3 and 1↔4 only via the PQC edge → NOT QKD-connected.
         assert!(!t.qkd_connected_qkc("1", "3"));
         assert!(!t.qkd_connected_qkc("1", "4"));
         // …but the full graph IS connected (PQC path exists).

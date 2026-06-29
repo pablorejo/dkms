@@ -136,7 +136,8 @@ mod tests {
     fn insert_and_take() {
         let store = AckPendingStore::new();
         let now = Instant::now();
-        let entry = AckPendingEntry::new(vec![0xAB; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
+        let entry =
+            AckPendingEntry::new(vec![0xAB; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
         store.insert("dkms-22", id("k1"), entry);
         assert_eq!(store.pending_count("dkms-22"), 1);
         let got = store.take("dkms-22", &id("k1")).expect("present");
@@ -154,8 +155,10 @@ mod tests {
     fn reap_expired_drops_old_entries() {
         let store = AckPendingStore::new();
         let now = Instant::now();
-        let alive = AckPendingEntry::new(vec![0xCD; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
-        let dead = AckPendingEntry::new(vec![0xEF; 32], now - Duration::from_secs(1), KeyGrade::Qkd);
+        let alive =
+            AckPendingEntry::new(vec![0xCD; 32], now + Duration::from_secs(30), KeyGrade::Qkd);
+        let dead =
+            AckPendingEntry::new(vec![0xEF; 32], now - Duration::from_secs(1), KeyGrade::Qkd);
         store.insert("dkms-22", id("alive"), alive);
         store.insert("dkms-22", id("dead"), dead);
         let n = store.reap_expired(now);

@@ -435,7 +435,8 @@ impl Generator {
             // de consumo. Esto evita acumular keys que se zeroizan al
             // expirar el ack_pending sin uso.
             let buf = self.pool.for_peer(&peer);
-            if buf.enc_len() + self.ack_pending.pending_count(&peer) >= self.buffer_capacity_per_peer
+            if buf.enc_len() + self.ack_pending.pending_count(&peer)
+                >= self.buffer_capacity_per_peer
             {
                 continue;
             }
@@ -541,13 +542,19 @@ impl Generator {
                 .unwrap_or(0)
                 .to_string(),
         );
-        header.insert(HDR_REQUEST_ID.into(), format!("gen-{}", key_id_str));
+        header.insert(HDR_REQUEST_ID.into(), format!("gen-{key_id_str}"));
         if let Some(ep) = &self.ack_endpoint {
             header.insert(HDR_ACK_ENDPOINT.into(), ep.clone());
         }
         if let Err(e) = self
             .orr
-            .send_key(&dest_orr_id, bytes, header, self.default_max_hops, grade.wire_byte())
+            .send_key(
+                &dest_orr_id,
+                bytes,
+                header,
+                self.default_max_hops,
+                grade.wire_byte(),
+            )
             .await
         {
             // Si el ORR falla, no esperamos ACK — retiramos del pending.

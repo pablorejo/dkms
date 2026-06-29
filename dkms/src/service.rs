@@ -416,7 +416,7 @@ impl DkmsService {
                 .get(peer_node.as_str())
                 .cloned()
                 .ok_or_else(|| {
-                    DkmsError::BadRequest(format!("peer dkms {} not configured", peer_node))
+                    DkmsError::BadRequest(format!("peer dkms {peer_node} not configured"))
                 })?;
             let peer_id_str = peer_node.to_string();
             let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
