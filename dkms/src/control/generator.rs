@@ -369,19 +369,37 @@ impl Generator {
     }
 
     async fn tick_once(self: &Arc<Self>, now: Instant) {
-        // Snapshot del rate cache (lock corto).
-        let rates_snapshot: Vec<(String, f64)> = {
+        // SDN-assigned ENC rates (lock corto). Pueden venir vacías / todas a 0
+        // hasta el primer solve MCMCF-λ del SDN, que a N grande puede tardar
+        // minutos (el LP no escala). Caemos a un `floor` configurable para que
+        // los buffers se llenen y el tráfico SAE fluya con independencia del
+        // optimizador de rates. floor = 0 (default) preserva el comportamiento
+        // legacy (solo se rellena con lo que asigne el SDN).
+        let sdn_rates: HashMap<String, f64> = {
             let g = self.rates_enc.lock();
-            g.iter().map(|(p, r)| (p.clone(), *r)).collect()
+            g.clone()
         };
-        for (peer, rate) in rates_snapshot {
+        let floor = self.cfg.default_fill_rate_keys_per_s;
+        // Cap (techo) opcional de la rate efectiva: `min(max(sdn, floor), cap)`.
+        // Con cap=0 no se aplica. Usado para saturación controlada cuando el SDN
+        // está sano y asignaría una rate muy por encima de λ (ver config.rs).
+        let fill_cap = self.cfg.max_fill_rate_keys_per_s;
+        // Iteramos los peers ORR CONFIGURADOS (no solo aquellos para los que el
+        // SDN ya reportó rate), así un peer se llena incluso antes de que el SDN
+        // lo reporte por primera vez.
+        let work: Vec<(String, f64)> = self
+            .peers_orr
+            .keys()
+            .map(|p| {
+                let mut r = sdn_rates.get(p).copied().unwrap_or(0.0).max(floor);
+                if fill_cap > 0.0 {
+                    r = r.min(fill_cap);
+                }
+                (p.clone(), r)
+            })
+            .collect();
+        for (peer, rate) in work {
             if rate <= 0.0 {
-                continue;
-            }
-            // El peer debe estar configurado con transport=orr para
-            // generar — los rates vienen para todos los peers DKMS del
-            // grafo pero solo emitimos hacia los nuestros.
-            if !self.peers_orr.contains_key(&peer) {
                 continue;
             }
             let cap = (self.cfg.bucket_cap_seconds * rate).max(2.0);

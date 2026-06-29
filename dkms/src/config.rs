@@ -302,6 +302,22 @@ pub struct GeneratorCfg {
     /// Cap superior del bucket (cuántos segundos de rate pueden acumularse
     /// si el peer no ha consumido). Default 2s.
     pub bucket_cap_seconds: f64,
+    /// Floor de rate de relleno (keys/s por peer) usado cuando el SDN aún no
+    /// ha asignado rate para ese peer — p.ej. antes del primer solve MCMCF-λ,
+    /// que a N grande puede tardar minutos (el LP no escala). `0.0` (default)
+    /// mantiene el comportamiento legacy (solo rellena con la rate del SDN);
+    /// `>0` desacopla el llenado de buffers del optimizador de rates del SDN.
+    #[serde(default)]
+    pub default_fill_rate_keys_per_s: f64,
+    /// Cap (techo) de rate de relleno (keys/s por peer). A diferencia del floor,
+    /// este LIMITA la rate efectiva por encima de lo que asigne el SDN. Sirve
+    /// para experimentos de saturación controlada: con el SDN sano (p.ej. ~55
+    /// keys/s/buffer a N=20) la oferta de pads supera con creces λ y nunca se
+    /// satura; fijando un cap por debajo de λ se reproduce la presión del token
+    /// bucket de forma determinista e independiente de la topología. La rate
+    /// efectiva es `min(max(sdn_rate, floor), cap)`. `0.0` (default) = sin cap.
+    #[serde(default)]
+    pub max_fill_rate_keys_per_s: f64,
 }
 
 impl Default for GeneratorCfg {
@@ -318,6 +334,8 @@ impl Default for GeneratorCfg {
             ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
             bucket_cap_seconds: 2.0,
+            default_fill_rate_keys_per_s: 0.0,
+            max_fill_rate_keys_per_s: 0.0,
         }
     }
 }
