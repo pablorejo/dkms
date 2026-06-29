@@ -103,9 +103,16 @@ humantime = "2.1"
 petgraph = "0.6"
 
 # Linear programming (MCMCF-λ solver — Maximum Concurrent MCF with
-# demand scaling). Pure-Rust backend (microlp) to keep Docker builds
-# dependency-free. Modeling layer lets us swap to HiGHS/Clarabel later.
-good_lp = { version = "1", default-features = false, features = ["microlp"] }
+# demand scaling). Both backends are pure Rust so Docker/offline builds
+# stay dependency-free: microlp (default_solver, exact simplex) and
+# clarabel (interior-point, runtime opt-in via SDN_SOLVER=clarabel —
+# microlp stalls at N≥40 / ≥1560 commodities).
+good_lp = { version = "1", default-features = false, features = ["microlp", "clarabel"] }
+# Direct dep only for naming clarabel::solver::SolverStatus in the SDN's
+# post-solve status check (good_lp's backend maps unbounded exits to Ok).
+# Same version req as good_lp's so cargo unifies on one copy and the
+# types match.
+clarabel = "0.11"
 
 # Concurrency primitives
 dashmap = "6.1"

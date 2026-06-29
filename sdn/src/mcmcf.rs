@@ -50,8 +50,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use good_lp::{variable, Expression, ProblemVariables, Solution, SolverModel, Variable};
-use tracing::{debug, warn};
+use good_lp::{
+    variable, Constraint, Expression, ProblemVariables, Solution, Solver, SolverModel, Variable,
+};
+use tracing::{debug, info, warn};
 
 use crate::{
     demand::{CommodityDemand, DemandRegistry},
@@ -202,18 +204,113 @@ const T_REPLAN_SECONDS: f64 = 5.0;
 /// "fill at λ" required by paper §6's relaxation.
 const LAMBDA_SLACK_PENALTY: f64 = 1e3;
 
-/// Lower-bound slack for phase 2's `λ ≥ λ*` constraint. microlp's
-/// simplex has solve-to-solve numerical drift; an exact equality
-/// `λ == λ*` would risk infeasibility when `λ*` came back as
-/// `λ* − ε_machine`. Five orders of magnitude below the smallest
-/// interesting λ (≈ 1e-3) is harmless and avoids most
-/// false-infeasibility cases on small LPs. Larger LPs (e.g.
-/// 380-commodity ER topologies) still hit false-infeasibility at
-/// `~70 %` of solves with this value — the fallback (η = 0) keeps
-/// the system functionally correct but the lex refinement
-/// effectively disengages. Improving this is a known TODO; see
-/// `project_mcmcf_er20_smoke.md`.
-const LAMBDA_FIX_SLACK: f64 = 1e-8;
+/// LP backend, selected once per process via the `SDN_SOLVER` env var:
+/// `microlp` (default — the historical pure-Rust simplex, exact basic
+/// solutions but dense and single-core: stalls at N≥40 / ≥1560
+/// commodities) or `clarabel` (pure-Rust interior-point: approximate
+/// vertex values but scales past the microlp wall).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LpBackend {
+    Microlp,
+    Clarabel,
+}
+
+fn lp_backend() -> LpBackend {
+    static BACKEND: std::sync::OnceLock<LpBackend> = std::sync::OnceLock::new();
+    *BACKEND.get_or_init(|| {
+        let backend = match std::env::var("SDN_SOLVER") {
+            Ok(v) if v.eq_ignore_ascii_case("clarabel") => LpBackend::Clarabel,
+            Ok(v) if v.is_empty() || v.eq_ignore_ascii_case("microlp") => LpBackend::Microlp,
+            Ok(v) => {
+                warn!(value = %v, "unknown SDN_SOLVER (expected microlp|clarabel); using microlp");
+                LpBackend::Microlp
+            }
+            Err(_) => LpBackend::Microlp,
+        };
+        // info-level so deployed logs (RUST_LOG=info) positively confirm
+        // which backend is engaged — a lost env var silently falling back
+        // to microlp is otherwise indistinguishable from clarabel running.
+        info!(backend = ?backend, "SDN LP backend selected");
+        backend
+    })
+}
+
+/// Build the model on `solver`, add every constraint, solve, and
+/// return the values of `wanted` in order. Each backend has its own
+/// concrete model/solution types, so this is the monomorphisation
+/// point — callers stay backend-agnostic by consuming plain `f64`s.
+fn solve_lp<S: Solver>(
+    solver: S,
+    vars: ProblemVariables,
+    objective: Expression,
+    constraints: Vec<Constraint>,
+    wanted: &[Variable],
+) -> Result<Vec<f64>, String> {
+    let mut model = vars.maximise(objective).using(solver);
+    for c in constraints {
+        model = model.with(c);
+    }
+    match model.solve() {
+        Ok(sol) => Ok(wanted.iter().map(|v| sol.value(*v)).collect()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Clarabel-specific solve path. The generic [`solve_lp`] can't be
+/// used here because good_lp's clarabel backend maps the
+/// `DualInfeasible`/`AlmostDualInfeasible` exits (primal unbounded)
+/// to `Ok` — for those, `solution.x` is an unbounded-direction
+/// CERTIFICATE, not a feasible point, and publishing it as rates
+/// would push garbage to every DKMS (microlp returns `Err` for the
+/// same condition and falls back to zero rates). We re-check the raw
+/// Clarabel status after the solve and accept only genuine optima.
+fn solve_lp_clarabel(
+    vars: ProblemVariables,
+    objective: Expression,
+    constraints: Vec<Constraint>,
+    wanted: &[Variable],
+) -> Result<Vec<f64>, String> {
+    use clarabel::solver::SolverStatus;
+
+    let mut model = vars.maximise(objective).using(good_lp::clarabel);
+    // good_lp pins tol_feas to 1e-9 — tighter than Clarabel's own 1e-8
+    // default and needlessly stall-prone on large degenerate MCF LPs
+    // (rates are keys/s magnitudes, filtered at FLOW_EPSILON=1e-6).
+    model.settings().tol_feas(1e-8);
+    for c in constraints {
+        model = model.with(c);
+    }
+    match model.solve() {
+        Ok(sol) => {
+            match sol.inner().status {
+                SolverStatus::Solved => {}
+                // Reduced-tolerance exit (1e-4 feas): still a feasible
+                // point near the optimum — degraded rate accuracy beats
+                // publishing zero rates for a whole replan period.
+                SolverStatus::AlmostSolved => {
+                    warn!("clarabel exited AlmostSolved; using reduced-accuracy solution");
+                }
+                other => {
+                    return Err(format!("clarabel terminated with non-optimal status {other:?}"))
+                }
+            }
+            Ok(wanted.iter().map(|v| sol.value(*v)).collect())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn solve_lp_backend(
+    vars: ProblemVariables,
+    objective: Expression,
+    constraints: Vec<Constraint>,
+    wanted: &[Variable],
+) -> Result<Vec<f64>, String> {
+    match lp_backend() {
+        LpBackend::Microlp => solve_lp(good_lp::microlp, vars, objective, constraints, wanted),
+        LpBackend::Clarabel => solve_lp_clarabel(vars, objective, constraints, wanted),
+    }
+}
 
 impl McmcfSolution {
     /// Adapt the solver output to the legacy [`McfSnapshot`] shape so
@@ -426,9 +523,24 @@ impl McmcfSolver {
         // noise to downstream consumers. Setting
         // `SDN_DISABLE_LEX_REFINEMENT=1` forces phase 1 behaviour
         // (no η, exact `r_k = δ_k + λ* · R_k`) for those cases.
-        let lex_disabled = std::env::var("SDN_DISABLE_LEX_REFINEMENT")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false);
+        // Phase 2 is additionally FORCED OFF on the Clarabel backend,
+        // regardless of the env var. Interior-point methods converge to
+        // the analytic centre of the optimal face, and phase 2's
+        // objective (max Σ η) leaves the routing degenerate: every
+        // cycle with capacity slack carries real-magnitude circulating
+        // flow (including the 2-cycle on each edge), far above
+        // FLOW_EPSILON. Reading those x values back as edge_flows
+        // builds WCMP tables with loop-forming next-hops. Pinning the
+        // (approximate) λ* into phase-2 equalities also flaps to
+        // false-infeasible whenever λ* comes back superoptimal
+        // (AlmostSolved). Phase-1-only means empty edge_flows → the
+        // forwarding push falls back to topology shortest-path, the
+        // same behaviour production deploys already choose via
+        // SDN_DISABLE_LEX_REFINEMENT=1.
+        let lex_disabled = lp_backend() == LpBackend::Clarabel
+            || std::env::var("SDN_DISABLE_LEX_REFINEMENT")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false);
         let phase2 = if lex_disabled {
             Phase2Output {
                 eta_values: vec![0.0; active.len()],
@@ -474,6 +586,7 @@ impl McmcfSolver {
             total_eta,
             total_sigma,
             n_edge_flows = phase2.edge_flows.len(),
+            backend = ?lp_backend(),
             "MCMCF-λ solved (two-phase)"
         );
 
@@ -551,9 +664,10 @@ impl McmcfSolver {
         let mut obj = Expression::with_capacity(1 + sigma.len());
         obj += lambda;
         for s in &sigma {
-            obj += LAMBDA_SLACK_PENALTY * -1.0 * *s;
+            obj += -LAMBDA_SLACK_PENALTY * *s;
         }
-        let mut problem = vars.maximise(obj).using(good_lp::default_solver);
+        let mut constraints: Vec<Constraint> =
+            Vec::with_capacity(active.len() * node_set.len() + undirected.len());
         for (k_idx, c) in active.iter().enumerate() {
             let src = inputs.dkms_to_qkc.get(c.src_dkms.as_str()).unwrap();
             let dst = inputs.dkms_to_qkc.get(c.dst_dkms.as_str()).unwrap();
@@ -580,7 +694,7 @@ impl McmcfSolver {
                 } else {
                     expr.eq(0.0)
                 };
-                problem = problem.with(c_node);
+                constraints.push(c_node);
             }
         }
         for ((a, b), cap) in undirected {
@@ -591,12 +705,15 @@ impl McmcfSolver {
                 expr += row[ij];
                 expr += row[ji];
             }
-            problem = problem.with(expr.leq(*cap));
+            constraints.push(expr.leq(*cap));
         }
-        match problem.solve() {
-            Ok(sol) => {
-                let lambda_v = sol.value(lambda).max(0.0);
-                let sigmas: Vec<f64> = sigma.iter().map(|s| sol.value(*s).max(0.0)).collect();
+        let mut wanted = Vec::with_capacity(1 + sigma.len());
+        wanted.push(lambda);
+        wanted.extend_from_slice(&sigma);
+        match solve_lp_backend(vars, obj, constraints, &wanted) {
+            Ok(vals) => {
+                let lambda_v = vals[0].max(0.0);
+                let sigmas: Vec<f64> = vals[1..].iter().map(|v| v.max(0.0)).collect();
                 Some((lambda_v, sigmas))
             }
             Err(e) => {
@@ -655,7 +772,8 @@ impl McmcfSolver {
         for e in &eta {
             obj += *e;
         }
-        let mut problem = vars.maximise(obj).using(good_lp::default_solver);
+        let mut constraints: Vec<Constraint> =
+            Vec::with_capacity(active.len() * node_set.len() + undirected.len());
         // Conservation with η_k present at source/sink, λ pinned to λ*.
         for (k_idx, c) in active.iter().enumerate() {
             let src = inputs.dkms_to_qkc.get(c.src_dkms.as_str()).unwrap();
@@ -686,7 +804,7 @@ impl McmcfSolver {
                 } else {
                     expr.eq(0.0)
                 };
-                problem = problem.with(c_node);
+                constraints.push(c_node);
             }
         }
         // Capacity (unchanged from phase 1).
@@ -698,16 +816,26 @@ impl McmcfSolver {
                 expr += row[ij];
                 expr += row[ji];
             }
-            problem = problem.with(expr.leq(*cap));
+            constraints.push(expr.leq(*cap));
         }
-        match problem.solve() {
-            Ok(sol) => {
-                let eta_values: Vec<f64> = eta.iter().map(|e| sol.value(*e).max(0.0)).collect();
+        // Wanted values: η_k first, then the full x matrix row-major —
+        // phase 2's flow assignment is the final routing, so every
+        // x^k_{ij} is read back to build the edge-flow support.
+        let n_arcs = arcs.len();
+        let mut wanted = Vec::with_capacity(eta.len() + active.len() * n_arcs);
+        wanted.extend_from_slice(&eta);
+        for row in &x {
+            wanted.extend_from_slice(row);
+        }
+        match solve_lp_backend(vars, obj, constraints, &wanted) {
+            Ok(vals) => {
+                let eta_values: Vec<f64> = vals[..eta.len()].iter().map(|v| v.max(0.0)).collect();
                 let mut edge_flows: Vec<EdgeFlow> = Vec::new();
                 for (k_idx, c) in active.iter().enumerate() {
                     let fid = flow_id(&c.src_dkms, &c.dst_dkms);
+                    let base = eta.len() + k_idx * n_arcs;
                     for (a_idx, (a, b)) in arcs.iter().enumerate() {
-                        let v = sol.value(x[k_idx][a_idx]);
+                        let v = vals[base + a_idx];
                         if v > FLOW_EPSILON {
                             edge_flows.push(EdgeFlow {
                                 flow_id: fid.clone(),
@@ -769,6 +897,17 @@ fn zero_rate_fallback(active: &[&CommodityDemand]) -> McmcfSolution {
 mod tests {
     use super::*;
     use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc, Topology};
+
+    /// Phase 2 (lex refinement / η / edge_flows → WCMP) is forced off
+    /// on the Clarabel backend — interior-point solutions put
+    /// real-magnitude circulation flow on the degenerate phase-2 LP,
+    /// which would corrupt the WCMP tables (see the comment at the
+    /// `lex_disabled` computation in `solve`). Tests asserting phase-2
+    /// behaviour are therefore skipped under `SDN_SOLVER=clarabel`;
+    /// they still run on the default microlp backend.
+    fn phase2_unavailable() -> bool {
+        lp_backend() == LpBackend::Clarabel
+    }
 
     fn host(id: i64) -> HostEndpoint {
         HostEndpoint {
@@ -1101,6 +1240,9 @@ mod tests {
     /// paper §4.
     #[test]
     fn lex_refinement_uses_residual_capacity_on_free_path() {
+        if phase2_unavailable() {
+            return;
+        }
         let t = triangle_with_slack();
         let reg = DemandRegistry::new();
         // All 6 ordered pairs empty + no drain → R_k = 4096 each.
@@ -1262,6 +1404,9 @@ mod tests {
     /// into a WCMP entry with two equally-weighted next-hops.
     #[test]
     fn diamond_topology_produces_multipath_wcmp_for_asymmetric_demand() {
+        if phase2_unavailable() {
+            return;
+        }
         let t = diamond_topology();
         let reg = DemandRegistry::new();
         // dA→dB: empty buffer, high demand. dB→dA: full, no fill needed.
@@ -1297,6 +1442,9 @@ mod tests {
     /// scenario so qkc 11 actually carries flow.
     #[test]
     fn transit_node_has_single_next_hop_per_destination() {
+        if phase2_unavailable() {
+            return;
+        }
         let t = diamond_topology();
         let reg = DemandRegistry::new();
         report(&reg, "dA", "dB", 0.0, 4096.0, 0.0);
@@ -1341,6 +1489,9 @@ mod tests {
     /// snapshot so the forwarding push loop can read it.
     #[test]
     fn into_mcf_snapshot_includes_wcmp_table() {
+        if phase2_unavailable() {
+            return;
+        }
         let t = diamond_topology();
         let reg = DemandRegistry::new();
         // Same asymmetric setup as the multipath WCMP test above so
@@ -1494,6 +1645,9 @@ mod tests {
     /// entry with ≥2 next-hops at the source corner.
     #[test]
     fn mesh_3x4_diagonal_corner_pair_produces_multipath_wcmp() {
+        if phase2_unavailable() {
+            return;
+        }
         let t = mesh_3x4_topology();
         // Asymmetric demand: A→D drives a hard demand (empty buffer),
         // the other commodities involving A and D are reported full
@@ -1585,5 +1739,24 @@ mod tests {
             .expect("trivial LP must solve");
         let xv = solution.value(x);
         assert!((xv - 1.0).abs() < 1e-6, "expected x ≈ 1.0, got {xv}");
+    }
+
+    /// Same trivial LP, pinned to the Clarabel backend regardless of
+    /// `SDN_SOLVER` — proves the alternative backend is compiled in
+    /// and solves. Interior-point values are approximate, hence the
+    /// looser tolerance than the microlp smoke test.
+    #[test]
+    fn clarabel_smoke_solves_trivial_problem() {
+        use good_lp::constraint;
+        let mut vars = good_lp::ProblemVariables::new();
+        let x = vars.add(variable().min(0.0).max(1.0));
+        let solution = vars
+            .maximise(x)
+            .using(good_lp::clarabel)
+            .with(constraint!(x <= 1.0))
+            .solve()
+            .expect("trivial LP must solve on clarabel");
+        let xv = solution.value(x);
+        assert!((xv - 1.0).abs() < 1e-4, "expected x ≈ 1.0, got {xv}");
     }
 }
