@@ -9,11 +9,12 @@ RES="$OUT/scale.tsv"
 echo -e "cell\ttopo\tN\tpqc\tsolver\tedges_qkd\tedges_pqc\tqkd_comps\tlaunch\te2e_pass\te2e_total\tverdict" > "$RES"
 
 # topo N degree pqc seed warmup cores mem
+# warmup scaled to the SDN solve time (~O(N^2): ~177s at N=70, ~360s at N=100).
 CELLS=(
-  "er 70 4 0.5 71 170 32 48G"
-  "er 100 4 0.5 72 220 48 64G"
-  "er 50 4 0.8 73 130 32 48G"
-  "ba 70 4 0.5 74 170 32 48G"
+  "er 70 4 0.5 71 260 32 48G"
+  "er 100 4 0.5 72 470 48 64G"
+  "er 50 4 0.8 73 150 32 48G"
+  "ba 70 4 0.5 74 260 32 48G"
 )
 i=0
 for cell in "${CELLS[@]}"; do
@@ -56,7 +57,7 @@ print(eq,ep,len(set(comp.values())) if nodes else 0)
 PY
 )
   LOG="$D/run.log"
-  timeout 900 srun -p short -c"$C" --mem="$MEM" -t 16 bash -lc "
+  timeout 1500 srun -p short -c"$C" --mem="$MEM" -t 26 bash -lc "
     source \"\$LUSTRE/dkms-build/buildenv.sh\" 2>/dev/null; cd $REPO
     export SDN_SOLVER=clarabel SDN_DUAL_GRADE_TABLES=1
     python3 scripts/slurm/launch.py --plan $D/plan.json --logs $D/logs --timeout 180 || { echo LAUNCH_FAIL; exit 9; }

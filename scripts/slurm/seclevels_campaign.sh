@@ -12,7 +12,17 @@ mkdir -p "$LUSTRE/dkms-build/camp"
 RES="$OUT/campaign.tsv"
 echo -e "cell\ttopo\tN\tpqc\tdual\tsolver\tedges_qkd\tedges_pqc\tqkd_comps\tlaunch\te2e_pass\te2e_total\tverdict" > "$RES"
 
-warmup_for() { local n=$1; if [ "$n" -le 12 ]; then echo 45; elif [ "$n" -le 22 ]; then echo 65; elif [ "$n" -le 35 ]; then echo 85; else echo 115; fi; }
+# Warmup must exceed the SDN MCMCF solve time, which scales ~O(N^2) (e.g.
+# ~177s at N=70 with clarabel). Otherwise rates aren't pushed before the e2e
+# and buffers read empty (429). Scale generously with N.
+warmup_for() { local n=$1
+  if   [ "$n" -le 12 ]; then echo 45
+  elif [ "$n" -le 22 ]; then echo 65
+  elif [ "$n" -le 35 ]; then echo 90
+  elif [ "$n" -le 55 ]; then echo 150
+  elif [ "$n" -le 75 ]; then echo 260
+  else echo 460; fi
+}
 
 # cells: topo N degree pqc dualgrade(0/1) seed
 CELLS=(
