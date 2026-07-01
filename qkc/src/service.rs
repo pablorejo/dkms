@@ -19,7 +19,7 @@ use crate::{
     keystore::{self, KeyStore},
     kme::{KeySource, KmeClient},
     pqc_handshake::PqcHandshake,
-    pqc_source::PqcKeySource,
+    pqc_source::{PqcKeySource, RekeyClock, SecretStore},
     routing::ForwardingTable,
     transport::peer_client::PeerOut,
 };
@@ -112,14 +112,32 @@ impl QkcService {
                     (c as Arc<dyn KeySource>, None)
                 }
                 LinkType::Pqc => {
-                    let (hs, secret_rx) = PqcHandshake::new(
+                    // Re-keying por épocas (forward secrecy): el SecretStore +
+                    // RekeyClock se comparten entre el handshake (escribe los
+                    // secretos por época) y la PqcKeySource (deriva + cuenta).
+                    let lookahead = link.effective_lookahead();
+                    let is_initiator = cfg.qkc_id < link.neighbor_id;
+                    let store = SecretStore::new(lookahead, link.pqc_rekey_keys);
+                    let clock = RekeyClock::new(link.pqc_rekey_keys);
+                    let hs = PqcHandshake::new(
                         link.pqc_suite.clone(),
                         cfg.qkc_id,
                         link.neighbor_id,
                         link.neighbor_peer_addr.clone(),
                         Arc::clone(&peer_out),
+                        Arc::clone(&store),
+                        Arc::clone(&clock),
+                        lookahead,
+                        link.pqc_rekey_secs,
                     );
-                    let src = Arc::new(PqcKeySource::new(link.key_size_bits, secret_rx));
+                    // El reloj solo lo alimenta el emisor del lado iniciador; el
+                    // respondedor sigue la rotación vía store.highest().
+                    let src = Arc::new(PqcKeySource::new(
+                        link.key_size_bits,
+                        store,
+                        lookahead,
+                        is_initiator.then(|| Arc::clone(&clock)),
+                    ));
                     (src as Arc<dyn KeySource>, Some(hs))
                 }
             };
@@ -162,12 +180,13 @@ impl QkcService {
         let mut for_logger = Vec::with_capacity(self.links.len());
         for (peer_id, link) in self.links.iter() {
             link.keys.spawn_workers();
-            // Enlaces PQC: arranca el handshake ML-KEM (no-op en el lado
-            // respondedor; el iniciador es el de qkc_id menor). Los workers
-            // del KeyStore ya esperan el secreto vía el watch, así que no
+            // Enlaces PQC: arranca la tarea de rotación/pre-carga de épocas
+            // (no-op en el respondedor, que es reactivo a los INIT; el
+            // iniciador es el de qkc_id menor). Los workers del KeyStore
+            // esperan el secreto de cada época vía el SecretStore, así que no
             // hay carrera con el orden de arranque.
             if let Some(pqc) = &link.pqc {
-                pqc.spawn_initiator();
+                pqc.spawn_rotation();
             }
             for_logger.push((*peer_id, Arc::clone(&link.keys)));
         }

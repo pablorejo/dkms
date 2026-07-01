@@ -104,6 +104,26 @@ pub struct LinkConfig {
     /// clave; debe ser idéntico en ambos extremos.
     #[serde(default = "default_key_size")]
     pub key_size_bits: u32,
+
+    /// **Re-keying PQC** (solo enlaces PQC, ignorado en QKD). Rota el secreto
+    /// ML-KEM cada `pqc_rekey_keys` claves emitidas. `0` = sin disparo por
+    /// volumen. Default 1000. Acota el blast-radius por secreto.
+    #[serde(default = "default_rekey_keys")]
+    pub pqc_rekey_keys: u64,
+
+    /// **Re-keying PQC**: rota el secreto cada `pqc_rekey_secs` segundos (tope
+    /// de edad, p. ej. enlaces de poco tráfico). `0` = sin disparo por tiempo.
+    /// Default 3600 (1 h). La rotación ocurre en `max(pqc_rekey_keys,
+    /// pqc_rekey_secs)` (lo que llegue primero). `0 && 0` ⇒ secreto único
+    /// (comportamiento histórico, sin forward secrecy).
+    #[serde(default = "default_rekey_secs")]
+    pub pqc_rekey_secs: u64,
+
+    /// **Re-keying PQC**: épocas pre-cargadas por delante de la activa (la
+    /// rotación es transparente, sin latencia). Default 2. Se fuerza a 0 si el
+    /// re-keying está desactivado.
+    #[serde(default = "default_rekey_lookahead")]
+    pub pqc_rekey_lookahead: u32,
 }
 
 fn default_key_size() -> u32 {
@@ -112,6 +132,31 @@ fn default_key_size() -> u32 {
 
 fn default_pqc_suite() -> String {
     common::crypto::pqc::suite::ML_KEM_768.to_string()
+}
+
+fn default_rekey_keys() -> u64 {
+    1000
+}
+
+fn default_rekey_secs() -> u64 {
+    3600
+}
+
+fn default_rekey_lookahead() -> u32 {
+    2
+}
+
+impl LinkConfig {
+    /// Lookahead efectivo: 0 si el re-keying está desactivado (`keys==0 &&
+    /// secs==0`), si no `pqc_rekey_lookahead`. Así un enlace sin rotación usa
+    /// una sola época sin pre-cargar épocas inútiles.
+    pub fn effective_lookahead(&self) -> u32 {
+        if self.pqc_rekey_keys == 0 && self.pqc_rekey_secs == 0 {
+            0
+        } else {
+            self.pqc_rekey_lookahead
+        }
+    }
 }
 
 impl QkcConfig {
