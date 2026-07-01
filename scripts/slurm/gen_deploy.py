@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -214,10 +215,25 @@ def main() -> None:
                          "QKCs run an ML-KEM handshake and derive keys in-process). Mirrors the real "
                          "motivation: long links can't do QKD. 0 = disabled (all edges QKD).")
     ap.add_argument("--pqc-fraction", type=float, default=0.0,
-                    help="when --pqc-distance-threshold-km is 0: make the longest FRACTION (0..1) of "
-                         "edges PQC, deterministic by descending distance then (lo,hi). 0 = disabled.")
+                    help="when --pqc-distance-threshold-km is 0: make a FRACTION (0..1) of edges PQC. "
+                         "Default (--pqc-seed 0): deterministic, the longest fraction by descending "
+                         "distance then (lo,hi). With --pqc-seed > 0: a uniform RANDOM subset. 0 = disabled.")
+    ap.add_argument("--pqc-seed", type=int, default=0,
+                    help="when > 0, select the --pqc-fraction edges as a reproducible RANDOM subset "
+                         "(random.Random(seed).sample) instead of the deterministic longest-distance rule. "
+                         "Keep --seed fixed to pin ONE base topology and vary only the PQC subset. 0 = "
+                         "deterministic (backward-compatible).")
     ap.add_argument("--pqc-suite", default="ml-kem-768",
                     help="ML-KEM parameter set for PQC links (ml-kem-512|768|1024)")
+    ap.add_argument("--pqc-rekey-keys", type=int, default=1000,
+                    help="PQC link re-keying: rotate the ML-KEM secret every N emitted keys "
+                         "(0 = no volume trigger). Default 1000. (0 + --pqc-rekey-secs 0 = single secret)")
+    ap.add_argument("--pqc-rekey-secs", type=int, default=3600,
+                    help="PQC link re-keying: rotate the secret every T seconds (max age; 0 = no time "
+                         "trigger). Default 3600. Rotation fires on max(keys, secs).")
+    ap.add_argument("--pqc-rekey-lookahead", type=int, default=2,
+                    help="PQC link re-keying: epochs pre-established ahead of the active one so "
+                         "rotation is latency-free. Default 2.")
     ap.add_argument("--qd-r0", type=float, default=2000.0)
     ap.add_argument("--qd-alpha", type=float, default=0.2)
     ap.add_argument("--qd-max-buffer", type=int, default=65536)
@@ -265,8 +281,15 @@ def main() -> None:
                 pqc_edges.add((a, b))
     elif args.pqc_fraction and args.pqc_fraction > 0:
         frac = min(max(args.pqc_fraction, 0.0), 1.0)
-        ordered = sorted(edges, key=lambda e: (-_edge_dist(e[2]), e[0], e[1]))
-        for (a, b, _ln) in ordered[: round(len(ordered) * frac)]:
+        n_pqc = round(len(edges) * frac)
+        if args.pqc_seed > 0:
+            # Reproducible RANDOM subset: pin ONE base topology with a fixed
+            # --seed and vary only which edges are PQC across --pqc-seed values.
+            chosen = random.Random(args.pqc_seed).sample(edges, n_pqc)
+        else:
+            # Deterministic: the longest fraction by descending distance.
+            chosen = sorted(edges, key=lambda e: (-_edge_dist(e[2]), e[0], e[1]))[:n_pqc]
+        for (a, b, _ln) in chosen:
             pqc_edges.add((a, b))
 
     # Per-edge quditto: placed on the lower-id endpoint's host. PQC edges
@@ -393,7 +416,10 @@ def main() -> None:
                       f'neighbor_peer_addr = "{host_of[j]}:{pj["qkc_peer"]}"\n')
             if qd["is_pqc"]:
                 links += (f'link_type = "pqc"\n'
-                          f'pqc_suite = "{args.pqc_suite}"\n')
+                          f'pqc_suite = "{args.pqc_suite}"\n'
+                          f'pqc_rekey_keys = {args.pqc_rekey_keys}\n'
+                          f'pqc_rekey_secs = {args.pqc_rekey_secs}\n'
+                          f'pqc_rekey_lookahead = {args.pqc_rekey_lookahead}\n')
             else:
                 links += f'quditto_url = "http://{qd["host_ip"]}:{qd["port"]}"\n'
             links += f'key_size_bits = {args.key_bits}\n'
@@ -539,6 +565,7 @@ def main() -> None:
 
     plan = {
         "meta": {"topo": args.topo, "N": N, "edges": len(edges),
+                 "edge_list": sorted([[a, b] for (a, b, _ln) in edges]),
                  "pqc_edges": sorted([list(e) for e in pqc_edges]), "hosts": hosts,
                  "saes_per_dkms": args.saes_per_dkms, "key_bits": args.key_bits,
                  "out": str(out), "binaries": str(bindir)},
