@@ -49,6 +49,17 @@ Monta `./certs` en el DKMS (el `dkms.yml` ya lo hace). **Multi-institución**: l
 CA común es un acuerdo entre instituciones (una CA central que firme, o CAs que se
 cross-firmen). Distribuye `ca.crt` a todos.
 
+Los **SAEs** (clientes ETSI-014) también necesitan un cert firmado por la CA:
+```bash
+./gen-certs.sh --sae sae_1 ./certs
+```
+El DKMS extrae la identidad SAE del SAN `urn:dkms:sae:<id>` (o del CN/DNS si no
+hay URI). Prueba rápida:
+```bash
+curl --cacert certs/ca.crt --cert certs/sae_1.crt --key certs/sae_1.key \
+  https://<ip-dkms>:20005/api/v1/keys/sae_2/status
+```
+
 ## Puertos por defecto (host network)
 | módulo | puertos |
 |--------|---------|
