@@ -26,8 +26,6 @@ scripts/demo-star/tls/
 # Logs
 *.log
 logs/
-# Slurm job stdout/stderr dumps (CESGA runs, local only)
-slurm-*.out
 
 # Coverage
 *.profraw

@@ -46,8 +46,7 @@ def main(run_dir: pathlib.Path):
     # "activo" desde su PRIMER request en adelante (el ramp solo añade pares
     # hasta el teardown). Por tanto
     #     active_saes(t) = 2 · #{pares cuyo primer t_emit ≤ t}
-    # es monótona y recupera el ramp verdadero (misma definición que
-    # scripts/slurm/analyze_sae_ramp.py:13-15,95-96).
+    # es monótona y recupera el ramp verdadero.
     #
     # NO usar el conteo de pares únicos por bin de 1 s: con llegadas Poisson
     # (λ≈1/s) solo ~63 % (1−e⁻¹) de los pares dispara en un bin dado, así que

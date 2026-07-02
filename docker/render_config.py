@@ -13,7 +13,7 @@ Usage: render_config.py <role> <node.yml> <out_dir>
 
 Stdlib + PyYAML (debian pkg python3-yaml). TOML emitted by hand (configs are
 simple). Field names/structure mirror qkc/orr/dkms/sdn `src/config.rs` and the
-topology JSON the SDN loads (same shape as scripts/slurm/gen_deploy.py).
+topology JSON the SDN loads.
 Compatible with Python 3.7+ (no nested same-quote f-strings).
 """
 import json
