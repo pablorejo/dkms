@@ -49,6 +49,7 @@ common/src/proto/generated/
 
 # Notebook / results
 results/
+tests/results/
 .results.md
 
 # Test certs (keep example certs if Cargo build needs them, else exclude)
