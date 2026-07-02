@@ -1,0 +1,10 @@
+# Despliegue de un DKMS. Copia tu node.yml + la carpeta certs/ (ver gen-certs.sh)
+# junto a este fichero.
+services:
+  dkms:
+    image: ${IMAGE_PREFIX:-ORG}/dkms:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./node.yml:/config/node.yml:ro
+      - ./certs:/config/certs:ro          # ca.crt + <node_id>.crt + <node_id>.key

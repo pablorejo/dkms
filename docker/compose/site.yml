@@ -1,0 +1,23 @@
+# "Sitio completo": QKC + ORR + DKMS de UN nodo en la MISMA máquina.
+# Como cada rol usa puertos distintos por defecto (20000-20009), conviven con
+# network_mode: host sin colisionar. Coloca junto a este fichero:
+#   node.qkc.yml  node.orr.yml  node.dkms.yml  y  certs/
+# En los node.yml de orr/dkms deja qkc_addr/orr_addr en 127.0.0.1 (co-locados).
+services:
+  qkc:
+    image: ${IMAGE_PREFIX:-ORG}/qkc:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes: [ "./node.qkc.yml:/config/node.yml:ro" ]
+  orr:
+    image: ${IMAGE_PREFIX:-ORG}/orr:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes: [ "./node.orr.yml:/config/node.yml:ro" ]
+  dkms:
+    image: ${IMAGE_PREFIX:-ORG}/dkms:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./node.dkms.yml:/config/node.yml:ro
+      - ./certs:/config/certs:ro

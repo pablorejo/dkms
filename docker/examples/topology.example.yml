@@ -1,0 +1,27 @@
+# topology.yml para la SDN central — la mantiene el operador central (visión
+# global de TODAS las instituciones). Cada institución le comunica (fuera de
+# banda) las IPs de sus módulos y el operador las añade aquí.
+
+nodes:                              # id de nodo -> IP[:puerto] de cada módulo
+  1:
+    qkc:  "10.0.0.11"               # admin_http del QKC (puerto por defecto 20002)
+    orr:  "10.0.0.11"               # grpc del ORR (20003)
+    dkms: "10.0.0.11"               # sae del DKMS (20005)
+  2:
+    qkc:  "10.0.0.12"
+    orr:  "10.0.0.12"
+    dkms: "10.0.0.12"
+
+links:                              # enlaces entre QKC (backbone QKD/PQC)
+  - a: 1
+    b: 2
+    type: pqc                       # pqc | qkd
+    # r0: 2000                      # modelo de tasa (para el LP del SDN)
+    # alpha: 0.2
+    # distance_km: 5
+
+saes:                               # SAEs de prueba y su DKMS (opcional)
+  - { id: "sae_1", node: 1 }
+  - { id: "sae_2", node: 2 }
+
+# mcf_period_ms: 5000

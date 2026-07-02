@@ -1,0 +1,8 @@
+# Despliegue de un ORR. Copia tu node.yml junto a este fichero.
+services:
+  orr:
+    image: ${IMAGE_PREFIX:-ORG}/orr:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./node.yml:/config/node.yml:ro

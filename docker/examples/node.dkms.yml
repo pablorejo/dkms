@@ -1,0 +1,27 @@
+# node.yml para un DKMS.
+node_id: "dkms-1"
+
+# IP de ESTA máquina, alcanzable por los otros DKMS (para el mTLS ETSI-020 y
+# el socket de ACK). Debe coincidir con el SAN del certificado (ver gen-certs.sh).
+advertise_ip: "10.0.0.11"
+
+# Dónde está SU ORR (localhost si co-locado; IP si en otra máquina).
+orr_addr: "127.0.0.1:20003"
+
+sdn_endpoint: "http://10.0.0.100:19000"
+
+# Peers DKMS (una entrada por cada otro DKMS con el que intercambia claves).
+peers:
+  dkms-2:
+    endpoint: "10.0.0.12"    # IP (o IP:puerto) del DKMS peer; puerto peer por defecto 20006
+    orr_id: "orr_2"          # id del ORR de ese peer (transporte por ORR)
+
+# security_level: qkd_prefer   # strict_qkd | qkd_prefer | no_worry
+# fill_rate: 0                 # floor de llenado keys/s (0 = solo lo que asigne la SDN)
+
+# Certificados: monta ca.crt + <node_id>.crt + <node_id>.key en /config/certs
+# (ver docker/gen-certs.sh). Ruta configurable con certs_dir.
+# certs_dir: /config/certs
+
+# sae_bindings:                # fallback SAE->DKMS si la SDN no responde
+#   sae_1: dkms-1

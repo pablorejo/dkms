@@ -1,0 +1,23 @@
+# node.yml para un QKC — lo único que edita la institución.
+# Sin QKD real: usa enlaces "pqc" (QKD simulado por PQC).
+qkc_id: 1
+
+# key_size_bits: 256          # bits de clave OTP; DEBE coincidir en ambos extremos
+
+links:
+  - neighbor_id: 2
+    neighbor_addr: "10.0.0.12"   # IP (o IP:puerto) del QKC vecino; puerto peer por defecto 20000
+    type: pqc                    # pqc = simulado (sin hardware) | qkd = KME real
+    # --- si type: qkd (nodo QKD real por ETSI-014) ---
+    # kme_url: "https://mi-nodo-qkd:443"
+    # --- ajustes PQC opcionales (defaults sensatos) ---
+    # pqc_suite: ml-kem-768
+    # pqc_rekey_keys: 1000       # rota el secreto cada N claves
+    # pqc_rekey_secs: 3600       # ...o cada T segundos (lo que llegue primero)
+    # pqc_rekey_lookahead: 2
+
+# La SDN le empuja la tabla de forwarding automáticamente; no se configura aquí.
+# ports:                        # override solo si varios QKC comparten host
+#   peer: 20000
+#   local: 20001
+#   admin: 20002

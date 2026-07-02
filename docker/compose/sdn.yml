@@ -1,0 +1,9 @@
+# Despliegue de la SDN central. El "node.yml" de la SDN es la topology.yml
+# global (ver examples/topology.example.yml). Cópiala como node.yml junto a esto.
+services:
+  sdn:
+    image: ${IMAGE_PREFIX:-ORG}/sdn:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./node.yml:/config/node.yml:ro    # = tu topology.yml

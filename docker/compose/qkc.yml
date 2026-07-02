@@ -1,0 +1,10 @@
+# Despliegue de un QKC. Copia tu node.yml junto a este fichero y:
+#   docker compose -f qkc.yml pull && docker compose -f qkc.yml up -d
+#   docker compose -f qkc.yml logs -f
+services:
+  qkc:
+    image: ${IMAGE_PREFIX:-ORG}/qkc:latest
+    network_mode: host                 # usa la red de la máquina (sin mapear puertos)
+    restart: unless-stopped
+    volumes:
+      - ./node.yml:/config/node.yml:ro

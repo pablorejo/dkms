@@ -1,0 +1,17 @@
+# node.yml para un ORR.
+orr_id: "orr_1"
+qkc_id: 1
+
+# Dónde está SU QKC. Si el ORR y el QKC están en la MISMA máquina, deja
+# localhost; si están en máquinas distintas, pon la IP del QKC.
+qkc_addr: "127.0.0.1:20001"        # local_listen del QKC (puerto 20001)
+
+sdn_url: "http://10.0.0.100:19000" # gRPC de la SDN central
+
+# Peers ORR (una entrada por cada otro ORR de la red).
+peers:                             # orr_id -> qkc_id
+  orr_2: 2
+peer_grpc_addrs:                   # orr_id -> URL gRPC del ORR peer (puerto 20003)
+  orr_2: "http://10.0.0.12:20003"
+
+# default_max_hops: 1              # 1 = PQC E2E (recomendado)
