@@ -8,13 +8,14 @@ ARG MODULE=qkc
 
 # ── build ────────────────────────────────────────────────────────────────
 # bookworm trae gcc-12, que aws-lc-sys (dep de rustls) exige (gcc-10 lo rechaza).
+# Compila los 4 binarios de una pasada y SIN usar ARG MODULE: así la etapa es
+# idéntica para los 4 targets del bake y buildx la construye una sola vez.
 FROM rust:1.88-bookworm AS build
-ARG MODULE
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p "${MODULE}"
+RUN cargo build --release --bin qkc --bin orr --bin dkms --bin sdn
 
 # ── runtime ──────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
