@@ -92,6 +92,7 @@ La columna "quién entra" es la que importa para el firewall:
 | sdn  | 19000 (grpc)   | gRPC | todos los ORR y DKMS |
 | sdn  | 19002 (http)   | HTTP | admin |
 | sdn  | 19010 (metrics)| HTTP | Prometheus (opcional) |
+| quditto | 20010 (http)| HTTP ETSI-014 | los QKC de **los dos extremos** del enlace |
 
 Reglas mínimas entre instituciones que se enlazan: 20000, 20003, 20006 y
 20009 entre ellas; 20002 solo desde la SDN; 19000 abierto hacia la SDN desde
@@ -110,10 +111,13 @@ hacen `pull`.
 IMAGE_PREFIX=tuusuario docker buildx bake -f docker/docker-bake.hcl --push
 ```
 
-Qué hace: compila los 4 binarios **en una sola pasada** (la etapa de build es
-común a los 4 targets) y publica `tuusuario/{qkc,orr,dkms,sdn}:latest` para
-`linux/amd64` + `linux/arm64` (Raspberry Pi). Variables del bake:
+Qué hace: compila los 5 binarios **en una sola pasada** (la etapa de build es
+común a los 5 targets) y publica `tuusuario/{qkc,orr,dkms,sdn,quditto}:latest`
+para `linux/amd64` + `linux/arm64` (Raspberry Pi). Variables del bake:
 `IMAGE_PREFIX` (namespace en Docker Hub) y `TAG` (default `latest`).
+
+`quditto` solo se despliega si quieres enlaces QKD **sin hardware** (ver la
+sección del simulador más abajo); los otros cuatro son los módulos de runtime.
 
 Notas de build:
 
@@ -445,6 +449,69 @@ Dos mensajes del boot que **no** son errores: `qkc unreachable after 20
 retries; continuing without it` (el DKMS no habla con el QKC directamente
 cuando el transporte es ORR) y `ack_reaper: expired pending keys` durante el
 primer minuto (claves emitidas antes de que el peer estuviera arriba).
+
+---
+
+## Enlaces QKD sin hardware: el simulador `quditto`
+
+**Cuándo lo necesitas**: solo si quieres enlaces `type: qkd` y no tienes un KME
+real. Si te vale con `type: pqc` no despliegues nada de esto — los enlaces PQC
+no hablan con ninguna API, los dos QKC vecinos derivan el material entre ellos
+con ML-KEM.
+
+**Qué es**: un KME de mentira. Mantiene un buffer de claves aleatorias que
+rellena a
+
+```
+R(d) = r0 · 10^(−alpha·d/10)   claves/s
+```
+
+y las sirve por ETSI-014, igual que haría el hardware. Para el QKC es
+indistinguible de un KME real: apunta su `kme_url` aquí y ya está.
+
+**Un quditto por enlace, no por nodo.** Los QKC de los dos extremos apuntan al
+**mismo** `kme_url`; de ahí sale que ambos obtengan el mismo material. Lo
+levanta una de las dos instituciones (o el operador) en una máquina que ambas
+alcancen.
+
+```bash
+mkdir quditto-1-2 && cd quditto-1-2
+cp .../docker/compose/quditto.yml .
+cp .../docker/examples/node.quditto.yml node.yml   # editar r0/alpha/distance_km
+echo "IMAGE_PREFIX=tuusuario" > .env
+docker compose -f quditto.yml up -d
+docker compose -f quditto.yml logs -f   # sano: "minter started ... rate_kps=..."
+```
+
+Comprobación:
+
+```bash
+curl -s http://localhost:20010/api/v1/keys/1/status
+# {"source_KME_ID":"quditto", ..., "stored_key_count":8192, "key_size":256}
+```
+
+En el `node.yml` de **los dos** QKC del enlace basta con apuntar al simulador:
+
+```yaml
+links:
+  - neighbor_id: 2
+    neighbor_addr: "10.0.0.12"
+    type: qkd
+    kme_url: "http://10.0.0.50:20010"
+```
+
+**Ojo con los tres valores duplicados.** `r0`, `alpha` y `distance_km` se
+declaran hoy en **dos sitios independientes**: el `node.yml` del quditto (que
+los usa para generar a esa tasa) y el bloque `links` del `topology.yml` de la
+SDN (que los usa para saber qué capacidad tiene la arista en su solver). Nada
+comprueba que coincidan, así que si divergen la SDN reparte caudal sobre una
+capacidad que el enlace no da. Ponlos iguales en ambos.
+
+`key_size_bits` debe coincidir en el quditto y en los dos QKC (256 por defecto).
+
+Escape hatch: si no montas `node.yml`, el contenedor arranca con las variables
+`QUDITTO_R0`, `QUDITTO_ALPHA`, `QUDITTO_DISTANCE`, `QUDITTO_MAX_BUFFER`,
+`QUDITTO_KEY_SIZE_BITS` y `QUDITTO_LISTEN` del entorno.
 
 ---
 

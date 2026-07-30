@@ -1,0 +1,21 @@
+# node.yml para un quditto — simulador de enlace QKD.
+#
+# Sirve ETSI-014 a los QKC de UN enlace, generando claves aleatorias a
+#
+#     R(d) = r0 · 10^(−alpha·d/10)   claves/s
+#
+# Solo lo necesitas si no tienes hardware QKD. Los QKC de los dos extremos
+# apuntan a este mismo `kme_url`, y de ahí que ambos obtengan el mismo material.
+# Los mismos r0/alpha/distance_km van declarados en el `node.yml` de esos dos
+# QKC, que son quienes se los comunican a la SDN para su modelo de capacidad:
+# si no coinciden, la SDN reparte caudal sobre una capacidad que el enlace no da.
+
+r0: 2000                   # tasa base en claves/s a distancia 0
+alpha: 0.2                 # atenuación de la fibra en dB/km
+distance_km: 5             # longitud del enlace simulado
+
+# max_buffer: 8192         # claves en el buffer; lleno, descarta los ticks nuevos
+# key_size_bits: 256       # DEBE coincidir con el key_size_bits de los QKC
+# listen_ip: "0.0.0.0"
+# ports:
+#   http: 20010

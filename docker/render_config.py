@@ -4,10 +4,13 @@
 
 An institution only edits a short `node.yml`; this turns it into exactly what the
 Rust binary expects:
-  * qkc  -> <out>/qkc.toml           (loaded with `qkc --config`)
-  * orr  -> <out>/default.toml       (loaded via CONFIG_DIR=<out>)
-  * dkms -> <out>/default.toml
-  * sdn  -> <out>/default.toml + <out>/topology/{QKC,ORR,DKMS,SAE}/*.json
+  * qkc     -> <out>/qkc.toml        (loaded with `qkc --config`)
+  * orr     -> <out>/default.toml    (loaded via CONFIG_DIR=<out>)
+  * dkms    -> <out>/default.toml
+  * sdn     -> <out>/default.toml + <out>/topology/{QKC,ORR,DKMS,SAE}/*.json
+  * quditto -> <out>/quditto.env     (sourced by the entrypoint; the binary
+                                      takes CLI flags with QUDITTO_* env fallbacks,
+                                      so there is no config file to write)
 
 Usage: render_config.py <role> <node.yml> <out_dir>
 
@@ -30,6 +33,7 @@ PORTS = {
     "orr": {"grpc": 20003, "metrics": 20004},
     "dkms": {"sae": 20005, "peer": 20006, "grpc": 20007, "metrics": 20008, "ack": 20009},
     "sdn": {"grpc": 19000, "http": 19002, "metrics": 19010},
+    "quditto": {"http": 20010},
 }
 
 
@@ -232,7 +236,31 @@ def render_sdn(n, out):
           "push_debounce_ms = 100\n")
 
 
-ROLES = {"qkc": render_qkc, "orr": render_orr, "dkms": render_dkms, "sdn": render_sdn}
+# ───────────────────────────── quditto ──────────────────────────────────────
+def render_quditto(n, out):
+    """Simulated QKD link. Serves ETSI-014 to the two QKCs of one link, minting
+    random keys at R(d) = r0 * 10^(-alpha*d/10).
+
+    Unlike the other roles the binary reads CLI flags (with QUDITTO_* env
+    fallbacks) rather than a config file, so we emit a shell env file that the
+    entrypoint sources.
+    """
+    p = dict(PORTS["quditto"]); p.update(n.get("ports") or {})
+    bind = n.get("listen_ip", "0.0.0.0")
+    env = [
+        ("QUDITTO_LISTEN", bind + ":" + str(p["http"])),
+        ("QUDITTO_R0", str(float(req(n, "r0", "quditto")))),
+        ("QUDITTO_ALPHA", str(float(n.get("alpha", 0.2)))),
+        ("QUDITTO_DISTANCE", str(float(n.get("distance_km", 0)))),
+        ("QUDITTO_MAX_BUFFER", str(int(n.get("max_buffer", 8192)))),
+        ("QUDITTO_KEY_SIZE_BITS", str(int(n.get("key_size_bits", 256)))),
+    ]
+    write(os.path.join(out, "quditto.env"),
+          "".join("export " + k + "=" + v + "\n" for k, v in env))
+
+
+ROLES = {"qkc": render_qkc, "orr": render_orr, "dkms": render_dkms, "sdn": render_sdn,
+         "quditto": render_quditto}
 
 
 def main():

@@ -1,4 +1,4 @@
-# Build multi-arch de las 4 imágenes y push a Docker Hub.
+# Build multi-arch de las 5 imágenes y push a Docker Hub.
 #   cd <raíz del repo>
 #   IMAGE_PREFIX=tuusuario docker buildx bake -f docker/docker-bake.hcl --push
 # Para probar en local una sola arch (sin push):
@@ -8,7 +8,7 @@ variable "IMAGE_PREFIX" { default = "ORG" }     # namespace Docker Hub (placehol
 variable "TAG"          { default = "latest" }
 
 group "default" {
-  targets = ["qkc", "orr", "dkms", "sdn"]
+  targets = ["qkc", "orr", "dkms", "sdn", "quditto"]
 }
 
 target "_common" {
@@ -39,4 +39,12 @@ target "sdn" {
   inherits = ["_common"]
   args     = { MODULE = "sdn" }
   tags     = ["${IMAGE_PREFIX}/sdn:${TAG}"]
+}
+
+# Simulador de enlace QKD: sirve ETSI-014 con claves aleatorias generadas a
+# R(d) = R₀·10^(−α·d/10). Solo hace falta si no tienes hardware QKD.
+target "quditto" {
+  inherits = ["_common"]
+  args     = { MODULE = "quditto" }
+  tags     = ["${IMAGE_PREFIX}/quditto:${TAG}"]
 }

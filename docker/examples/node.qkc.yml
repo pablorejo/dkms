@@ -7,9 +7,11 @@ qkc_id: 1
 links:
   - neighbor_id: 2
     neighbor_addr: "10.0.0.12"   # IP (o IP:puerto) del QKC vecino; puerto peer por defecto 20000
-    type: pqc                    # pqc = simulado (sin hardware) | qkd = KME real
-    # --- si type: qkd (nodo QKD real por ETSI-014) ---
-    # kme_url: "https://mi-nodo-qkd:443"
+    type: pqc                    # pqc = ML-KEM entre vecinos | qkd = KME por ETSI-014
+    # --- si type: qkd (KME: hardware real, o un quditto si no lo tienes) ---
+    # kme_url: "https://mi-nodo-qkd:443"     # o "http://10.0.0.50:20010" para un quditto
+    # r0/alpha/distance_km del enlace NO se ponen aquí: hoy los lee la SDN de su
+    # propio topology.yml. Con un quditto, deben coincidir con los suyos.
     # --- ajustes PQC opcionales (defaults sensatos) ---
     # pqc_suite: ml-kem-768
     # pqc_rekey_keys: 1000       # rota el secreto cada N claves

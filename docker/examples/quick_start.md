@@ -34,6 +34,20 @@ docker compose -f sdn.yml pull && docker compose -f sdn.yml up -d
 docker compose -f sdn.yml logs -f    # sano: "forwarding push done ... qkcs_err=0"
 ```
 
+## 1-bis. quditto — solo si quieres enlaces `qkd` sin hardware
+
+Uno por **enlace** (no por nodo): los QKC de sus dos extremos apuntan al mismo
+`kme_url`. Con enlaces `pqc` sáltate este paso.
+
+```bash
+mkdir quditto-1-2 && cd quditto-1-2
+cp .../docker/compose/quditto.yml .
+echo "IMAGE_PREFIX=tuusuario" > .env
+cp .../docker/examples/node.quditto.yml node.yml   # editar: r0/alpha/distance_km
+docker compose -f quditto.yml up -d
+curl -s http://localhost:20010/api/v1/keys/1/status   # sano: stored_key_count > 0
+```
+
 ## 2. QKC
 
 ```bash
@@ -44,6 +58,10 @@ cp .../docker/examples/node.qkc.yml node.yml   # editar: qkc_id + links (vecinos
 docker compose -f qkc.yml pull && docker compose -f qkc.yml up -d
 docker compose -f qkc.yml logs -f    # sano: "qkc.pqc.handshake.established" por vecino
 ```
+
+Con `type: qkd` los QKC solo llevan el `kme_url`. Los `r0`/`alpha`/`distance_km`
+del enlace van en el `topology.yml` de la SDN y deben coincidir con los del
+quditto.
 
 ## 3. ORR
 

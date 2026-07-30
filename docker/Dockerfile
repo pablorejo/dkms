@@ -1,4 +1,4 @@
-# Imagen de un módulo dkms_rust (qkc | orr | dkms | sdn).
+# Imagen de un módulo dkms_rust (qkc | orr | dkms | sdn | quditto).
 # Build (desde la raíz del repo):
 #   docker build -f docker/Dockerfile --build-arg MODULE=qkc -t ORG/qkc .
 # Multi-arch: ver docker/docker-bake.hcl.
@@ -8,14 +8,14 @@ ARG MODULE=qkc
 
 # ── build ────────────────────────────────────────────────────────────────
 # bookworm trae gcc-12, que aws-lc-sys (dep de rustls) exige (gcc-10 lo rechaza).
-# Compila los 4 binarios de una pasada y SIN usar ARG MODULE: así la etapa es
-# idéntica para los 4 targets del bake y buildx la construye una sola vez.
+# Compila los 5 binarios de una pasada y SIN usar ARG MODULE: así la etapa es
+# idéntica para los 5 targets del bake y buildx la construye una sola vez.
 FROM rust:1.88-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --bin qkc --bin orr --bin dkms --bin sdn
+RUN cargo build --release --bin qkc --bin orr --bin dkms --bin sdn --bin quditto
 
 # ── runtime ──────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

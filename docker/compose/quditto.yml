@@ -1,0 +1,18 @@
+# Despliegue de un quditto — simulador de enlace QKD.
+#
+# Solo hace falta si NO tienes hardware QKD y quieres enlaces `type: qkd` de
+# todas formas. Un quditto sirve a UN enlace: los QKC de sus dos extremos
+# apuntan al mismo `kme_url`, y así ambos obtienen el mismo material.
+#
+#   docker compose -f quditto.yml pull && docker compose -f quditto.yml up -d
+#   docker compose -f quditto.yml logs -f
+#
+# Comprobación rápida (puerto por defecto 20010):
+#   curl -s http://localhost:20010/api/v1/keys/1/status
+services:
+  quditto:
+    image: ${IMAGE_PREFIX:-ORG}/quditto:latest
+    network_mode: host                 # usa la red de la máquina (sin mapear puertos)
+    restart: unless-stopped
+    volumes:
+      - ./node.yml:/config/node.yml:ro
