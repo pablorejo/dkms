@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Render a module's real config (TOML, + SDN topology JSON) from a simple
-`node.yml`, inside the container entrypoint.
+"""Render a module's real config (TOML) from a simple `node.yml`, inside the
+container entrypoint.
 
 An institution only edits a short `node.yml`; this turns it into exactly what the
 Rust binary expects:
   * qkc     -> <out>/qkc.toml        (loaded with `qkc --config`)
   * orr     -> <out>/default.toml    (loaded via CONFIG_DIR=<out>)
   * dkms    -> <out>/default.toml
-  * sdn     -> <out>/default.toml + <out>/topology/{QKC,ORR,DKMS,SAE}/*.json
+  * sdn     -> <out>/default.toml    (no topology: it infers it from the
+                                      modules' announcements)
   * quditto -> <out>/quditto.env     (sourced by the entrypoint; the binary
                                       takes CLI flags with QUDITTO_* env fallbacks,
                                       so there is no config file to write)
@@ -15,11 +16,9 @@ Rust binary expects:
 Usage: render_config.py <role> <node.yml> <out_dir>
 
 Stdlib + PyYAML (debian pkg python3-yaml). TOML emitted by hand (configs are
-simple). Field names/structure mirror qkc/orr/dkms/sdn `src/config.rs` and the
-topology JSON the SDN loads.
+simple). Field names/structure mirror qkc/orr/dkms/sdn `src/config.rs`.
 Compatible with Python 3.7+ (no nested same-quote f-strings).
 """
-import json
 import os
 import sys
 
@@ -82,10 +81,6 @@ def write(path, text):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         f.write(text)
-
-
-def jwrite(path, obj):
-    write(path, json.dumps(obj, indent=2))
 
 
 # ─────────────────────────────── QKC ────────────────────────────────────────
@@ -241,59 +236,21 @@ def render_dkms(n, out):
 
 # ─────────────────────────────── SDN ────────────────────────────────────────
 def render_sdn(n, out):
+    """The SDN no longer takes a topology: it builds one from what the modules
+    announce (POST /register/{qkc,orr,dkms}). So its node.yml is just its own
+    listen addresses and timers."""
     p = dict(PORTS["sdn"]); p.update(n.get("ports") or {})
     bind = n.get("listen_ip", "0.0.0.0")
-    topo = os.path.join(out, "topology")
-    for sub in ("QKC", "ORR", "DKMS", "SAE"):
-        os.makedirs(os.path.join(topo, sub), exist_ok=True)
-
-    nodes = req(n, "nodes", "sdn")          # id -> {qkc, orr, dkms} host[:port]
-    adj = {}
-    for lk in n.get("links", []):
-        a, b = int(req(lk, "a", "sdn.link")), int(req(lk, "b", "sdn.link"))
-        ch = {
-            "distance": lk.get("distance_km", 5),
-            "quditto_rate_r0": lk.get("r0", 2000),
-            "quditto_rate_alpha": lk.get("alpha", 0.2),
-            "quditto_max_buffer_size": lk.get("max_buffer", 65536),
-            "link_type": str(lk.get("type", "pqc")).lower(),
-        }
-        adj.setdefault(a, []).append((b, ch))
-        adj.setdefault(b, []).append((a, ch))
-
-    for sid, addrs in nodes.items():
-        nid = int(sid)
-        qh = with_port(req(addrs, "qkc", "sdn.nodes"), PORTS["qkc"]["admin"])
-        oh = with_port(req(addrs, "orr", "sdn.nodes"), PORTS["orr"]["grpc"])
-        dh = with_port(req(addrs, "dkms", "sdn.nodes"), PORTS["dkms"]["sae"])
-        qip, qport = qh.rsplit(":", 1)
-        oip, oport = oh.rsplit(":", 1)
-        dip, dport = dh.rsplit(":", 1)
-        kmes = [{"neighbor_qkc_id": str(j), "channel": ch} for (j, ch) in adj.get(nid, [])]
-        jwrite(os.path.join(topo, "QKC", "qkc-" + str(nid) + ".json"),
-               {"id": str(nid), "host": {"id": nid, "ip": qip, "port": int(qport)}, "kmes": kmes})
-        jwrite(os.path.join(topo, "ORR", "orr_" + str(nid) + ".json"),
-               {"id": "orr_" + str(nid), "qkc_id": str(nid),
-                "host": {"id": 200 + nid, "ip": oip, "port": int(oport)}})
-        jwrite(os.path.join(topo, "DKMS", "dkms-" + str(nid) + ".json"),
-               {"id": "dkms-" + str(nid), "orr_id": "orr_" + str(nid),
-                "host": {"id": 300 + nid, "ip": dip, "port": int(dport)}})
-    for s in (n.get("saes") or []):
-        sid = req(s, "id", "sdn.saes")
-        jwrite(os.path.join(topo, "SAE", str(sid) + ".json"),
-               {"id": sid, "dkms_id": "dkms-" + str(int(req(s, "node", "sdn.saes")))})
-
     write(os.path.join(out, "default.toml"),
           "node_id = \"sdn\"\n"
           "grpc_addr = " + q(bind + ":" + str(p["grpc"])) + "\n"
           "http_addr = " + q(bind + ":" + str(p["http"])) + "\n"
           "metrics_addr = " + q(bind + ":" + str(p["metrics"])) + "\n"
-          "topology_dir = " + q(topo) + "\n"
           "default_policy = \"shortest_hops\"\n"
           "mcf_period_ms = " + str(int(n.get("mcf_period_ms", 5000))) + "\n"
           "push_debounce_ms = 100\n"
-          # How long a self-registered module may go quiet before being dropped.
-          # Must exceed the modules' sdn_announce_secs; 0 disables expiry.
+          # How long a module may go quiet before being dropped. Must exceed
+          # the modules' sdn_announce_secs; 0 disables expiry.
           "presence_ttl_secs = " + str(int(n.get("presence_ttl_secs", 90))) + "\n")
 
 

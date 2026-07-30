@@ -13,11 +13,6 @@ pub struct SdnConfig {
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 
-    /// Folder containing per-entity JSON files (QKC/, ORR/, DKMS/, SAE/), as
-    /// produced by the Python SDN. Loaded at boot when set.
-    #[serde(default)]
-    pub topology_dir: Option<String>,
-
     /// Default path policy if none is specified.
     #[serde(default = "default_policy")]
     pub default_policy: String,
@@ -33,8 +28,7 @@ pub struct SdnConfig {
     /// How long a self-registered module may stay silent before it is dropped
     /// from the topology. Its announce loop doubles as a heartbeat, so this
     /// must comfortably exceed the modules' `sdn_announce_secs` (30 by
-    /// default) — three missed announcements is the intent. Entities loaded
-    /// from `topology_dir` never expire: they were declared, not announced.
+    /// default) — three missed announcements is the intent.
     ///
     /// `0` disables expiry entirely.
     #[serde(default = "default_presence_ttl")]

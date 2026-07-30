@@ -29,9 +29,10 @@ curl -fsSL https://get.docker.com | sudo sh
 mkdir sdn && cd sdn
 cp .../docker/compose/sdn.yml .
 echo "IMAGE_PREFIX=tuusuario" > .env
-cp .../docker/examples/topology.example.yml node.yml   # editar: nodes/links/saes
+cp .../docker/examples/node.sdn.yml node.yml   # casi vacío: no lleva topología
 docker compose -f sdn.yml pull && docker compose -f sdn.yml up -d
-docker compose -f sdn.yml logs -f    # sano: "forwarding push done ... qkcs_err=0"
+curl -s http://localhost:19002/topology   # todo a 0; se llena solo según
+                                          # arrancan los demás módulos
 ```
 
 ## 1-bis. quditto — solo si quieres enlaces `qkd` sin hardware
@@ -59,9 +60,9 @@ docker compose -f qkc.yml pull && docker compose -f qkc.yml up -d
 docker compose -f qkc.yml logs -f    # sano: "qkc.pqc.handshake.established" por vecino
 ```
 
-Con `type: qkd` los QKC solo llevan el `kme_url`. Los `r0`/`alpha`/`distance_km`
-del enlace van en el `topology.yml` de la SDN y deben coincidir con los del
-quditto.
+Con `type: qkd` añade también `r0`/`alpha`/`distance_km` en **ambos** extremos:
+el QKC no los usa, se los comunica a la SDN para dimensionar la arista. Con un
+quditto, los mismos que le configuraste a él.
 
 ## 3. ORR
 

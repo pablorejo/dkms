@@ -10,16 +10,14 @@
 //! current snapshot, mutate, and atomically swap it in.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use crate::error::{Result, SdnError};
 
@@ -142,6 +140,10 @@ pub struct DkmsAnnounce {
     pub id: String,
     pub host: HostEndpoint,
     pub orr_id: String,
+    /// SAEs atendidos por este DKMS. Los declara él porque es quien tiene sus
+    /// certificados: nadie más sabe qué SAE cuelgan de dónde.
+    #[serde(default)]
+    pub saes: Vec<String>,
 }
 
 /// Result of an ORR/DKMS announcement. `accepted == false` is not an error: it
@@ -192,8 +194,13 @@ pub struct EdgeMeta {
     pub link_type: LinkType,
 }
 
+/// Respaldo cuando un QKC anuncia un enlace QKD sin declarar `r0`. Antes eran
+/// 20.0, que servía porque el renderer del `topology.yml` siempre escribía un
+/// valor explícito; ahora que la topología solo llega por anuncios, ese default
+/// es el único que queda, y 20 claves/s estrangulaban el enlace sin avisar.
+/// 2000 es el valor de referencia del repo (`docker/README.md`, `CLAUDE.md`).
 fn default_r0() -> f64 {
-    20.0
+    2000.0
 }
 fn default_alpha() -> f64 {
     0.2
@@ -263,8 +270,6 @@ pub struct Topology {
 
     /// Monotonically increasing snapshot version. Bumped on every mutation.
     pub version: i64,
-    /// Folder we last loaded from, if any.
-    pub loaded_from: Option<PathBuf>,
 }
 
 impl Topology {
@@ -534,275 +539,6 @@ impl Topology {
     }
 }
 
-// ----------------------------------------------------------------- loader
-
-/// Iterate config JSONs for one entity kind. Looks at both `<base>/<Prefix>/`
-/// (preferred) and `<base>/<Prefix>_*.json` (legacy flat layout).
-fn iter_entity_files(base: &Path, prefix: &str) -> Vec<PathBuf> {
-    let mut out: BTreeSet<PathBuf> = BTreeSet::new();
-    let nested = base.join(prefix);
-    if nested.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(&nested) {
-            for entry in rd.flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("json") {
-                    out.insert(p);
-                }
-            }
-        }
-    }
-    if let Ok(rd) = std::fs::read_dir(base) {
-        let needle = format!("{prefix}_");
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with(&needle) && name.ends_with(".json") {
-                out.insert(p);
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-fn read_json(path: &Path) -> Result<Value> {
-    let raw = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-fn json_str(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_host(value: &Value) -> Option<HostEndpoint> {
-    let host_obj = value.get("host").or(Some(value))?;
-    let id_v = host_obj
-        .get("id")
-        .or_else(|| value.get("host_id"))
-        .or_else(|| value.get("id_host"))?;
-    let ip_v = host_obj.get("ip").or_else(|| value.get("ip"))?;
-    let port_v = host_obj.get("port").or_else(|| value.get("port"))?;
-    Some(HostEndpoint {
-        id: id_v.as_i64()?,
-        ip: ip_v.as_str()?.to_string(),
-        port: u16::try_from(port_v.as_i64()?).ok()?,
-    })
-}
-
-fn parse_edge_meta(channel: &Value) -> EdgeMeta {
-    let m = |k: &str| channel.get(k);
-    EdgeMeta {
-        distance_km: m("distance").and_then(Value::as_i64).unwrap_or(0).max(0) as u32,
-        r0_keys_per_second: m("quditto_rate_r0")
-            .or_else(|| m("rate_r0"))
-            .and_then(Value::as_f64)
-            .unwrap_or(default_r0()),
-        alpha: m("quditto_rate_alpha")
-            .or_else(|| m("rate_alpha"))
-            .and_then(Value::as_f64)
-            .unwrap_or(default_alpha()),
-        max_buffer_size: m("quditto_max_buffer_size")
-            .or_else(|| m("max_buffer_size"))
-            .and_then(Value::as_i64)
-            .unwrap_or(default_buf_size() as i64)
-            .max(0) as u32,
-        link_type: match m("link_type").and_then(Value::as_str) {
-            Some(s) if s.eq_ignore_ascii_case("pqc") => LinkType::Pqc,
-            _ => LinkType::Qkd, // ausente o cualquier otro valor → QKD (compat)
-        },
-    }
-}
-
-impl Topology {
-    /// Build a topology from a Python-style config folder.
-    ///
-    /// Expected layout (any subset is acceptable):
-    ///
-    /// ```text
-    /// <folder>/QKC/*.json
-    /// <folder>/ORR/*.json
-    /// <folder>/DKMS/*.json
-    /// <folder>/SAE/*.json
-    /// ```
-    ///
-    /// or the legacy flat form `<folder>/QKC_<id>.json`, etc. Load order is
-    /// QKC → ORR → DKMS → SAE so foreign-key references resolve in one pass.
-    pub fn load_from_folder(folder: &Path) -> Result<Self> {
-        if !folder.is_dir() {
-            return Err(SdnError::Topology(format!(
-                "config folder does not exist: {}",
-                folder.display()
-            )));
-        }
-        let mut t = Topology {
-            loaded_from: Some(folder.to_path_buf()),
-            ..Topology::default()
-        };
-
-        for path in iter_entity_files(folder, "QKC") {
-            if let Err(e) = t.load_qkc_file(&path) {
-                warn!(file = %path.display(), error = %e, "failed to load QKC file");
-            }
-        }
-        for path in iter_entity_files(folder, "ORR") {
-            if let Err(e) = t.load_orr_file(&path) {
-                warn!(file = %path.display(), error = %e, "failed to load ORR file");
-            }
-        }
-        for path in iter_entity_files(folder, "DKMS") {
-            if let Err(e) = t.load_dkms_file(&path) {
-                warn!(file = %path.display(), error = %e, "failed to load DKMS file");
-            }
-        }
-        for path in iter_entity_files(folder, "SAE") {
-            if let Err(e) = t.load_sae_file(&path) {
-                warn!(file = %path.display(), error = %e, "failed to load SAE file");
-            }
-        }
-
-        t.version = 1;
-        info!(
-            folder = %folder.display(),
-            qkcs = t.qkcs.len(),
-            orrs = t.orrs.len(),
-            dkms = t.dkms.len(),
-            saes = t.saes.len(),
-            edges = t.edges.len(),
-            "topology loaded"
-        );
-        Ok(t)
-    }
-
-    fn load_qkc_file(&mut self, path: &Path) -> Result<()> {
-        let v = read_json(path)?;
-        let id = v
-            .get("id")
-            .and_then(json_str)
-            .or_else(|| v.get("QKC_id").and_then(json_str))
-            .ok_or_else(|| SdnError::Topology(format!("QKC file {} has no id", path.display())))?;
-        let host = parse_host(&v)
-            .ok_or_else(|| SdnError::Topology(format!("QKC {id} missing host info")))?;
-        let qkc = Qkc {
-            id: id.clone(),
-            host,
-            kme_host: v.get("kme_host").and_then(Value::as_str).map(String::from),
-        };
-        self.upsert_qkc(qkc);
-
-        // Inline KME/neighbor channel info, if present, produces edges.
-        if let Some(kmes) = v.get("kmes").and_then(Value::as_array) {
-            for kme in kmes {
-                let neighbor = kme
-                    .get("neighbor_qkc_id")
-                    .or_else(|| kme.get("id_nei"))
-                    .and_then(json_str);
-                let Some(neighbor) = neighbor else { continue };
-                let channel = kme.get("channel").cloned().unwrap_or_else(|| kme.clone());
-                let meta = parse_edge_meta(&channel);
-                // Endpoint may not be loaded yet — register it as a stub QKC
-                // so the graph stays consistent. The real QKC entry will
-                // overwrite the stub when its own file is processed.
-                if !self.qkcs.contains_key(&neighbor) {
-                    debug!(neighbor=%neighbor, "registering placeholder QKC for edge");
-                    self.graph.entry(neighbor.clone()).or_default();
-                }
-                self.add_edge(&id, &neighbor, meta);
-            }
-        }
-        Ok(())
-    }
-
-    fn load_orr_file(&mut self, path: &Path) -> Result<()> {
-        let v = read_json(path)?;
-        let id = v
-            .get("id")
-            .and_then(json_str)
-            .ok_or_else(|| SdnError::Topology(format!("ORR file {} has no id", path.display())))?;
-        let qkc_id = v
-            .get("qkc_id")
-            .or_else(|| v.get("QKC_id"))
-            .or_else(|| v.get("id_qkc"))
-            .and_then(json_str)
-            .ok_or_else(|| SdnError::Topology(format!("ORR {id} missing qkc_id")))?;
-        let host = parse_host(&v)
-            .ok_or_else(|| SdnError::Topology(format!("ORR {id} missing host info")))?;
-        self.upsert_orr(Orr { id, host, qkc_id });
-        Ok(())
-    }
-
-    fn load_dkms_file(&mut self, path: &Path) -> Result<()> {
-        let v = read_json(path)?;
-        let id = v
-            .get("id")
-            .and_then(json_str)
-            .or_else(|| v.get("id_dkms").and_then(json_str))
-            .ok_or_else(|| SdnError::Topology(format!("DKMS file {} has no id", path.display())))?;
-        let orr_id = v
-            .get("orr_id")
-            .or_else(|| v.get("ORR_id"))
-            .or_else(|| v.get("id_orr"))
-            .and_then(json_str)
-            .ok_or_else(|| SdnError::Topology(format!("DKMS {id} missing orr_id")))?;
-        let host = parse_host(&v)
-            .ok_or_else(|| SdnError::Topology(format!("DKMS {id} missing host info")))?;
-        let tls_id = v.get("tls_id").and_then(Value::as_i64);
-        self.upsert_dkms(Dkms {
-            id,
-            host,
-            tls_id,
-            orr_id,
-        });
-        Ok(())
-    }
-
-    fn load_sae_file(&mut self, path: &Path) -> Result<()> {
-        let v = read_json(path)?;
-        let id = v
-            .get("id")
-            .and_then(json_str)
-            .ok_or_else(|| SdnError::Topology(format!("SAE file {} has no id", path.display())))?;
-        // Either explicit dkms_id, or dkms_target {ip,port}.
-        let dkms_id = if let Some(did) = v.get("dkms_id").and_then(json_str) {
-            if !self.dkms.contains_key(&did) {
-                return Err(SdnError::Topology(format!(
-                    "SAE {id} → DKMS {did} not registered"
-                )));
-            }
-            did
-        } else if let Some(t) = v.get("dkms_target") {
-            let ip = t.get("ip").and_then(Value::as_str);
-            let port = t
-                .get("port")
-                .and_then(Value::as_i64)
-                .and_then(|n| u16::try_from(n).ok());
-            let (ip, port) = ip
-                .zip(port)
-                .ok_or_else(|| SdnError::Topology(format!("SAE {id} dkms_target invalid")))?;
-            self.dkms
-                .values()
-                .find(|d| d.host.ip == ip && d.host.port == port)
-                .map(|d| d.id.clone())
-                .ok_or_else(|| {
-                    SdnError::Topology(format!(
-                        "SAE {id} dkms_target {ip}:{port} did not match any DKMS"
-                    ))
-                })?
-        } else {
-            return Err(SdnError::Topology(format!(
-                "SAE {id} has no dkms_id nor dkms_target"
-            )));
-        };
-        self.upsert_sae(Sae { id, dkms_id });
-        Ok(())
-    }
-}
-
 // ----------------------------------------------------------------- store
 
 /// Lock-free reader / serialized-writer wrapper around [`Topology`].
@@ -991,12 +727,21 @@ impl TopologyStore {
                 ..reg.host.clone()
             };
             let tls_id = existing.and_then(|d| d.tls_id);
-            t.upsert_dkms(Dkms {
+            let mut changed = t.upsert_dkms(Dkms {
                 id: reg.id.clone(),
                 host,
                 tls_id,
                 orr_id: reg.orr_id.clone(),
-            })
+            });
+            // Los SAE van después del DKMS a propósito: `upsert_sae` exige que
+            // su DKMS exista, y acabamos de meterlo.
+            for sae_id in &reg.saes {
+                changed |= t.upsert_sae(Sae {
+                    id: sae_id.clone(),
+                    dkms_id: reg.id.clone(),
+                });
+            }
+            changed
         });
         out.accepted = accepted;
         out.changed = changed;
@@ -1506,19 +1251,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_edge_meta_reads_link_type() {
-        use serde_json::json;
-        // Ausente → QKD (backward-compatible).
-        let qkd = parse_edge_meta(&json!({"distance": 5, "quditto_rate_r0": 2000.0}));
-        assert_eq!(qkd.link_type, LinkType::Qkd);
-        assert!(!qkd.is_pqc());
-        // "pqc" (case-insensitive) → PQC.
-        let pqc = parse_edge_meta(&json!({"link_type": "PQC"}));
-        assert_eq!(pqc.link_type, LinkType::Pqc);
-        assert!(pqc.is_pqc());
-    }
-
-    #[test]
     fn dkms_qkc_resolution() {
         let t = make_topo();
         assert_eq!(t.qkc_of_dkms("d1"), Some("1"));
@@ -1851,6 +1583,7 @@ mod tests {
             id: "dkms-1".into(),
             host: dummy_host(301, 20005),
             orr_id: "orr_1".into(),
+            saes: vec!["sae_1".into()],
         };
 
         // Worst case: everything boots upside down. Each layer waits for the
@@ -1870,6 +1603,9 @@ mod tests {
 
         let t = store.load();
         assert_eq!(t.qkc_of_dkms("dkms-1"), Some("1"));
+        // Los SAE del DKMS entran con él: sin esto la SDN no puede resolver
+        // `sae -> DKMS` y el intercambio ETSI-014 entre nodos falla.
+        assert_eq!(t.saes["sae_1"].dkms_id, "dkms-1");
     }
 
     #[test]
@@ -1885,6 +1621,7 @@ mod tests {
             id: "dkms-1".into(),
             host: dummy_host(301, 20005),
             orr_id: "orr_1".into(),
+            saes: vec![],
         };
         store.announce_orr(&orr);
         store.announce_dkms(&dkms);

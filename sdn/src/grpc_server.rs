@@ -27,17 +27,16 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<ProtoTopology>,
     ) -> std::result::Result<Response<ProtoStatus>, Status> {
-        // FUERA DE ESCALCANCE: mutar la topología (añadir/quitar QKC,
-        // ORR, DKMS, enlaces) en runtime no forma parte de este
-        // proyecto. La topología se carga al boot desde
-        // `cfg.topology_dir` (JSON) y vive inmutable hasta reiniciar
-        // el SDN. Las únicas mutaciones soportadas son las del SAE
-        // binding vía HTTP admin (`/sae`, `/sae/:id`). Ver CLAUDE.md
-        // "Scope boundaries" para detalles.
+        // La topología SÍ muta en runtime, pero no empujando un grafo
+        // entero: cada módulo se declara a sí mismo por el HTTP admin
+        // (`POST /register/{qkc,orr,dkms}`) y el SDN la infiere. Un
+        // `PutTopology` sería una segunda fuente de verdad que además
+        // no podría expirar nodos. Ver CLAUDE.md, "Topology is
+        // inferred, never configured".
         Err(Status::unimplemented(
-            "PutTopology is out of scope: topology is loaded at boot from `topology_dir` \
-             and immutable until SDN restart. Only SAE bindings are mutable at runtime \
-             via HTTP admin (POST/PUT/DELETE /sae).",
+            "PutTopology is out of scope: the SDN infers its topology from the modules' \
+             own announcements (POST /register/{qkc,orr,dkms} on the HTTP admin). There \
+             is no whole-graph push.",
         ))
     }
 

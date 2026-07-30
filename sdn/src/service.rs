@@ -20,7 +20,7 @@ use crate::{
     metrics::SdnMetrics,
     presence::{Kind, Presence},
     push::Pushers,
-    topology::{Topology, TopologyStore},
+    topology::TopologyStore,
 };
 
 #[derive(Clone)]
@@ -46,20 +46,12 @@ pub struct SdnService {
 
 impl SdnService {
     pub async fn new(cfg: SdnConfig, metrics: Metrics) -> Result<Self> {
-        let initial = match &cfg.topology_dir {
-            Some(p) => match Topology::load_from_folder(std::path::Path::new(p)) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(path = %p, error = %e, "failed to load initial topology, starting empty");
-                    Topology::default()
-                }
-            },
-            None => Topology::default(),
-        };
+        // La SDN arranca sin topología, siempre. La construye con lo que los
+        // módulos le cuentan al registrarse (`POST /register/{qkc,orr,dkms}`).
         let sdn_metrics = SdnMetrics::register(&metrics);
         let svc = Self {
             cfg: Arc::new(cfg),
-            topology: TopologyStore::new(initial),
+            topology: TopologyStore::default(),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
             pushers: Arc::new(Pushers::new()),
             metrics,
@@ -277,9 +269,8 @@ impl SdnService {
         //      (shortest-path) y se POSTea como single-hop
         //      `[{qkc_id: nh, weight: 1}]`.
         //
-        // El push inicial (al arrancar SDN con `topology_dir` cargada)
-        // se dispara forzando un primer ciclo: arrancamos
-        // `last_topo = -1`.
+        // El push inicial se dispara forzando un primer ciclo:
+        // arrancamos `last_topo = -1`.
         {
             let topology = self.topology.clone();
             let mcf_snap = self.mcf_snapshot.clone();
@@ -494,7 +485,7 @@ fn recompute_mcf_inner(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc};
+    use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc, Topology};
 
     fn host(id: i64) -> HostEndpoint {
         HostEndpoint {
@@ -568,7 +559,6 @@ pub(crate) mod tests {
                 grpc_addr: "0.0.0.0:0".into(),
                 http_addr: "0.0.0.0:0".into(),
                 metrics_addr: "0.0.0.0:0".into(),
-                topology_dir: None,
                 default_policy: "shortest_hops".into(),
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,

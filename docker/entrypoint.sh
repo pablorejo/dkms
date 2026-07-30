@@ -12,7 +12,6 @@ if [ "$ROLE" = "qkc" ] && [ -f "$SRC/qkc.toml" ]; then
   cp "$SRC/qkc.toml" "$RENDER/qkc.toml"                       # TOML crudo (qkc)
 elif [ "$ROLE" != "qkc" ] && [ "$ROLE" != "quditto" ] && [ -f "$SRC/default.toml" ]; then
   cp "$SRC/default.toml" "$RENDER/default.toml"               # TOML crudo (otros)
-  if [ -d "$SRC/topology" ]; then cp -r "$SRC/topology" "$RENDER/topology"; fi
 elif [ -f "$SRC/node.yml" ]; then
   python3 /opt/render_config.py "$ROLE" "$SRC/node.yml" "$RENDER"   # node.yml -> config
 elif [ "$ROLE" = "quditto" ]; then

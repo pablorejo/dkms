@@ -173,12 +173,13 @@ En los ejemplos: SDN en `10.0.0.100`, nodo 1 en `10.0.0.11`, nodo 2 en
 
 ## 1. SDN (operador central)
 
-**Qué es**: el plano de control. Carga la topología global, resuelve el
-reparto de tasas (LP MCMCF-λ) periódicamente y empuja a cada QKC su tabla de
-forwarding. Es el único módulo cuya configuración no es local: su `node.yml`
-**es la topología de toda la red**, y la mantiene el operador central con la
-información que cada institución le comunica fuera de banda (IPs de sus
-módulos, enlaces que tiene).
+**Qué es**: el plano de control. **Infiere** la topología global de lo que los
+módulos le cuentan al arrancar, resuelve el reparto de tasas (LP MCMCF-λ) y
+empuja a cada QKC su tabla de forwarding.
+
+No hay coordinación fuera de banda: una institución no le comunica sus IPs al
+operador para que las meta a mano. Despliega sus módulos apuntando a esta SDN
+y aparecen en el grafo; si los apaga, desaparecen.
 
 **Paso 1 — directorio y ficheros:**
 
@@ -186,55 +187,61 @@ módulos, enlaces que tiene).
 mkdir sdn && cd sdn
 cp .../docker/compose/sdn.yml .
 echo "IMAGE_PREFIX=tuusuario" > .env
-cp .../docker/examples/topology.example.yml node.yml
+cp .../docker/examples/node.sdn.yml node.yml
 ```
 
-**Paso 2 — editar `node.yml`.** Tres secciones:
+**Paso 2 — editar `node.yml`: casi nada.** La SDN **no lleva topología**.
+Arranca con el grafo vacío y lo construye con lo que cada módulo le cuenta al
+registrarse. Su `node.yml` solo tiene lo suyo, y todo con defaults sensatos:
 
 ```yaml
-nodes:                              # id de nodo -> dónde está cada módulo
-  1: { qkc: "10.0.0.11", orr: "10.0.0.11", dkms: "10.0.0.11" }
-  2: { qkc: "10.0.0.12", orr: "10.0.0.12", dkms: "10.0.0.12" }
-
-links:                              # enlaces del backbone QKC
-  - { a: 1, b: 2, type: pqc }
-
-saes:                               # binding SAE -> nodo (opcional)
-  - { id: "sae_1", node: 1 }
-  - { id: "sae_2", node: 2 }
+# mcf_period_ms: 5000
+# presence_ttl_secs: 90
 ```
 
 | campo | significado |
 |-------|-------------|
-| `nodes.<id>` | id numérico de nodo (el mismo que usan `qkc_id`, `orr_N`, `dkms-N`). Cada entrada da la IP (o `ip:puerto`) del qkc/orr/dkms de ese nodo. Si el nodo reparte módulos en varias máquinas, cada uno lleva su IP. |
-| `links[]` | enlaces QKC↔QKC. `type: pqc\|qkd`. Opcionales del modelo de tasa que usa el LP: `r0` (keys/s en origen, default 2000), `alpha` (dB/km, default 0.2), `distance_km` (default 5). La capacidad efectiva del enlace es `r0·10^(−α·d/10)` — con los defaults, ~1588 keys/s. |
-| `saes[]` | mapeo SAE→nodo que la SDN sirve a los DKMS. Opcional: los DKMS también admiten binding local (`sae_bindings` en su node.yml). |
-| `mcf_period_ms` | período del recompute del LP (default 5000). |
+| `listen_ip` / `ports` | dónde escucha (19000 gRPC, 19002 HTTP, 19010 métricas). Override solo si chocan. |
+| `mcf_period_ms` | latido del recompute del LP (default 5000). Los cambios de topología lo disparan igualmente, sin esperar al tick. |
+| `presence_ttl_secs` | un módulo que deja de anunciarse más de este tiempo sale de la topología, con sus enlaces. Debe superar el `sdn_announce_secs` de los módulos (30 por defecto): son 3 anuncios perdidos. `0` lo desactiva. |
 
 **Paso 3 — arrancar y verificar:**
 
 ```bash
 docker compose -f sdn.yml up -d && docker compose -f sdn.yml logs -f
+curl -s http://localhost:19002/topology     # al principio: todo a 0
+```
+
+Según arrancan los módulos, el grafo se va llenando solo:
+
+```bash
+curl -s http://localhost:19002/topology     # {"qkcs":2,"orrs":2,"dkms":2,"edges":1,...}
+curl -s http://localhost:19002/qkcs
+curl -s http://localhost:19002/links
 ```
 
 Logs sanos y qué significan:
 
 ```
+sdn::http_api: qkc registered qkc=1 added=["2"] pending=[]
+    → un QKC se dio de alta; `pending` lista vecinos que aún no han arrancado
 sdn::service: forwarding push done ... qkcs_ok=2 qkcs_err=0
     → la SDN alcanzó el puerto admin (20002) de los 2 QKC y les empujó forwarding
 sdn::service: MCMCF-λ recomputed n_commodities=2 n_edges=1 lambda=... flows_with_rate=2
-    → el LP corre; n_commodities = pares DKMS×2 sentidos; registry_len crece
-      según los DKMS van registrando sus flujos
+    → el LP corre; n_commodities = pares DKMS×2 sentidos
 ```
 
 `qkcs_err>0` mientras los QKC no están arriba es normal (se recupera solo).
-Si se queda permanente: la IP del QKC en `nodes:` está mal o el 20002 está
-filtrado desde la SDN.
+Si se queda permanente, el 20002 está filtrado desde la SDN o el
+`advertise_ip` del QKC es incorrecto.
 
-**Operación**: la topología se carga **en el boot y es inmutable en runtime**.
-Alta de una institución = añadir su nodo y enlaces al `node.yml` y
-`docker compose -f sdn.yml restart`. Los módulos ya desplegados se reconectan
-solos.
+**Operación**: **no hay alta manual**. Una institución nueva despliega sus
+módulos con el `sdn_url` de esta SDN y aparece sola; si los apaga, desaparece
+sola al pasar el `presence_ttl_secs`. La SDN no se reinicia nunca por un
+cambio de topología.
+
+Si un módulo no aparece, mira su log: dirá `anunciado a la SDN` con
+`accepted`/`pending`, o el error de por qué no puede.
 
 ---
 
@@ -521,14 +528,17 @@ links:
     neighbor_addr: "10.0.0.12"
     type: qkd
     kme_url: "http://10.0.0.50:20010"
+    r0: 2000          # los mismos que el node.yml del quditto
+    alpha: 0.2
+    distance_km: 5
 ```
 
-**Ojo con los tres valores duplicados.** `r0`, `alpha` y `distance_km` se
-declaran hoy en **dos sitios independientes**: el `node.yml` del quditto (que
-los usa para generar a esa tasa) y el bloque `links` del `topology.yml` de la
-SDN (que los usa para saber qué capacidad tiene la arista en su solver). Nada
-comprueba que coincidan, así que si divergen la SDN reparte caudal sobre una
-capacidad que el enlace no da. Ponlos iguales en ambos.
+**Los tres valores van también en los QKC.** `r0`, `alpha` y `distance_km` se
+declaran aquí (el quditto los usa para generar a esa tasa) y en el bloque
+`links` del `node.yml` de **los dos QKC** del enlace, que se los comunican a la
+SDN para dimensionar la arista en su solver. Si divergen, la SDN reparte caudal
+sobre una capacidad que el enlace no da. La SDN avisa por log si los dos
+extremos no coinciden entre sí, y se queda con el primero que llegó.
 
 `key_size_bits` debe coincidir en el quditto y en los dos QKC (256 por defecto).
 

@@ -1,0 +1,23 @@
+# node.yml para la SDN central — lo mantiene el operador.
+#
+# **No lleva topología.** La SDN arranca con el grafo vacío y lo construye con
+# lo que cada módulo le cuenta al registrarse: el QKC dice quién es y con qué
+# vecinos tiene enlace, el ORR de qué QKC cuelga, el DKMS de qué ORR y qué SAE
+# atiende. Dar de alta una institución no exige tocar nada aquí ni reiniciar.
+#
+# Para que eso ocurra, cada módulo necesita su `sdn_url`/`sdn_endpoint` y su
+# `advertise_ip` — ver los node.yml de ejemplo de cada rol.
+
+# listen_ip: "0.0.0.0"
+# ports:
+#   grpc: 19000          # ORR y DKMS
+#   http: 19002          # registro de módulos + admin
+#   metrics: 19010
+
+# mcf_period_ms: 5000    # cada cuánto se recalcula el LP como latido; los
+#                        # cambios de topología lo disparan igualmente
+
+# presence_ttl_secs: 90  # un módulo que deja de anunciarse más de este tiempo
+#                        # sale de la topología, y sus enlaces con él. Debe
+#                        # superar el sdn_announce_secs de los módulos (30 por
+#                        # defecto): son 3 anuncios perdidos. 0 lo desactiva.

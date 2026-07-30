@@ -34,6 +34,7 @@ struct Announce {
     id: String,
     host: Host,
     orr_id: String,
+    saes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +91,17 @@ impl SdnAnnouncer {
             .build()
             .ok()?;
 
+        // Mis SAE: las entradas de `sae_bindings` que apuntan a mí. La SDN las
+        // necesita para resolver `sae → DKMS` cuando un SAE pide claves contra
+        // otro; nadie más sabe qué SAE cuelgan de aquí.
+        let mut saes: Vec<String> = cfg
+            .sae_bindings
+            .iter()
+            .filter(|(_, node)| *node == &cfg.node_id)
+            .map(|(sae, _)| sae.clone())
+            .collect();
+        saes.sort(); // orden estable: si no, el payload cambiaría en cada boot
+
         Some(Self {
             http,
             url: format!("{base}/register/dkms"),
@@ -97,6 +109,7 @@ impl SdnAnnouncer {
                 id: cfg.node_id.clone(),
                 host: Host { id: 0, ip, port },
                 orr_id: orr_id.to_string(),
+                saes,
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
         })
