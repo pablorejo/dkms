@@ -126,6 +126,38 @@ pub struct QkcAnnounceOutcome {
     pub edges_conflict: Vec<String>,
 }
 
+/// Self-announcement of an ORR: who it is, where to reach it, and which QKC it
+/// hangs off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrrAnnounce {
+    pub id: String,
+    pub host: HostEndpoint,
+    pub qkc_id: String,
+}
+
+/// Self-announcement of a DKMS. Anchored to an ORR, which is in turn anchored
+/// to a QKC — that chain is how the SDN places it in the graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DkmsAnnounce {
+    pub id: String,
+    pub host: HostEndpoint,
+    pub orr_id: String,
+}
+
+/// Result of an ORR/DKMS announcement. `accepted == false` is not an error: it
+/// means the anchor (the QKC of an ORR, the ORR of a DKMS) has not registered
+/// yet, so the announcer should keep retrying.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnnounceOutcome {
+    pub id: String,
+    pub accepted: bool,
+    /// Whether the topology changed (and therefore the version was bumped).
+    pub changed: bool,
+    /// Id of the anchor we are still waiting for, when `accepted` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+}
+
 /// Channel kind of a QKC↔QKC link.
 ///
 /// * `Qkd` (default) — keys come from the shared quditto; capacity is the
@@ -902,6 +934,75 @@ impl TopologyStore {
             changed
         });
         out.changed = changed;
+        out
+    }
+
+    /// Fold an ORR's self-announcement in. Same contract as
+    /// [`Self::announce_qkc`]: idempotent, and a miss on the anchor is a
+    /// "not yet", not a failure — `upsert_orr` refuses an ORR whose QKC is
+    /// unknown, which is exactly the boot-order case.
+    pub fn announce_orr(&self, reg: &OrrAnnounce) -> AnnounceOutcome {
+        let mut out = AnnounceOutcome {
+            id: reg.id.clone(),
+            ..Default::default()
+        };
+        let mut accepted = false;
+        let changed = self.mutate(|t| {
+            if !t.qkcs.contains_key(&reg.qkc_id) {
+                return false;
+            }
+            accepted = true;
+            // Keep the synthetic host id if we already had one, so a heartbeat
+            // does not look like a change.
+            let host = HostEndpoint {
+                id: t.orrs.get(&reg.id).map_or(reg.host.id, |o| o.host.id),
+                ..reg.host.clone()
+            };
+            t.upsert_orr(Orr {
+                id: reg.id.clone(),
+                host,
+                qkc_id: reg.qkc_id.clone(),
+            })
+        });
+        out.accepted = accepted;
+        out.changed = changed;
+        if !accepted {
+            out.waiting_for = Some(reg.qkc_id.clone());
+        }
+        out
+    }
+
+    /// Fold a DKMS's self-announcement in. Waits on its ORR, which in turn
+    /// waits on its QKC — the chain converges bottom-up as each layer boots.
+    pub fn announce_dkms(&self, reg: &DkmsAnnounce) -> AnnounceOutcome {
+        let mut out = AnnounceOutcome {
+            id: reg.id.clone(),
+            ..Default::default()
+        };
+        let mut accepted = false;
+        let changed = self.mutate(|t| {
+            if !t.orrs.contains_key(&reg.orr_id) {
+                return false;
+            }
+            accepted = true;
+            let existing = t.dkms.get(&reg.id);
+            let host = HostEndpoint {
+                id: existing.map_or(reg.host.id, |d| d.host.id),
+                ..reg.host.clone()
+            };
+            let tls_id = existing.and_then(|d| d.tls_id);
+            t.upsert_dkms(Dkms {
+                id: reg.id.clone(),
+                host,
+                tls_id,
+                orr_id: reg.orr_id.clone(),
+            })
+        });
+        out.accepted = accepted;
+        out.changed = changed;
+        if !accepted {
+            out.waiting_for = Some(reg.orr_id.clone());
+        }
         out
     }
 
@@ -1736,6 +1837,64 @@ mod tests {
         assert_eq!(store.load().version, settled);
         let meta = store.load().edge("1", "2").cloned().unwrap();
         assert_eq!(meta.r0_keys_per_second, 2000.0);
+    }
+
+    #[test]
+    fn announce_chain_converges_bottom_up_whatever_the_boot_order() {
+        let store = TopologyStore::new(Topology::default());
+        let orr = OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "1".into(),
+        };
+        let dkms = DkmsAnnounce {
+            id: "dkms-1".into(),
+            host: dummy_host(301, 20005),
+            orr_id: "orr_1".into(),
+        };
+
+        // Worst case: everything boots upside down. Each layer waits for the
+        // one below instead of corrupting the graph.
+        let out = store.announce_dkms(&dkms);
+        assert!(!out.accepted);
+        assert_eq!(out.waiting_for.as_deref(), Some("orr_1"));
+        let out = store.announce_orr(&orr);
+        assert!(!out.accepted);
+        assert_eq!(out.waiting_for.as_deref(), Some("1"));
+        assert_eq!(store.load().version, 0, "nothing landed, nothing bumped");
+
+        // QKC arrives; now the chain closes as each retry comes round.
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        assert!(store.announce_orr(&orr).accepted);
+        assert!(store.announce_dkms(&dkms).accepted);
+
+        let t = store.load();
+        assert_eq!(t.qkc_of_dkms("dkms-1"), Some("1"));
+    }
+
+    #[test]
+    fn re_announcing_orr_and_dkms_does_not_bump_version() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        let orr = OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "1".into(),
+        };
+        let dkms = DkmsAnnounce {
+            id: "dkms-1".into(),
+            host: dummy_host(301, 20005),
+            orr_id: "orr_1".into(),
+        };
+        store.announce_orr(&orr);
+        store.announce_dkms(&dkms);
+        let settled = store.load().version;
+
+        for _ in 0..10 {
+            assert!(!store.announce_orr(&orr).changed);
+            assert!(!store.announce_dkms(&dkms).changed);
+        }
+        assert_eq!(store.load().version, settled);
     }
 
     #[test]

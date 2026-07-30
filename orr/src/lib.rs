@@ -35,5 +35,6 @@ pub mod peers;
 pub mod qkc_link;
 pub mod relay;
 pub mod rotation;
+pub mod sdn_announce;
 pub mod sdn_client;
 pub mod service;

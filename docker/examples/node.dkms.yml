@@ -9,6 +9,9 @@ advertise_ip: "10.0.0.11"
 orr_addr: "127.0.0.1:20003"
 
 sdn_endpoint: "http://10.0.0.100:19000"
+orr_id: "orr_1"                # id del ORR del que cuelgo. La SDN me coloca
+                               # en el grafo por él; su dirección no vale de id.
+# sdn_announce_secs: 30        # cada cuánto reanuncio (es mi heartbeat)
 
 # Peers DKMS (una entrada por cada otro DKMS con el que intercambia claves).
 peers:

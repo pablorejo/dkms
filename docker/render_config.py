@@ -54,6 +54,14 @@ def with_port(addr, default_port):
     return addr if ":" in addr else (addr + ":" + str(default_port))
 
 
+def sdn_http_from(grpc_url):
+    """The ORR/DKMS point at the SDN's gRPC; registration lives on its HTTP
+    admin. Same host, the HTTP port from PORTS."""
+    rest = str(grpc_url).partition("//")[2] or str(grpc_url)
+    host = rest.rstrip("/").rsplit(":", 1)[0]
+    return "http://" + host + ":" + str(PORTS["sdn"]["http"])
+
+
 def url_with_port(url, default_port):
     """Accept 'ip', 'ip:port', 'http://ip' or 'http://ip:port'."""
     url = str(url)
@@ -151,6 +159,16 @@ def render_orr(n, out):
         "metrics_addr = " + q(metrics_l),
         "default_max_hops = " + str(int(n.get("default_max_hops", 1))),
     ]
+    # Self-registration. sdn_url is the SDN's gRPC; the registration endpoint
+    # lives on its HTTP admin, so derive that port rather than asking for a
+    # second URL in node.yml.
+    if n.get("sdn_url") and n.get("advertise_ip"):
+        lines += [
+            "sdn_http_url = " + q(sdn_http_from(n["sdn_url"])),
+            "advertise_ip = " + q(n["advertise_ip"]),
+        ]
+        if n.get("sdn_announce_secs") is not None:
+            lines.append("sdn_announce_secs = " + str(int(n["sdn_announce_secs"])))
     peers = n.get("peers") or {}           # orr_id -> qkc_id
     if peers:
         lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
@@ -172,6 +190,10 @@ def render_dkms(n, out):
     lines = [
         "node_id = " + q(node_id),
         "default_security_level = " + q(n.get("security_level", "qkd_prefer")),
+        # advertise_ip already had to be routable (peers, ACKs, cert SAN), so
+        # the announcement reuses it.
+        "advertise_ip = " + q(adv),
+        "sdn_announce_secs = " + str(int(n.get("sdn_announce_secs", 30))),
         "",
         "[listen]",
         "sae_addr = " + q(bind + ":" + str(p["sae"])),
@@ -189,6 +211,11 @@ def render_dkms(n, out):
         "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
         "qkc_endpoint = " + q("http://127.0.0.1:1"),   # dead by design (transport=orr)
         "orr_endpoint = " + q("http://" + orr_addr),
+        # Self-registration: the SDN places this DKMS under its ORR, so it
+        # needs the ORR's *id*, not just its address. sdn_endpoint is gRPC;
+        # the registration endpoint is on the SDN's HTTP admin.
+        "orr_id = " + q(n.get("orr_id", "orr_" + str(node_id).split("-")[-1])),
+        "sdn_http_url = " + q(sdn_http_from(n.get("sdn_endpoint", ""))),
         "",
         "[generator]",
         # bindea al mismo listen_ip que el resto (0.0.0.0 por defecto = una

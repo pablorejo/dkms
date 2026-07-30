@@ -11,6 +11,7 @@
 pub mod orr;
 pub mod qkc;
 pub mod sdn;
+pub mod sdn_announce;
 pub mod sdn_http;
 
 pub use orr::OrrClient;

@@ -106,7 +106,11 @@ impl PqcHandshake {
 
     fn publish(&self, epoch: u32, ss: Vec<u8>) {
         if ss.len() != 32 {
-            warn!(peer = self.peer_id, len = ss.len(), "qkc.pqc: secret not 32 B");
+            warn!(
+                peer = self.peer_id,
+                len = ss.len(),
+                "qkc.pqc: secret not 32 B"
+            );
             return;
         }
         let mut arr = [0u8; 32];
@@ -191,7 +195,10 @@ impl PqcHandshake {
             self.send(FRAME_PQC_KEM_INIT, epoch, &pubkey);
             attempts += 1;
             if attempts.is_multiple_of(20) {
-                debug!(peer = self.peer_id, epoch, attempts, "qkc.pqc.init_retrying");
+                debug!(
+                    peer = self.peer_id,
+                    epoch, attempts, "qkc.pqc.init_retrying"
+                );
             }
             tokio::time::sleep(INIT_RETRY).await;
         }
@@ -242,7 +249,10 @@ impl PqcHandshake {
         let sk = match self.pending_sk.lock().get(&epoch).cloned() {
             Some(sk) => sk,
             None => {
-                warn!(peer = self.peer_id, epoch, "qkc.pqc: RESP without pending sk");
+                warn!(
+                    peer = self.peer_id,
+                    epoch, "qkc.pqc: RESP without pending sk"
+                );
                 return;
             }
         };
@@ -307,7 +317,10 @@ mod tests {
 
             let s_ini = ini.store.get(epoch).unwrap();
             let s_resp = resp.store.get(epoch).unwrap();
-            assert_eq!(*s_ini, *s_resp, "both ends share the same secret for the epoch");
+            assert_eq!(
+                *s_ini, *s_resp,
+                "both ends share the same secret for the epoch"
+            );
         }
     }
 
@@ -351,6 +364,9 @@ mod tests {
         );
         assert!(hs.clock_disabled());
         // (epoch_of sanity, para no dejar el import sin uso si se recorta arriba)
-        assert_eq!(epoch_of(&[0, 0, 0, 5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]), 5);
+        assert_eq!(
+            epoch_of(&[0, 0, 0, 5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]),
+            5
+        );
     }
 }

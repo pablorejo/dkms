@@ -9,6 +9,8 @@
 //!
 //! Mutations (mirror Python SDN semantics):
 //!   POST   /register/qkc              a QKC announces itself + its links
+//!   POST   /register/orr              an ORR announces itself (anchored to a QKC)
+//!   POST   /register/dkms             a DKMS announces itself (anchored to an ORR)
 //!   POST   /sae                       register a SAE
 //!   PUT    /sae/{sae_id}              re-bind a SAE to another DKMS
 //!   DELETE /sae/{sae_id}              remove a SAE
@@ -37,7 +39,7 @@ use crate::{
     error::SdnError,
     routing,
     service::SdnService,
-    topology::{Dkms, QkcAnnounce, Sae, SaeBulkItem, Topology},
+    topology::{Dkms, DkmsAnnounce, OrrAnnounce, QkcAnnounce, Sae, SaeBulkItem, Topology},
 };
 
 #[derive(Serialize)]
@@ -316,6 +318,30 @@ async fn announce_qkc(
             pending = ?out.edges_pending,
             "qkc registered",
         );
+    }
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// An ORR announcing itself, anchored to its QKC.
+async fn announce_orr(
+    State(svc): State<SdnService>,
+    Json(reg): Json<OrrAnnounce>,
+) -> impl IntoResponse {
+    let out = svc.topology.announce_orr(&reg);
+    if out.changed {
+        info!(orr = %out.id, qkc = %reg.qkc_id, "orr registered");
+    }
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// A DKMS announcing itself, anchored to its ORR.
+async fn announce_dkms(
+    State(svc): State<SdnService>,
+    Json(reg): Json<DkmsAnnounce>,
+) -> impl IntoResponse {
+    let out = svc.topology.announce_dkms(&reg);
+    if out.changed {
+        info!(dkms = %out.id, orr = %reg.orr_id, "dkms registered");
     }
     (StatusCode::OK, Json(out)).into_response()
 }
@@ -600,6 +626,8 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/saes", get(get_saes))
         .route("/links", get(get_links))
         .route("/register/qkc", post(announce_qkc))
+        .route("/register/orr", post(announce_orr))
+        .route("/register/dkms", post(announce_dkms))
         .route("/sae", post(register_sae))
         .route("/sae-bulk", post(register_sae_bulk))
         .route("/sae/:sae_id", put(update_sae).delete(delete_sae))

@@ -353,6 +353,8 @@ peer_grpc_addrs:
 | `qkc_id` | el nodo al que pertenece. |
 | `qkc_addr` | dónde está **su** QKC (puerto local 20001). `127.0.0.1` si co-locados; la IP del QKC si va en otra máquina. |
 | `sdn_url` | gRPC de la SDN central. |
+| `advertise_ip` | IP por la que la SDN alcanza a este ORR. Ponla y el ORR se da de alta solo en la topología; sin ella hay que darlo de alta a mano. |
+| `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `peers` / `peer_grpc_addrs` | un par de entradas por **cada otro ORR de la red con cuyo DKMS se intercambiarán claves** — no solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
 | `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |
 
@@ -438,6 +440,8 @@ peers:
 | `advertise_ip` | IP de esta máquina **alcanzable por los otros DKMS**: se anuncia como endpoint de ACK (20009) y debe estar en el SAN del cert. Si está mal, los ACKs del generator no vuelven y `ack_pending` crece sin parar. |
 | `orr_addr` | su ORR (20003). `127.0.0.1` si co-locados. |
 | `sdn_endpoint` | gRPC de la SDN. En el boot se reintenta 30×1 s; si la SDN aparece más tarde, reinicia el DKMS. |
+| `orr_id` | id del ORR del que cuelga este DKMS. La SDN lo coloca en el grafo por él, y `orr_addr` no vale: es una dirección, no un id. |
+| `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `peers.<id>` | cada **otro DKMS** con el que se intercambiarán claves: `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Los `peers` de todos los DKMS deben ser coherentes con los `peers` de los ORR. |
 | `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |

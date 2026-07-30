@@ -23,6 +23,15 @@ pub struct DkmsConfig {
     /// Identificador estable de esta instancia en el grafo SDN.
     pub node_id: String,
 
+    /// IP con la que me anuncio a la SDN. Necesaria porque `listen.sae_addr`
+    /// suele bindear `0.0.0.0`, que no le sirve a la SDN para alcanzarme.
+    #[serde(default)]
+    pub advertise_ip: Option<String>,
+
+    /// Cada cuánto reanuncio a la SDN. Es también mi heartbeat.
+    #[serde(default = "default_announce_secs")]
+    pub sdn_announce_secs: u64,
+
     pub listen: ListenCfg,
     pub tls: TlsCfg,
     pub southbound: SouthboundCfg,
@@ -108,6 +117,19 @@ pub struct TlsCfg {
 pub struct SouthboundCfg {
     pub sdn_endpoint: String,
     pub qkc_endpoint: String,
+
+    /// HTTP admin de la SDN (p. ej. `http://10.0.0.100:19002`) al que me
+    /// anuncio para que me incluya en su topología. Puerto distinto del de
+    /// `sdn_endpoint`, que es gRPC. Sin esto el DKMS funciona igual, pero
+    /// alguien tiene que darlo de alta a mano.
+    #[serde(default)]
+    pub sdn_http_url: Option<String>,
+
+    /// Id del ORR del que cuelgo. La SDN lo usa para colocarme en el grafo:
+    /// yo cuelgo de un ORR, y ese ORR de un QKC. `orr_endpoint` no vale para
+    /// esto — es una dirección, no un id.
+    #[serde(default)]
+    pub orr_id: Option<String>,
     /// gRPC endpoint del ORR co-localizado. Opcional: si está vacío o
     /// ausente, el DKMS no abre conexión con ORR y sigue funcionando
     /// con HTTP/2 ETSI 020. Cuando se cablea el nuevo transporte por
@@ -364,6 +386,10 @@ impl Default for GeneratorCfg {
             max_fill_rate_keys_per_s: 0.0,
         }
     }
+}
+
+fn default_announce_secs() -> u64 {
+    30
 }
 
 fn default_connect_timeout_ms() -> u64 {

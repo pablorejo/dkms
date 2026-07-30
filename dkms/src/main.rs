@@ -84,6 +84,13 @@ async fn main() -> Result<()> {
         .await
         .context("metrics listener")?;
 
+    // ─── Anuncio a la SDN ─────────────────────────────────────────────
+    // En su propia task: si la SDN no está, o falta `sdn_http_url`, el DKMS
+    // sirve claves igual. Solo deja de aparecer en la topología.
+    if let Some(announcer) = dkms::southbound::sdn_announce::SdnAnnouncer::from_config(&cfg) {
+        tokio::spawn(announcer.run());
+    }
+
     // ─── Estado ───────────────────────────────────────────────────────
     let cfg = Arc::new(cfg);
     let pool = Arc::new(BufferPool::new(cfg.buffer.capacity_per_peer));

@@ -30,6 +30,9 @@ prost              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 rmp-serde          = { workspace = true }
+# Solo para el anuncio a la SDN (HTTP admin). El resto del plano de control
+# del ORR va por gRPC — ver sdn_client.rs.
+reqwest            = { version = "0.12", default-features = false, features = ["json"] }
 clap               = { workspace = true }
 dotenvy            = { workspace = true }
 anyhow             = { workspace = true }

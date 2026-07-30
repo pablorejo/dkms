@@ -28,6 +28,12 @@ async fn main() -> Result<()> {
 
     let service = OrrService::new(cfg.clone(), metrics).await?;
 
+    // Anuncio periódico a la SDN. Fuera del `select!`: si la SDN no está o no
+    // hay `sdn_http_url`, el ORR sigue enrutando igual.
+    if let Some(announcer) = orr::sdn_announce::SdnAnnouncer::from_config(&cfg) {
+        tokio::spawn(announcer.run());
+    }
+
     let grpc = tokio::spawn({
         let svc = service.clone();
         async move { orr::grpc_server::serve(svc, &cfg.grpc_addr).await }

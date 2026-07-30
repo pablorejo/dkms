@@ -81,7 +81,11 @@ impl SdnAnnouncer {
             .next()
             .and_then(|p| p.parse().ok())
             .unwrap_or(0);
-        let bind_ip = cfg.admin_http.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+        let bind_ip = cfg
+            .admin_http
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or("");
         let ip = match cfg.advertise_ip.as_deref() {
             Some(ip) => ip.to_string(),
             None if !bind_ip.is_empty() && bind_ip != "0.0.0.0" && bind_ip != "[::]" => {

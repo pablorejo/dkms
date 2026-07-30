@@ -2048,6 +2048,7 @@ dependencies = [
  "prometheus",
  "prost",
  "rand 0.8.6",
+ "reqwest",
  "rmp-serde",
  "serde",
  "serde_bytes",

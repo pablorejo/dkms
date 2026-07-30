@@ -7,6 +7,9 @@ qkc_id: 1
 qkc_addr: "127.0.0.1:20001"        # local_listen del QKC (puerto 20001)
 
 sdn_url: "http://10.0.0.100:19000" # gRPC de la SDN central
+advertise_ip: "10.0.0.11"          # IP por la que la SDN alcanza a ESTE ORR;
+                                   # con ella el ORR se da de alta solo
+# sdn_announce_secs: 30            # cada cuánto reanuncia (es su heartbeat)
 
 # Peers ORR (una entrada por cada otro ORR de la red).
 peers:                             # orr_id -> qkc_id

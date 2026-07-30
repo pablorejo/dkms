@@ -51,6 +51,22 @@ pub struct OrrConfig {
     /// cuando `max_hops != 0`).
     pub sdn_url: String,
 
+    /// HTTP admin de la SDN (p. ej. `http://10.0.0.100:19002`) al que me
+    /// anuncio para que me incluya en su topología. Es un puerto distinto del
+    /// de `sdn_url`, que es gRPC. Sin esto el ORR funciona igual, pero alguien
+    /// tiene que darlo de alta a mano.
+    #[serde(default)]
+    pub sdn_http_url: Option<String>,
+
+    /// IP con la que me anuncio. Necesaria porque `grpc_addr` suele bindear
+    /// `0.0.0.0`, que no le sirve a la SDN para alcanzarme.
+    #[serde(default)]
+    pub advertise_ip: Option<String>,
+
+    /// Cada cuánto reanuncio. Es también mi heartbeat.
+    #[serde(default = "default_announce_secs")]
+    pub sdn_announce_secs: u64,
+
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 
@@ -117,6 +133,10 @@ pub struct OrrConfig {
     /// rotación exitosa vía `peers.drop_old_epochs(keep)`.
     #[serde(default = "default_epoch_history_keep")]
     pub epoch_history_keep: usize,
+}
+
+fn default_announce_secs() -> u64 {
+    30
 }
 
 fn default_metrics() -> String {
