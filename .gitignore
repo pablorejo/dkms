@@ -72,6 +72,10 @@ agent-bench-5topos/
 docs/EXPLAIN_PLOTS.md
 docs/Paper_congreso/
 
+# Artefactos de tsc --incremental (web/ se movió a tests_aws, pero su
+# tsconfig.tsbuildinfo puede seguir en disco)
+*.tsbuildinfo
+
 # Notas legacy en la raíz (orphan markdowns)
 .nothing.md
 .orr_qkc_quidtto.md
