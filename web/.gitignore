@@ -1,9 +1,0 @@
-node_modules
-.next
-out
-dist
-*.tsbuildinfo
-.env.local
-.env
-prisma/dev.db
-prisma/dev.db-journal

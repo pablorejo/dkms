@@ -26,12 +26,6 @@ target/
 **/.env
 **/.env.local
 
-# Python orchestrator (built separately)
-orchestrator/
-
-# Web (built separately)
-web/
-
 # Scripts not needed at build time inside the Rust containers
 scripts/demo-star/orr-*/
 scripts/demo-star/orr-22/
@@ -70,6 +64,6 @@ certs_test/
 # tsbuildinfo
 **/*.tsbuildinfo
 
-# Orchestrator/web local state
+# Local state
 .claude/
 .orr_qkc_quidtto.md

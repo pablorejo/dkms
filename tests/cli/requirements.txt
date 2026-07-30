@@ -1,5 +1,0 @@
-typer>=0.12
-requests>=2.31
-pydantic>=2.6
-matplotlib>=3.8
-pytest>=8.0

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build (and optionally push) the deployable images for a subset of
-# components. Used by `make deploy*` targets.
+# components. Used by `make push`.
 #
-# Components: dkms orr qkc sdn quditto orchestrator authz web
+# Components: dkms orr qkc sdn quditto
 #
 # Usage:
 #   scripts/deploy-images.sh [--push] [--no-cache] <component> [<component>...]
-#   scripts/deploy-images.sh --push web orchestrator
+#   scripts/deploy-images.sh --push qkc orr
 #
 # Environment:
 #   TAG=v1           - mutable tag applied to every image (default: local)
@@ -45,9 +45,6 @@ fi
 # Map component → docker image name (without prefix), file, target, context.
 declare -A IMAGE_NAME=(
     [dkms]=dkms       [orr]=orr           [qkc]=qkc       [sdn]=sdn   [quditto]=quditto
-    [orchestrator]=orchestator   # historical typo preserved
-    [authz]=authz
-    [web]=dkms-web
 )
 
 declare -A IMAGE_FILE=(
@@ -56,9 +53,6 @@ declare -A IMAGE_FILE=(
     [qkc]=docker/Dockerfile.workspace
     [sdn]=docker/Dockerfile.workspace
     [quditto]=docker/Dockerfile.workspace
-    [orchestrator]=orchestrator/Dockerfile
-    [authz]=orchestrator/authz/Dockerfile
-    [web]=web/docker/Dockerfile
 )
 
 declare -A IMAGE_TARGET=(
@@ -75,9 +69,6 @@ declare -A IMAGE_CONTEXT=(
     [qkc]=.
     [sdn]=.
     [quditto]=.
-    [orchestrator]=orchestrator
-    [authz]=orchestrator
-    [web]=web
 )
 
 BUILD_FLAGS=("--platform" "$PLATFORM")
