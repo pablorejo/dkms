@@ -291,7 +291,10 @@ def render_sdn(n, out):
           "topology_dir = " + q(topo) + "\n"
           "default_policy = \"shortest_hops\"\n"
           "mcf_period_ms = " + str(int(n.get("mcf_period_ms", 5000))) + "\n"
-          "push_debounce_ms = 100\n")
+          "push_debounce_ms = 100\n"
+          # How long a self-registered module may go quiet before being dropped.
+          # Must exceed the modules' sdn_announce_secs; 0 disables expiry.
+          "presence_ttl_secs = " + str(int(n.get("presence_ttl_secs", 90))) + "\n")
 
 
 # ───────────────────────────── quditto ──────────────────────────────────────

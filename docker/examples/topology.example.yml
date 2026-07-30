@@ -25,3 +25,7 @@ saes:                               # SAEs de prueba y su DKMS (opcional)
   - { id: "sae_2", node: 2 }
 
 # mcf_period_ms: 5000
+# presence_ttl_secs: 90   # un módulo que se auto-registra y deja de anunciarse
+#                         # más de este tiempo sale de la topología. Debe superar
+#                         # el sdn_announce_secs de los módulos (30 por defecto).
+#                         # 0 lo desactiva. Lo declarado aquí nunca caduca.

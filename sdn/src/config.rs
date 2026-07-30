@@ -29,6 +29,16 @@ pub struct SdnConfig {
     /// Debounce window for topology push events (ms).
     #[serde(default = "default_debounce")]
     pub push_debounce_ms: u64,
+
+    /// How long a self-registered module may stay silent before it is dropped
+    /// from the topology. Its announce loop doubles as a heartbeat, so this
+    /// must comfortably exceed the modules' `sdn_announce_secs` (30 by
+    /// default) — three missed announcements is the intent. Entities loaded
+    /// from `topology_dir` never expire: they were declared, not announced.
+    ///
+    /// `0` disables expiry entirely.
+    #[serde(default = "default_presence_ttl")]
+    pub presence_ttl_secs: u64,
 }
 
 fn default_metrics() -> String {
@@ -42,4 +52,10 @@ fn default_mcf_period() -> u64 {
 }
 fn default_debounce() -> u64 {
     100
+}
+
+/// 3× el `sdn_announce_secs` por defecto de los módulos (30 s): se toleran dos
+/// anuncios perdidos antes de dar a un nodo por muerto.
+fn default_presence_ttl() -> u64 {
+    90
 }

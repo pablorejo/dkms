@@ -37,6 +37,7 @@ use tracing::info;
 use crate::{
     demand::{CommodityDemand, DemandReport},
     error::SdnError,
+    presence::Kind,
     routing,
     service::SdnService,
     topology::{Dkms, DkmsAnnounce, OrrAnnounce, QkcAnnounce, Sae, SaeBulkItem, Topology},
@@ -311,6 +312,8 @@ async fn announce_qkc(
     Json(reg): Json<QkcAnnounce>,
 ) -> impl IntoResponse {
     let out = svc.topology.announce_qkc(&reg);
+    // Un QKC no tiene ancla: siempre entra, así que siempre cuenta como vivo.
+    svc.presence.touch(Kind::Qkc, &reg.id);
     if out.changed {
         info!(
             qkc = %out.qkc_id,
@@ -328,6 +331,10 @@ async fn announce_orr(
     Json(reg): Json<OrrAnnounce>,
 ) -> impl IntoResponse {
     let out = svc.topology.announce_orr(&reg);
+    // Solo si entró: lo que no está en la topología no puede caducar de ella.
+    if out.accepted {
+        svc.presence.touch(Kind::Orr, &reg.id);
+    }
     if out.changed {
         info!(orr = %out.id, qkc = %reg.qkc_id, "orr registered");
     }
@@ -340,6 +347,9 @@ async fn announce_dkms(
     Json(reg): Json<DkmsAnnounce>,
 ) -> impl IntoResponse {
     let out = svc.topology.announce_dkms(&reg);
+    if out.accepted {
+        svc.presence.touch(Kind::Dkms, &reg.id);
+    }
     if out.changed {
         info!(dkms = %out.id, orr = %reg.orr_id, "dkms registered");
     }

@@ -18,6 +18,7 @@ use crate::{
     mcf::{BufferRole, McfSnapshot},
     mcmcf::{McmcfInputs, McmcfSolver},
     metrics::SdnMetrics,
+    presence::{Kind, Presence},
     push::Pushers,
     topology::{Topology, TopologyStore},
 };
@@ -37,6 +38,10 @@ pub struct SdnService {
     /// solve. Built lazily — only constructed when there's a tokio
     /// runtime available (see `attach_debouncer`).
     debouncer: Arc<RwLock<Option<Debouncer>>>,
+    /// Last time each self-registered module announced itself. Drives the
+    /// expiry sweep; see [`crate::presence`] for why it lives outside the
+    /// topology snapshot.
+    pub presence: Arc<Presence>,
 }
 
 impl SdnService {
@@ -61,6 +66,7 @@ impl SdnService {
             sdn_metrics,
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
+            presence: Arc::new(Presence::new()),
         };
         // 2026-05-20: previously called svc.recompute_mcf() synchronously
         // here. With N=40 (~1560 commodities, ~110 edges) microlp takes
@@ -194,6 +200,58 @@ impl SdnService {
     /// También spawnea un *version watcher* (200 ms tick) que detecta
     /// cambios en `topology.version` y emite un `TopologyEvent` por el
     /// `Pushers` para invalidar cachés en clientes (ORR, DKMS).
+    /// Saca de la topología a los módulos auto-registrados que dejaron de
+    /// anunciarse. Sin esto un nodo apagado se queda para siempre y el LP le
+    /// sigue asignando caudal que nadie consume.
+    ///
+    /// Cada entidad caduca por su cuenta, sin cascada: si se cae un QKC pero su
+    /// ORR y su DKMS siguen vivos, estos se quedan (el grafo ya tolera ORR/DKMS
+    /// colgando de un ancla ausente, y `qkc_of_dkms` devolverá `None`, así que
+    /// no se les asigna ruta). Normalmente caen los tres juntos y expiran los
+    /// tres.
+    fn spawn_presence_sweeper(&self) {
+        let ttl_secs = self.cfg.presence_ttl_secs;
+        if ttl_secs == 0 {
+            info!("presence sweeper disabled (presence_ttl_secs = 0)");
+            return;
+        }
+        let ttl = Duration::from_secs(ttl_secs);
+        // Barrer varias veces por TTL para que el retardo de detección sea una
+        // fracción de él y no un TTL entero.
+        let period = Duration::from_secs((ttl_secs / 3).max(1));
+        let presence = self.presence.clone();
+        let topology = self.topology.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            tick.tick().await; // el primero es inmediato
+            loop {
+                tick.tick().await;
+                for (kind, id) in presence.take_expired(ttl) {
+                    let res = match kind {
+                        // delete_qkc ya hace la cascada del grafo: quita el
+                        // nodo y toda arista que lo tocara.
+                        Kind::Qkc => topology.delete_qkc(&id),
+                        Kind::Orr => topology.delete_orr(&id),
+                        Kind::Dkms => topology.delete_dkms(&id),
+                    };
+                    match res {
+                        Ok(()) => warn!(
+                            kind = kind.as_str(), id = %id, ttl_secs,
+                            "módulo caducado: lleva más de un TTL sin anunciarse, lo saco de la \
+                             topología",
+                        ),
+                        // Ya no estaba (borrado a mano, por ejemplo). No es un
+                        // problema: el objetivo era que desapareciera.
+                        Err(e) => info!(
+                            kind = kind.as_str(), id = %id, error = %e,
+                            "módulo caducado que ya no estaba en la topología",
+                        ),
+                    }
+                }
+            }
+        });
+    }
+
     pub async fn run_background_tasks(self) -> Result<()> {
         info!("sdn: background tasks started");
         // Attach the debouncer now, inside the tokio runtime. Honour
@@ -202,6 +260,8 @@ impl SdnService {
         let window_override = (self.cfg.push_debounce_ms != 0)
             .then(|| Duration::from_millis(self.cfg.push_debounce_ms));
         self.attach_debouncer(window_override, None);
+
+        self.spawn_presence_sweeper();
 
         // Version watcher → broadcast TopologyEvent + push de forwarding
         // tables a los QKCs. Dispara en dos eventos:
@@ -512,6 +572,7 @@ pub(crate) mod tests {
                 default_policy: "shortest_hops".into(),
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
+                presence_ttl_secs: 90,
             }),
             topology: TopologyStore::new(small_topo()),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
@@ -520,6 +581,7 @@ pub(crate) mod tests {
             sdn_metrics: SdnMetrics::register(&Metrics::new("sdn-test-metrics")),
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
+            presence: Arc::new(Presence::new()),
         }
     }
 
