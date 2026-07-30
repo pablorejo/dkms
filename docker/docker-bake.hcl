@@ -17,7 +17,26 @@ target "_common" {
   platforms  = ["linux/amd64", "linux/arm64"]
 }
 
-target "qkc"  { inherits = ["_common"] args = { MODULE = "qkc"  } tags = ["${IMAGE_PREFIX}/qkc:${TAG}"] }
-target "orr"  { inherits = ["_common"] args = { MODULE = "orr"  } tags = ["${IMAGE_PREFIX}/orr:${TAG}"] }
-target "dkms" { inherits = ["_common"] args = { MODULE = "dkms" } tags = ["${IMAGE_PREFIX}/dkms:${TAG}"] }
-target "sdn"  { inherits = ["_common"] args = { MODULE = "sdn"  } tags = ["${IMAGE_PREFIX}/sdn:${TAG}"] }
+target "qkc" {
+  inherits = ["_common"]
+  args     = { MODULE = "qkc" }
+  tags     = ["${IMAGE_PREFIX}/qkc:${TAG}"]
+}
+
+target "orr" {
+  inherits = ["_common"]
+  args     = { MODULE = "orr" }
+  tags     = ["${IMAGE_PREFIX}/orr:${TAG}"]
+}
+
+target "dkms" {
+  inherits = ["_common"]
+  args     = { MODULE = "dkms" }
+  tags     = ["${IMAGE_PREFIX}/dkms:${TAG}"]
+}
+
+target "sdn" {
+  inherits = ["_common"]
+  args     = { MODULE = "sdn" }
+  tags     = ["${IMAGE_PREFIX}/sdn:${TAG}"]
+}

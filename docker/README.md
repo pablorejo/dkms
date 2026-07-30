@@ -4,103 +4,177 @@ Imágenes Docker públicas, una por módulo (`qkc`, `orr`, `dkms`, `sdn`), para 
 **cada institución despliegue lo suyo de forma autónoma**: `docker compose up`
 rellenando solo un `node.yml` corto. Sin orquestador central.
 
-- **Sin QKD real** → el QKC usa enlaces **PQC** ("QKD simulado por PQC",
-  ML-KEM-768). No hace falta quditto.
-- **Con QKD real** → el enlace del QKC apunta al **KME ETSI-014** del hardware.
+> **¿Prisa?** En [`examples/quick_start.md`](examples/quick_start.md) están
+> solo los comandos, sin explicaciones. Esta guía cuenta además **qué hace
+> cada paso, qué significa cada campo y cómo verificar que funciona**.
 
 El modelo de red: una **SDN central única** (la mantiene el operador) que ve
 toda la topología, y en cada nodo/institución un trío **QKC + ORR + DKMS**
-(en la misma máquina o repartidos). Flujo validado end-to-end el 2026-07-02
-sobre 4 máquinas (ver `tests/results/proxmox-docker-smoke/`).
+(en la misma máquina o repartidos):
+
+```
+            ┌──────────── SDN (operador central) ────────────┐
+            │  ve la topología, resuelve el LP de rates y    │
+            │  empuja forwarding a los QKC                   │
+            └──┬──────────────────┬──────────────────┬───────┘
+   institución 1                  │                  │
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│ DKMS-1 (claves a │   │ DKMS-2           │   │ DKMS-3           │
+│  SAEs, ETSI-014) │◄──┼─►ETSI-020 mTLS◄──┼───┼─►                │
+│   │              │   │   │              │   │   │              │
+│ ORR-1 (transporte│◄──┼─►ORR-2 (gRPC)◄───┼───┼─►ORR-3           │
+│  E2E de material)│   │   │              │   │   │              │
+│   │              │   │   │              │   │   │              │
+│ QKC-1 (enlaces   │◄──┼─►QKC-2 (TCP)◄────┼───┼─►QKC-3           │
+│  QKD/PQC)        │   │                  │   │                  │
+└──────────────────┘   └──────────────────┘   └──────────────────┘
+```
+
+- **Sin QKD real** → el QKC usa enlaces **PQC** ("QKD simulado por PQC",
+  ML-KEM-768 con re-keying periódico). No hace falta quditto.
+- **Con QKD real** → el enlace del QKC apunta al **KME ETSI-014** del hardware.
+
+Flujo validado end-to-end el 2026-07-02 sobre 4 máquinas (campaña local
+`proxmox-docker-smoke`): claves ETSI-014 idénticas en ambos extremos.
+
+## Cómo funciona una imagen por dentro (léelo una vez)
+
+Cada imagen contiene el binario Rust de su módulo + un entrypoint común:
+
+1. El contenedor arranca con `ROLE` fijado (qkc|orr|dkms|sdn).
+2. El entrypoint busca `/config/node.yml` (el que montas tú) y lo convierte
+   con `render_config.py` en la config nativa del binario — un TOML (y, para
+   la SDN, el árbol `topology/*.json`) — escrita en `/run/cfg/`.
+3. Arranca el binario apuntando a esa config.
+
+Consecuencias prácticas:
+
+- **Tú solo editas `node.yml`**; nombres de campo y puertos por defecto los
+  pone el renderer (espejo de los `src/config.rs` de cada crate).
+- Para **depurar la config real** que recibió el binario:
+  `docker compose -f <rol>.yml exec <rol> cat /run/cfg/qkc.toml` (qkc) o
+  `.../run/cfg/default.toml` (resto).
+- **Escape hatch**: si montas un TOML crudo (`qkc.toml` para qkc,
+  `default.toml` — más `topology/` para sdn — en `/config`), el entrypoint lo
+  usa tal cual y no genera nada. Útil para configs que el node.yml no expone.
+
+Los compose de `compose/` son deliberadamente mínimos: `network_mode: host`
+(sin mapeo de puertos: el binario escucha directamente en la máquina),
+`restart: unless-stopped` (rearranque automático tras reinicio o crash) y el
+`node.yml` montado read-only.
 
 ## Requisitos
 
-- Docker + `docker compose` en cada máquina (Debian, Raspberry Pi OS, etc.).
-  Instalación rápida: `curl -fsSL https://get.docker.com | sudo sh`.
-- Conectividad entre las máquinas que deben hablarse (ver tabla de puertos).
-  IPs públicas, VPN (WireGuard) o rutas acordadas entre instituciones.
+- Docker + `docker compose` en cada máquina (Debian, Raspberry Pi OS, etc.):
+  `curl -fsSL https://get.docker.com | sudo sh`
+- Conectividad entre las máquinas que deben hablarse (tabla siguiente).
+  Entre instituciones: IPs públicas, VPN (WireGuard) o rutas acordadas.
 - Para el DKMS: certificados firmados por una **CA común** a toda la red
-  (sección TLS más abajo).
+  (sección TLS del paso 4).
 
-## Puertos por defecto (host network)
+## Puertos: quién se conecta a quién
 
-| módulo | puerto | quién se conecta |
-|--------|--------|------------------|
-| qkc  | 20000 (peer) | los QKC vecinos (binary TCP) |
-| qkc  | 20001 (local) | su ORR (misma máquina o remoto) |
-| qkc  | 20002 (admin) | **solo la SDN** (push de forwarding) |
-| orr  | 20003 (grpc) | los ORR peers y su DKMS |
-| orr  | 20004 (metrics) | Prometheus (opcional) |
-| dkms | 20005 (sae) | los SAEs (ETSI-014, mTLS) |
-| dkms | 20006 (peer) | los otros DKMS (ETSI-020, mTLS) |
-| dkms | 20007 (grpc) | interno |
-| dkms | 20008 (metrics) | Prometheus (opcional) |
-| dkms | 20009 (ack) | los otros DKMS (ACKs del generator, TCP plano) |
-| sdn  | 19000 (grpc) | todos los ORR y DKMS |
-| sdn  | 19002 (http) | admin |
-| sdn  | 19010 (metrics) | Prometheus (opcional) |
+Con `network_mode: host` los puertos se abren directamente en la máquina.
+La columna "quién entra" es la que importa para el firewall:
 
-Override con `ports:` en el `node.yml` solo si una máquina corre varios nodos
-del mismo rol. Firewall recomendado: `admin` del QKC solo hacia la SDN; `peer`
-del QKC/DKMS y `ack` solo entre las instituciones que se enlazan.
+| módulo | puerto | protocolo | quién entra |
+|--------|--------|-----------|-------------|
+| qkc  | 20000 (peer)   | TCP binario | los QKC vecinos (ambos sentidos) |
+| qkc  | 20001 (local)  | TCP binario | **su** ORR (localhost si co-locados) |
+| qkc  | 20002 (admin)  | HTTP | **solo la SDN** (push de forwarding) |
+| orr  | 20003 (grpc)   | gRPC | los ORR peers y **su** DKMS |
+| orr  | 20004 (metrics)| HTTP | Prometheus (opcional) |
+| dkms | 20005 (sae)    | HTTPS mTLS | los SAEs (ETSI-014) |
+| dkms | 20006 (peer)   | HTTPS mTLS | los otros DKMS (ETSI-020) |
+| dkms | 20007 (grpc)   | gRPC | interno del nodo |
+| dkms | 20008 (metrics)| HTTP | Prometheus (opcional) |
+| dkms | 20009 (ack)    | TCP plano | los otros DKMS (ACKs del generator) |
+| sdn  | 19000 (grpc)   | gRPC | todos los ORR y DKMS |
+| sdn  | 19002 (http)   | HTTP | admin |
+| sdn  | 19010 (metrics)| HTTP | Prometheus (opcional) |
+
+Reglas mínimas entre instituciones que se enlazan: 20000, 20003, 20006 y
+20009 entre ellas; 20002 solo desde la SDN; 19000 abierto hacia la SDN desde
+todas. Los `metrics` y el 19002 pueden quedarse cerrados.
+
+Override de puertos: bloque `ports:` en el `node.yml` del módulo — solo
+necesario si una máquina corre **varios nodos del mismo rol** (p. ej. tests).
 
 ## Paso 0 (mantenedor): construir y publicar las imágenes
+
+Lo hace **una sola persona, una vez por versión** — las instituciones solo
+hacen `pull`.
 
 ```bash
 # desde la raíz del repo, con buildx configurado para multi-arch
 IMAGE_PREFIX=tuusuario docker buildx bake -f docker/docker-bake.hcl --push
 ```
 
-Construye `qkc/orr/dkms/sdn` para `linux/amd64` + `linux/arm64` (raspi) y las
-sube a Docker Hub. El build compila los 4 binarios en una sola pasada (etapa
-compartida). Nota: `aws-lc-sys` (dep de rustls) exige **gcc-12** — la base
-`rust:1.88-bookworm` ya lo trae. arm64 va por emulación QEMU (lento) o runner
-ARM nativo.
+Qué hace: compila los 4 binarios **en una sola pasada** (la etapa de build es
+común a los 4 targets) y publica `tuusuario/{qkc,orr,dkms,sdn}:latest` para
+`linux/amd64` + `linux/arm64` (Raspberry Pi). Variables del bake:
+`IMAGE_PREFIX` (namespace en Docker Hub) y `TAG` (default `latest`).
 
-Prueba local de una arch sin push:
+Notas de build:
+
+- `aws-lc-sys` (dependencia de rustls) exige **gcc-12**; la base
+  `rust:1.88-bookworm` ya lo trae. El toolchain lo fija `rust-toolchain.toml`
+  (1.88) — si el build falla con "rustc X is not supported", el pin y el
+  `Cargo.lock` se han desalineado.
+- arm64 sin runner ARM va por emulación QEMU (lento pero funciona).
+
+Variantes:
 
 ```bash
+# probar en local una sola arch, sin push (deja las imágenes en el docker local)
 docker buildx bake -f docker/docker-bake.hcl --set '*.platform=linux/amd64' --load
+
+# lab sin registry: mover imágenes por SSH
+docker save tuusuario/qkc:latest | ssh otra-maquina docker load
 ```
 
-Sin registry (lab): `docker save tuusuario/qkc | ssh otra-maquina docker load`.
+## Estructura común de un despliegue
 
-## Estructura común a todos los módulos
-
-Cada módulo se lanza igual: un directorio con **3 ficheros** (+ certs si es DKMS).
+Cada módulo se lanza igual: un directorio con 3 ficheros (+ `certs/` si es
+DKMS).
 
 ```
 mi-modulo/
-├── <rol>.yml      # el compose del rol (cópialo de docker/compose/)
-├── .env           # IMAGE_PREFIX=<namespace de Docker Hub>
+├── <rol>.yml      # compose del rol (cópialo de docker/compose/, no se edita)
+├── .env           # IMAGE_PREFIX=<namespace>  (lo lee docker compose)
 └── node.yml       # LO ÚNICO que se edita (plantillas en docker/examples/)
 ```
 
-El entrypoint del contenedor convierte el `node.yml` en la config real del
-binario Rust (`render_config.py`); la institución no toca TOML. Comandos
-idénticos para los 4 roles:
+Comandos idénticos para los 4 roles:
 
 ```bash
-docker compose -f <rol>.yml pull      # baja la imagen
-docker compose -f <rol>.yml up -d     # arranca (restart automático)
-docker compose -f <rol>.yml logs -f   # ver estado
+docker compose -f <rol>.yml pull      # baja/actualiza la imagen
+docker compose -f <rol>.yml up -d     # arranca en segundo plano
+docker compose -f <rol>.yml logs -f   # sigue los logs (Ctrl-C no para el servicio)
+docker compose -f <rol>.yml restart   # reinicio (relee node.yml)
+docker compose -f <rol>.yml down      # parar y quitar
 ```
 
-**Orden de arranque recomendado**: SDN primero, luego el resto en cualquier
-orden (QKC → ORR → DKMS si quieres logs limpios). No es crítico: todos los
-módulos reintentan la conexión (el DKMS reintenta la SDN 30×1 s, los ORR
-re-bootstrapean, la SDN re-pushea el forwarding cada tick).
+**Orden de arranque recomendado**: SDN primero y luego el resto en cualquier
+orden (QKC → ORR → DKMS da los logs más limpios). No es crítico porque todo
+reintenta: el DKMS reintenta la SDN 30×1 s en el boot, los ORR
+re-bootstrapean a sus peers, y la SDN re-empuja el forwarding en cada tick
+hasta que todos los QKC respondan. Los warnings de los primeros ~60 s son
+transitorios de este baile; lo que importa es el estado estacionario.
 
-En los ejemplos siguientes: SDN en `10.0.0.100`, nodo 1 en `10.0.0.11`,
-nodo 2 en `10.0.0.12`. Sustituye por tus IPs reales.
+En los ejemplos: SDN en `10.0.0.100`, nodo 1 en `10.0.0.11`, nodo 2 en
+`10.0.0.12`. Sustituye por tus IPs.
 
 ---
 
 ## 1. SDN (operador central)
 
-La SDN es el único módulo cuya config no es "local": su `node.yml` es la
-**topología global** de la red. La mantiene el operador central; cada
-institución le comunica (fuera de banda) las IPs de sus módulos.
+**Qué es**: el plano de control. Carga la topología global, resuelve el
+reparto de tasas (LP MCMCF-λ) periódicamente y empuja a cada QKC su tabla de
+forwarding. Es el único módulo cuya configuración no es local: su `node.yml`
+**es la topología de toda la red**, y la mantiene el operador central con la
+información que cada institución le comunica fuera de banda (IPs de sus
+módulos, enlaces que tiene).
 
 **Paso 1 — directorio y ficheros:**
 
@@ -111,51 +185,62 @@ echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/topology.example.yml node.yml
 ```
 
-**Paso 2 — editar `node.yml`** (la topología):
+**Paso 2 — editar `node.yml`.** Tres secciones:
 
 ```yaml
-nodes:                              # id de nodo -> IP de cada módulo
+nodes:                              # id de nodo -> dónde está cada módulo
   1: { qkc: "10.0.0.11", orr: "10.0.0.11", dkms: "10.0.0.11" }
   2: { qkc: "10.0.0.12", orr: "10.0.0.12", dkms: "10.0.0.12" }
 
 links:                              # enlaces del backbone QKC
-  - { a: 1, b: 2, type: pqc }      # pqc | qkd (r0/alpha/distance_km opcionales)
+  - { a: 1, b: 2, type: pqc }
 
 saes:                               # binding SAE -> nodo (opcional)
   - { id: "sae_1", node: 1 }
   - { id: "sae_2", node: 2 }
 ```
 
-Si un nodo reparte sus módulos en varias máquinas, pon la IP de cada uno
-(admite `ip:puerto` si hay override de puertos).
+| campo | significado |
+|-------|-------------|
+| `nodes.<id>` | id numérico de nodo (el mismo que usan `qkc_id`, `orr_N`, `dkms-N`). Cada entrada da la IP (o `ip:puerto`) del qkc/orr/dkms de ese nodo. Si el nodo reparte módulos en varias máquinas, cada uno lleva su IP. |
+| `links[]` | enlaces QKC↔QKC. `type: pqc\|qkd`. Opcionales del modelo de tasa que usa el LP: `r0` (keys/s en origen, default 2000), `alpha` (dB/km, default 0.2), `distance_km` (default 5). La capacidad efectiva del enlace es `r0·10^(−α·d/10)` — con los defaults, ~1588 keys/s. |
+| `saes[]` | mapeo SAE→nodo que la SDN sirve a los DKMS. Opcional: los DKMS también admiten binding local (`sae_bindings` en su node.yml). |
+| `mcf_period_ms` | período del recompute del LP (default 5000). |
 
 **Paso 3 — arrancar y verificar:**
 
 ```bash
-docker compose -f sdn.yml up -d
-docker compose -f sdn.yml logs -f
+docker compose -f sdn.yml up -d && docker compose -f sdn.yml logs -f
 ```
 
-Logs sanos:
+Logs sanos y qué significan:
 
 ```
-sdn::service: forwarding push done ... qkcs_ok=<nº de QKCs> qkcs_err=0
-sdn::service: MCMCF-λ recomputed n_commodities=... n_edges=...
+sdn::service: forwarding push done ... qkcs_ok=2 qkcs_err=0
+    → la SDN alcanzó el puerto admin (20002) de los 2 QKC y les empujó forwarding
+sdn::service: MCMCF-λ recomputed n_commodities=2 n_edges=1 lambda=... flows_with_rate=2
+    → el LP corre; n_commodities = pares DKMS×2 sentidos; registry_len crece
+      según los DKMS van registrando sus flujos
 ```
 
-`qkcs_err>0` es normal mientras los QKC aún no están arriba; se recupera solo
-al siguiente tick.
+`qkcs_err>0` mientras los QKC no están arriba es normal (se recupera solo).
+Si se queda permanente: la IP del QKC en `nodes:` está mal o el 20002 está
+filtrado desde la SDN.
 
-**Alta de una institución nueva**: añadir su nodo y sus enlaces al `node.yml`
-y `docker compose -f sdn.yml restart` (la topología se carga en el boot).
+**Operación**: la topología se carga **en el boot y es inmutable en runtime**.
+Alta de una institución = añadir su nodo y enlaces al `node.yml` y
+`docker compose -f sdn.yml restart`. Los módulos ya desplegados se reconectan
+solos.
 
 ---
 
 ## 2. QKC
 
-El QKC es la capa de material de clave: enlaza con sus vecinos por PQC o QKD
-real. No necesita saber nada de la SDN — es la SDN quien le empuja la tabla de
-forwarding a su puerto admin (20002).
+**Qué es**: la capa de material de clave del nodo. Mantiene un enlace con
+cada QKC vecino — por hardware QKD real (habla ETSI-014 con el KME) o por PQC
+(deriva material con ML-KEM y lo renueva periódicamente) — y llena con él sus
+keystores por peer. No se le configura enrutado: **la tabla de forwarding se
+la empuja la SDN** al puerto admin.
 
 **Paso 1 — directorio y ficheros:**
 
@@ -166,25 +251,29 @@ echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/node.qkc.yml node.yml
 ```
 
-**Paso 2 — editar `node.yml`**: tu id numérico y un bloque por vecino.
+**Paso 2 — editar `node.yml`:**
 
 ```yaml
 qkc_id: 1
 
 links:
   - neighbor_id: 2
-    neighbor_addr: "10.0.0.12"   # IP (o IP:puerto) del QKC vecino
-    type: pqc                    # sin hardware QKD
-  # con nodo QKD real (ETSI-014):
+    neighbor_addr: "10.0.0.12"       # IP (o IP:puerto) del QKC vecino
+    type: pqc
+  # con nodo QKD real:
   # - neighbor_id: 3
   #   neighbor_addr: "10.0.0.13"
   #   type: qkd
   #   kme_url: "https://mi-kme:443"
 ```
 
-`key_size_bits` (default 256) **debe coincidir en ambos extremos** del enlace.
-Ajustes PQC opcionales por enlace: `pqc_suite`, `pqc_rekey_keys`,
-`pqc_rekey_secs`, `pqc_rekey_lookahead`.
+| campo | significado |
+|-------|-------------|
+| `qkc_id` | id numérico del nodo. Debe coincidir con el de la topología de la SDN. |
+| `key_size_bits` | tamaño de las claves OTP del keystore (default 256). **Debe coincidir en los dos extremos de cada enlace.** |
+| `links[].neighbor_id` / `neighbor_addr` | id e IP del QKC vecino (puerto peer 20000 si no se indica). El enlace se declara en **ambos** extremos. |
+| `links[].type` | `pqc` (sin hardware) o `qkd` (con `kme_url` del KME ETSI-014). |
+| `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
 
 **Paso 3 — arrancar y verificar:**
 
@@ -192,19 +281,25 @@ Ajustes PQC opcionales por enlace: `pqc_suite`, `pqc_rekey_keys`,
 docker compose -f qkc.yml up -d && docker compose -f qkc.yml logs -f
 ```
 
-Logs sanos (con el vecino ya arriba):
+```
+qkc::pqc_handshake: qkc.pqc.handshake.established me=1 peer=2 epoch=N
+    → enlace PQC vivo con el vecino (una línea por vecino)
+qkc::keystore: keystore.levels peer=2 enc=256 dec=256 taken=4096 misses=0
+    → keystores por peer llenándose/rotando; misses=0 = nadie pidió material
+      que no hubiera
+```
 
-```
-qkc::pqc_handshake: qkc.pqc.handshake.established me=1 peer=2 ...
-qkc::keystore: keystore.levels peer=2 enc=... dec=... misses=0
-```
+Sin `handshake.established`: el vecino está caído, su `node.yml` no declara
+este enlace, o el 20000 está filtrado entre ambas máquinas.
 
 ---
 
 ## 3. ORR
 
-El ORR es el enrutador de material entre nodos: habla con **su** QKC (el del
-mismo nodo), con la SDN y con los ORR de los demás nodos.
+**Qué es**: el transporte E2E de material entre nodos. Coge claves del QKC de
+su nodo, las envuelve (cebolla, PQC E2E con el ORR destino) y las entrega al
+DKMS remoto vía su ORR. Habla con: **su** QKC (20001), la SDN (19000) y los
+ORR de los demás nodos (20003).
 
 **Paso 1 — directorio y ficheros:**
 
@@ -215,26 +310,28 @@ echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/node.orr.yml node.yml
 ```
 
-**Paso 2 — editar `node.yml`**:
+**Paso 2 — editar `node.yml`:**
 
 ```yaml
-orr_id: "orr_1"                    # convención: orr_<id de nodo>
-qkc_id: 1                          # el nodo al que pertenece
-
-# Dónde está SU QKC: localhost si co-locado, IP si en otra máquina.
+orr_id: "orr_1"
+qkc_id: 1
 qkc_addr: "127.0.0.1:20001"
-
 sdn_url: "http://10.0.0.100:19000"
 
-peers:                             # un par de entradas por cada OTRO ORR
-  orr_2: 2                         #   orr_id -> qkc_id
+peers:
+  orr_2: 2
 peer_grpc_addrs:
-  orr_2: "http://10.0.0.12:20003"  #   orr_id -> URL gRPC
+  orr_2: "http://10.0.0.12:20003"
 ```
 
-**Importante**: pon en `peers` **todos** los ORR de la red con cuyo DKMS se
-intercambiarán claves, no solo los vecinos físicos — el bootstrap PQC
-ORR↔ORR es E2E (max_hops=1) e independiente de la topología de enlaces.
+| campo | significado |
+|-------|-------------|
+| `orr_id` | **convención obligada**: `orr_<id de nodo>` — la SDN y los DKMS lo derivan así. |
+| `qkc_id` | el nodo al que pertenece. |
+| `qkc_addr` | dónde está **su** QKC (puerto local 20001). `127.0.0.1` si co-locados; la IP del QKC si va en otra máquina. |
+| `sdn_url` | gRPC de la SDN central. |
+| `peers` / `peer_grpc_addrs` | un par de entradas por **cada otro ORR de la red con cuyo DKMS se intercambiarán claves** — no solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
+| `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |
 
 **Paso 3 — arrancar y verificar:**
 
@@ -242,67 +339,87 @@ ORR↔ORR es E2E (max_hops=1) e independiente de la topología de enlaces.
 docker compose -f orr.yml up -d && docker compose -f orr.yml logs -f
 ```
 
-Logs sanos:
-
 ```
 orr::bootstrap: orr.peer_pubkey bootstrap ok local=orr_1 peer=orr_2 suite=ml-kem-768
-orr::bootstrap: orr.bootstrap bootstrap_secret ok ...
-orr::grpc_server: orr.stream_deliveries subscribed subscriber=dkms-dkms-1   # cuando su DKMS conecte
+orr::bootstrap: orr.bootstrap bootstrap_secret ok local=orr_1 peer=orr_2
+    → secreto maestro PQC establecido con ese peer (par de líneas por peer)
+orr::grpc_server: orr.stream_deliveries subscribed subscriber=dkms-dkms-1
+    → su DKMS se ha conectado y escucha entregas
 ```
 
-Gotcha conocido: si **reinicias solo un ORR**, los peers se quedan con el
-`master_secret` viejo ("sin master_secret" en bucle en el nuevo). Reinicia el
-conjunto (o al menos los ORR peers) hasta que exista el re-bootstrap pasivo.
+**Gotcha conocido**: si reinicias **solo un** ORR, los peers conservan el
+`master_secret` viejo y el nuevo loguea "sin master_secret" en bucle. Hoy no
+hay re-bootstrap pasivo: reinicia también los ORR peers (o el conjunto).
 
 ---
 
 ## 4. DKMS
 
-El DKMS es la cara visible: sirve claves a los SAEs (ETSI-014) y habla con los
-otros DKMS (ETSI-020). Es el único módulo que necesita **TLS**.
+**Qué es**: la cara visible del nodo. Sirve claves a los SAEs por ETSI-014
+(mTLS, 20005), acuerda claves con los otros DKMS por ETSI-020 (mTLS, 20006) y
+mantiene en RAM buffers de claves de transporte por peer que un *generator*
+rellena en segundo plano a la tasa que dicta la SDN (los ACKs de ese flujo van
+por el 20009). Es el único módulo con TLS, así que tiene un paso extra.
 
-**Paso 1 — certificados** (antes de arrancar):
+**Paso 1 — certificados.** Dos planos mTLS, misma CA:
+
+- **Plano SAE (20005)**: el DKMS presenta su cert de servidor; el SAE presenta
+  un cert de cliente del que el DKMS **extrae su identidad** (SAN
+  `urn:dkms:sae:<id>`, o CN/DNS con el id pelado).
+- **Plano peer (20006)**: mTLS entre DKMS; ambos validan contra la CA común.
 
 ```bash
-# genera/reutiliza la CA en ./certs y emite el cert de este DKMS.
-# El 2º argumento es la IP anunciable de ESTA máquina (va al SAN del cert).
+# genera/reutiliza la CA en ./certs y emite el cert de ESTE dkms.
+# El 2º argumento es la IP anunciable de esta máquina: va al SAN del cert
+# (los peers la verifican) y DEBE ser la misma que advertise_ip del node.yml.
 .../docker/gen-certs.sh dkms-1 10.0.0.11 ./certs
 ```
 
-La CA (`ca.crt`/`ca.key`) se crea la primera vez y **se reutiliza si ya
-existe**: una sola CA firma todos los DKMS de la red. Multi-institución: la CA
-común es un acuerdo (una CA central que firme cada cert, o CAs cross-firmadas);
-se distribuye `ca.crt` a todos, la `ca.key` no sale de quien firma.
+Produce `ca.crt`/`ca.key` (solo la primera vez — después **reutiliza** la CA
+que encuentre en el directorio) y `dkms-1.crt`/`dkms-1.key` con SAN
+`URI:dkms://dkms-1, IP:10.0.0.11, DNS:localhost`.
+
+**Multi-institución**: el mTLS exige raíz de confianza común. O una CA
+central emite el cert de cada institución (cada una manda su CSR o recibe su
+par), o cada institución tiene CA propia y se cross-firman. `ca.crt` se
+distribuye a todos; **`ca.key` no sale de quien firma**. El nombre del
+fichero de cert debe ser exactamente `<node_id>.crt`/`.key` — el binario los
+busca por ese nombre en `/config/certs`.
 
 **Paso 2 — directorio y ficheros:**
 
 ```bash
-mkdir dkms && cd dkms          # con ./certs dentro
+mkdir dkms && cd dkms            # con ./certs dentro
 cp .../docker/compose/dkms.yml .
 echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/node.dkms.yml node.yml
 ```
 
-**Paso 3 — editar `node.yml`**:
+**Paso 3 — editar `node.yml`:**
 
 ```yaml
-node_id: "dkms-1"                  # convención: dkms-<id de nodo>; debe
-                                   # coincidir con el nombre del cert
-advertise_ip: "10.0.0.11"          # IP de ESTA máquina alcanzable por los
-                                   # otros DKMS (mTLS + socket ACK); debe
-                                   # estar en el SAN del cert (gen-certs.sh)
-
-orr_addr: "127.0.0.1:20003"        # su ORR (localhost si co-locado)
+node_id: "dkms-1"
+advertise_ip: "10.0.0.11"
+orr_addr: "127.0.0.1:20003"
 sdn_endpoint: "http://10.0.0.100:19000"
 
-peers:                             # cada OTRO DKMS con el que se intercambian claves
+peers:
   dkms-2:
-    endpoint: "10.0.0.12"          # puerto peer 20006 por defecto
-    orr_id: "orr_2"                # el ORR de ese peer
-
-# security_level: qkd_prefer      # strict_qkd | qkd_prefer | no_worry
-# fill_rate: 0                    # floor de llenado keys/s (0 = lo que asigne la SDN)
+    endpoint: "10.0.0.12"
+    orr_id: "orr_2"
 ```
+
+| campo | significado |
+|-------|-------------|
+| `node_id` | **convención obligada**: `dkms-<id de nodo>`. Debe coincidir con el nombre del cert. |
+| `advertise_ip` | IP de esta máquina **alcanzable por los otros DKMS**: se anuncia como endpoint de ACK (20009) y debe estar en el SAN del cert. Si está mal, los ACKs del generator no vuelven y `ack_pending` crece sin parar. |
+| `orr_addr` | su ORR (20003). `127.0.0.1` si co-locados. |
+| `sdn_endpoint` | gRPC de la SDN. En el boot se reintenta 30×1 s; si la SDN aparece más tarde, reinicia el DKMS. |
+| `peers.<id>` | cada **otro DKMS** con el que se intercambiarán claves: `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Los `peers` de todos los DKMS deben ser coherentes con los `peers` de los ORR. |
+| `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
+| `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
+| `sae_bindings` | mapeo local `sae→dkms` de respaldo si la SDN no responde. Opcional. |
+| `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 
 **Paso 4 — arrancar y verificar:**
 
@@ -310,48 +427,64 @@ peers:                             # cada OTRO DKMS con el que se intercambian c
 docker compose -f dkms.yml up -d && docker compose -f dkms.yml logs -f
 ```
 
-Logs sanos:
-
 ```
 dkms::etsi_http::mtls: dkms https listening addr=0.0.0.0:20005 plane="sae"
 dkms::etsi_http::mtls: dkms https listening addr=0.0.0.0:20006 plane="peer-dkms"
+    → los dos planos mTLS arriba
 dkms::service: orr deliveries pump connected subscriber=dkms-dkms-1
-dkms::control::generator: generator.state peer=dkms-2 enc=4096 dec=4096 ack_pending=0 ...
+    → conectado a su ORR y suscrito a entregas
+dkms::control::generator: generator.state peer=dkms-2 enc=4096 dec=4096
+                          ack_pending=0 emit_total=... observed_keys_per_s=...
+                          sdn_rate_keys_per_s=...
+    → la línea de salud (cada 5 s, una por peer): enc/dec = llenado de los
+      buffers de claves de transporte; ack_pending → 0 en estacionario;
+      sdn_rate = tasa que la SDN asigna a ese flujo
 ```
 
-La línea `generator.state` (cada 5 s) es el estado real de los buffers.
-Warnings `ack_reaper: expired pending keys` durante el primer minuto son un
-transitorio del arranque (claves emitidas antes de que el peer estuviera
-arriba); en estado estacionario `ack_pending` debe tender a 0.
+Dos mensajes del boot que **no** son errores: `qkc unreachable after 20
+retries; continuing without it` (el DKMS no habla con el QKC directamente
+cuando el transporte es ORR) y `ack_reaper: expired pending keys` durante el
+primer minuto (claves emitidas antes de que el peer estuviera arriba).
 
 ---
 
 ## Sitio completo en una máquina (`site.yml`)
 
-Si el QKC+ORR+DKMS de un nodo van en la misma máquina, un solo compose:
+El caso común — el trío entero del nodo en una sola máquina, un solo compose:
 
 ```bash
-mkdir mi-nodo && cd mi-nodo      # con node.qkc.yml, node.orr.yml, node.dkms.yml y certs/
+mkdir mi-nodo && cd mi-nodo
 cp .../docker/compose/site.yml .
 echo "IMAGE_PREFIX=tuusuario" > .env
+# node.qkc.yml + node.orr.yml + node.dkms.yml (como en las secciones 2-4) y certs/
 docker compose -f site.yml up -d
 ```
 
 Deja `qkc_addr`/`orr_addr` en `127.0.0.1` (co-locados). Los rangos de puertos
-por rol no colisionan.
+por rol no colisionan entre sí.
 
-## SAEs: certs y prueba de humo ETSI-014
+## SAEs: certificados y prueba de humo ETSI-014
 
-Los SAEs (clientes que piden claves) también necesitan cert firmado por la CA,
-con el SAN que el DKMS entiende (`urn:dkms:sae:<id>` — con otro formato el
-`dec_keys` devuelve `key not found`):
+Un SAE es cualquier aplicación cliente que pide claves a su DKMS. Necesita un
+cert de cliente firmado por la CA común **con la identidad en el SAN**:
 
 ```bash
-.../docker/gen-certs.sh --sae sae_1 ./certs
+.../docker/gen-certs.sh --sae sae_1 ./certs     # SAN URI:urn:dkms:sae:sae_1
 .../docker/gen-certs.sh --sae sae_2 ./certs
 ```
 
-Intercambio completo de una clave entre dos nodos:
+> Con otro formato de SAN el DKMS no extrae la identidad: el `enc_keys`
+> responde 200 pero el `dec_keys` del otro extremo da `key not found`.
+
+API en `https://<dkms>:20005` (ETSI GS QKD 014):
+
+| endpoint | qué hace |
+|----------|----------|
+| `GET /api/v1/keys/<slave>/status` | stock y límites del par: `stored_key_count`, `max_key_per_request` (64), `max_key_size` (4096), `min_key_size` (64)… |
+| `POST /api/v1/keys/<slave>/enc_keys` | body `{"number":N,"size":bits}` → `{"keys":[{"key_ID","key"}]}`. El DKMS entrega la clave al DKMS del slave por ETSI-020 en la misma llamada. |
+| `POST /api/v1/keys/<master>/dec_keys` | body `{"key_IDs":[{"key_ID":"…"}]}` → la **misma** clave, en el otro extremo. |
+
+Intercambio completo entre dos nodos (la prueba de que la red funciona):
 
 ```bash
 C=./certs
@@ -361,39 +494,56 @@ curl -s --cacert $C/ca.crt --cert $C/sae_1.crt --key $C/sae_1.key \
   https://10.0.0.11:20005/api/v1/keys/sae_2/enc_keys
 # -> {"keys":[{"key_ID":"<uuid>","key":"<b64>"}]}
 
-# 2) sae_2 recoge la MISMA clave en el dkms del nodo 2 con ese key_ID
+# 2) sae_2 recoge esa clave en el dkms del nodo 2
 curl -s --cacert $C/ca.crt --cert $C/sae_2.crt --key $C/sae_2.key \
-  -H 'Content-Type: application/json' \
-  -d '{"key_IDs":[{"key_ID":"<uuid>"}]}' \
+  -H 'Content-Type: application/json' -d '{"key_IDs":[{"key_ID":"<uuid>"}]}' \
   https://10.0.0.12:20005/api/v1/keys/sae_1/dec_keys
-# -> la misma "key" => la red funciona end-to-end
+# -> la misma "key" => end-to-end OK
 ```
 
-También hay `GET /api/v1/keys/<slave>/status` para consultar stock sin gastar.
+## Operación día a día
 
-## Escape hatch (config avanzada)
+```bash
+# actualizar un módulo a la última imagen publicada
+docker compose -f <rol>.yml pull && docker compose -f <rol>.yml up -d
 
-Si prefieres el TOML nativo, monta `qkc.toml` (qkc) o `default.toml`
-(+ `topology/` para sdn) en `/config` y el entrypoint lo usa tal cual, sin
-generar nada.
+# cambiar la config: editar node.yml y
+docker compose -f <rol>.yml restart
+
+# ver la config renderizada que recibió el binario
+docker compose -f <rol>.yml exec <rol> cat /run/cfg/default.toml   # (qkc: /run/cfg/qkc.toml)
+```
+
+Añadir un peer/institución nueva toca, además de desplegar el nodo nuevo:
+la topología de la SDN (+restart), los `links` del QKC con quien enlace, y
+los `peers` de **todos** los ORR y DKMS que vayan a intercambiar claves con
+él (+restart de cada uno — mejor el conjunto de ORRs, por el gotcha del
+re-bootstrap).
 
 ## Troubleshooting
 
 | síntoma | causa probable |
 |---------|----------------|
-| `dec_keys` → `key not found` con `enc_keys` OK | cert del SAE sin SAN `urn:dkms:sae:<id>` (usa `gen-certs.sh --sae`), o el peer DKMS de destino no está en `peers:` del emisor |
-| curl → `alert certificate required` | falta `--cert/--key` del SAE, o su cert no está firmado por la CA que el DKMS tiene en `certs_dir` |
-| SDN `qkcs_err>0` permanente | la IP/puerto del QKC en la topología no es alcanzable desde la SDN (firewall del 20002) |
+| `dec_keys` → `key not found` con `enc_keys` OK | cert del SAE sin SAN `urn:dkms:sae:<id>` (usa `gen-certs.sh --sae`), o el DKMS destino no tiene al emisor en `peers:` |
+| curl → `alert certificate required` | falta `--cert/--key` del SAE, o su cert no lo firmó la CA que el DKMS monta en `certs_dir` |
+| SDN `qkcs_err>0` permanente | IP/puerto del QKC mal en la topología, o 20002 filtrado desde la SDN |
 | ORR "sin master_secret" en bucle | se reinició un solo ORR; reinicia el conjunto |
-| QKC sin `handshake.established` | vecino caído o puerto 20000 filtrado entre las dos máquinas |
-| `ack_pending` crece sin parar | puerto 20009 del peer filtrado, o `advertise_ip` mal puesto (los ACK van a esa IP) |
-| DKMS `qkc unreachable after 20 retries; continuing without it` en el boot | **normal** en despliegues con ORR (el DKMS no habla con el QKC directamente) |
+| QKC sin `handshake.established` | vecino caído, enlace no declarado en el otro extremo, o 20000 filtrado |
+| DKMS `ack_pending` crece sin parar | 20009 del peer filtrado o `advertise_ip` mal (los ACK van a esa IP) |
+| DKMS `qkc unreachable … continuing without it` en el boot | **normal** con transporte ORR |
+| `enc_keys` lento o falla hacia un peer | ese peer no está en los `peers` del ORR local (el material no puede viajar) |
+| la config no coincide con lo que esperabas | mira lo renderizado: `exec <rol> cat /run/cfg/…` |
 
-## Notas multi-institución
+## Notas multi-institución y límites conocidos
 
-- **SDN central única**: es el modelo soportado hoy. Autonomía/federación por
-  institución NO existe todavía.
-- **Topología inmutable en runtime**: se carga en el boot de la SDN; añadir
-  nodos/enlaces = editar `node.yml` y reiniciar la SDN.
+- **SDN central única**: es el modelo soportado hoy; federación por
+  institución no existe todavía.
+- **Topología inmutable en runtime**: cambios de nodos/enlaces = editar el
+  `node.yml` de la SDN y reiniciarla.
+- **La tasa de un enlace es compartida** entre ambos sentidos (no hay modelo
+  A→B / B→A separado).
 - **Sin límites de RAM/CPU** en los compose (default de Docker). En máquinas
-  pequeñas añade `mem_limit:` tú mismo.
+  pequeñas añade `mem_limit:` al servicio.
+- Los buffers de claves del DKMS viven **solo en RAM**: un reinicio los vacía
+  y el generator los rellena de nuevo (por diseño; no hay persistencia de
+  material de clave).
