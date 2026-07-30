@@ -8,6 +8,7 @@
 //!   GET    /sae-bindings/{dkms_id}
 //!
 //! Mutations (mirror Python SDN semantics):
+//!   POST   /register/qkc              a QKC announces itself + its links
 //!   POST   /sae                       register a SAE
 //!   PUT    /sae/{sae_id}              re-bind a SAE to another DKMS
 //!   DELETE /sae/{sae_id}              remove a SAE
@@ -36,7 +37,7 @@ use crate::{
     error::SdnError,
     routing,
     service::SdnService,
-    topology::{Dkms, Sae, SaeBulkItem, Topology},
+    topology::{Dkms, QkcAnnounce, Sae, SaeBulkItem, Topology},
 };
 
 #[derive(Serialize)]
@@ -297,6 +298,26 @@ async fn list_sae_bindings(
         "bindings": bindings,
     }))
     .into_response()
+}
+
+// ---------------- self-registration (auto_conf_sdn) --------------------------
+
+/// A QKC announcing itself. Idempotent: QKCs re-post this periodically as a
+/// heartbeat, and an unchanged announcement leaves the topology version alone.
+async fn announce_qkc(
+    State(svc): State<SdnService>,
+    Json(reg): Json<QkcAnnounce>,
+) -> impl IntoResponse {
+    let out = svc.topology.announce_qkc(&reg);
+    if out.changed {
+        info!(
+            qkc = %out.qkc_id,
+            added = ?out.edges_added,
+            pending = ?out.edges_pending,
+            "qkc registered",
+        );
+    }
+    (StatusCode::OK, Json(out)).into_response()
 }
 
 // ---------------- SAE CRUD ---------------------------------------------------
@@ -578,6 +599,7 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/dkms", get(get_dkms_all))
         .route("/saes", get(get_saes))
         .route("/links", get(get_links))
+        .route("/register/qkc", post(announce_qkc))
         .route("/sae", post(register_sae))
         .route("/sae-bulk", post(register_sae_bulk))
         .route("/sae/:sae_id", put(update_sae).delete(delete_sae))

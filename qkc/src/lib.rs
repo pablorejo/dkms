@@ -36,5 +36,6 @@ pub mod pqc_handshake;
 pub mod pqc_source;
 pub mod relay;
 pub mod routing;
+pub mod sdn_client;
 pub mod service;
 pub mod transport;

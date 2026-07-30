@@ -190,7 +190,7 @@ impl PqcHandshake {
         while !self.store.contains(epoch) {
             self.send(FRAME_PQC_KEM_INIT, epoch, &pubkey);
             attempts += 1;
-            if attempts % 20 == 0 {
+            if attempts.is_multiple_of(20) {
                 debug!(peer = self.peer_id, epoch, attempts, "qkc.pqc.init_retrying");
             }
             tokio::time::sleep(INIT_RETRY).await;

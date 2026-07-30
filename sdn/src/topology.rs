@@ -90,6 +90,42 @@ pub enum BulkSaeOutcome {
     },
 }
 
+/// One link as announced by a QKC registering itself (see
+/// [`TopologyStore::register_qkc`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QkcLinkAnnounce {
+    pub neighbor_id: String,
+    #[serde(flatten)]
+    pub meta: EdgeMeta,
+}
+
+/// Self-announcement of a QKC: who it is, where to reach it, and which
+/// neighbours it has a link with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QkcAnnounce {
+    pub id: String,
+    pub host: HostEndpoint,
+    #[serde(default)]
+    pub links: Vec<QkcLinkAnnounce>,
+}
+
+/// What [`TopologyStore::register_qkc`] did with an announcement. `pending`
+/// and `conflict` are not errors: the QKC re-announces periodically, so the
+/// caller just needs to know the edge is not in the graph yet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QkcAnnounceOutcome {
+    pub qkc_id: String,
+    /// Whether the topology changed (and therefore the version was bumped).
+    pub changed: bool,
+    /// Edges now in the graph because of this announcement.
+    pub edges_added: Vec<String>,
+    /// Neighbours that have not registered yet; the edge waits for them.
+    pub edges_pending: Vec<String>,
+    /// Neighbours whose edge already exists with *different* metadata. The
+    /// existing value is kept — see `register_qkc` for why.
+    pub edges_conflict: Vec<String>,
+}
+
 /// Channel kind of a QKC↔QKC link.
 ///
 /// * `Qkd` (default) — keys come from the shared quditto; capacity is the
@@ -802,6 +838,71 @@ impl TopologyStore {
         next.version += 1;
         self.inner.store(Arc::new(next));
         Ok(out)
+    }
+
+    // ----- self-registration (auto_conf_sdn)
+
+    /// Fold a QKC's self-announcement into the graph.
+    ///
+    /// Idempotent on purpose: QKCs re-announce periodically as a heartbeat, so
+    /// an unchanged announcement must **not** bump the version — every bump
+    /// re-pushes forwarding tables and re-runs the LP.
+    ///
+    /// Edges need both endpoints registered ([`Topology::add_edge`] enforces
+    /// it), so a QKC that starts before its neighbour gets `edges_pending`;
+    /// the neighbour's own announcement closes the edge, since both ends
+    /// declare the link. Nothing is retried here — the QKC's announce loop is
+    /// what makes it converge.
+    ///
+    /// On conflicting metadata the **existing** value wins and the clash is
+    /// logged. Last-write-wins would be worse than useless here: two endpoints
+    /// disagreeing would overwrite each other on every heartbeat, bumping the
+    /// version forever and thrashing the solver.
+    pub fn announce_qkc(&self, reg: &QkcAnnounce) -> QkcAnnounceOutcome {
+        let mut out = QkcAnnounceOutcome {
+            qkc_id: reg.id.clone(),
+            ..Default::default()
+        };
+        let changed = self.mutate(|t| {
+            // Keep any kme_host we already knew: overwriting it with None on
+            // every heartbeat would look like a change and bump the version.
+            let kme_host = t.qkcs.get(&reg.id).and_then(|q| q.kme_host.clone());
+            let mut changed = t.upsert_qkc(Qkc {
+                id: reg.id.clone(),
+                host: reg.host.clone(),
+                kme_host,
+            });
+            for link in &reg.links {
+                if link.neighbor_id == reg.id {
+                    continue;
+                }
+                if !t.qkcs.contains_key(&link.neighbor_id) {
+                    out.edges_pending.push(link.neighbor_id.clone());
+                    continue;
+                }
+                match t.edge(&reg.id, &link.neighbor_id).cloned() {
+                    Some(existing) if existing != link.meta => {
+                        warn!(
+                            a = %reg.id, b = %link.neighbor_id,
+                            existing = ?existing, announced = ?link.meta,
+                            "link metadata disagrees between endpoints; keeping the existing \
+                             value. Make both node.yml agree — the SDN sizes this edge from it",
+                        );
+                        out.edges_conflict.push(link.neighbor_id.clone());
+                    }
+                    Some(_) => {}
+                    None => {
+                        if t.add_edge(&reg.id, &link.neighbor_id, link.meta.clone()) {
+                            out.edges_added.push(link.neighbor_id.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            changed
+        });
+        out.changed = changed;
+        out
     }
 
     // ----- SAE CRUD (mirrors Python SDN semantics)
@@ -1556,5 +1657,99 @@ mod tests {
         assert!(ok);
         assert_eq!(store.load().version, v0 + 1);
         assert!(store.load().saes.contains_key("sae-b"));
+    }
+
+    // ----- self-registration (auto_conf_sdn)
+
+    fn announce(id: &str, neighbors: &[&str], r0: f64) -> QkcAnnounce {
+        QkcAnnounce {
+            id: id.into(),
+            host: dummy_host(id.parse().unwrap_or(0), 20002),
+            links: neighbors
+                .iter()
+                .map(|n| QkcLinkAnnounce {
+                    neighbor_id: (*n).into(),
+                    meta: EdgeMeta {
+                        distance_km: 5,
+                        r0_keys_per_second: r0,
+                        alpha: 0.2,
+                        max_buffer_size: 65536,
+                        link_type: LinkType::Pqc,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn announce_qkc_defers_edge_until_neighbor_registers() {
+        let store = TopologyStore::new(Topology::default());
+
+        // First QKC up: it knows about "2", which has not announced yet.
+        let out = store.announce_qkc(&announce("1", &["2"], 2000.0));
+        assert!(out.changed, "the QKC itself must land");
+        assert_eq!(out.edges_pending, vec!["2".to_string()]);
+        assert!(out.edges_added.is_empty());
+        assert_eq!(store.load().edges.len(), 0);
+
+        // Neighbour comes up and declares the same link: now the edge closes.
+        let out = store.announce_qkc(&announce("2", &["1"], 2000.0));
+        assert_eq!(out.edges_added, vec!["1".to_string()]);
+        assert!(out.edges_pending.is_empty());
+        assert_eq!(store.load().edges.len(), 1);
+    }
+
+    #[test]
+    fn re_announcing_is_idempotent_and_does_not_bump_version() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0));
+        store.announce_qkc(&announce("2", &["1"], 2000.0));
+        let settled = store.load().version;
+
+        // The announce loop is also the heartbeat: it fires forever. Every
+        // version bump re-pushes forwarding tables and re-runs the LP, so an
+        // unchanged announcement must be a no-op.
+        for _ in 0..10 {
+            let out = store.announce_qkc(&announce("1", &["2"], 2000.0));
+            assert!(!out.changed);
+            let out = store.announce_qkc(&announce("2", &["1"], 2000.0));
+            assert!(!out.changed);
+        }
+        assert_eq!(store.load().version, settled);
+    }
+
+    #[test]
+    fn conflicting_link_metadata_keeps_the_existing_value() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0));
+        store.announce_qkc(&announce("2", &["1"], 2000.0));
+        let settled = store.load().version;
+
+        // "2" is misconfigured with a different r0. Last-write-wins would make
+        // the two endpoints overwrite each other on every heartbeat, bumping
+        // the version forever.
+        for _ in 0..5 {
+            let out = store.announce_qkc(&announce("2", &["1"], 500.0));
+            assert!(!out.changed);
+            assert_eq!(out.edges_conflict, vec!["1".to_string()]);
+        }
+        assert_eq!(store.load().version, settled);
+        let meta = store.load().edge("1", "2").cloned().unwrap();
+        assert_eq!(meta.r0_keys_per_second, 2000.0);
+    }
+
+    #[test]
+    fn announce_qkc_ignores_self_links_and_updates_host() {
+        let store = TopologyStore::new(Topology::default());
+        let mut a = announce("1", &["1"], 2000.0);
+        let out = store.announce_qkc(&a);
+        assert!(out.edges_added.is_empty() && out.edges_pending.is_empty());
+        assert_eq!(store.load().edges.len(), 0);
+
+        // A node that moves to another IP must be picked up.
+        a.host.ip = "10.9.9.9".into();
+        let out = store.announce_qkc(&a);
+        assert!(out.changed);
+        assert_eq!(store.load().qkcs["1"].host.ip, "10.9.9.9");
     }
 }

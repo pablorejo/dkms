@@ -54,6 +54,17 @@ def with_port(addr, default_port):
     return addr if ":" in addr else (addr + ":" + str(default_port))
 
 
+def url_with_port(url, default_port):
+    """Accept 'ip', 'ip:port', 'http://ip' or 'http://ip:port'."""
+    url = str(url)
+    scheme, sep, rest = url.partition("//")
+    if not sep:
+        scheme, rest = "http:", url
+        sep = "//"
+    host = rest.rstrip("/")
+    return scheme + sep + with_port(host, default_port)
+
+
 def q(s):
     """TOML-quote a string."""
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -83,12 +94,32 @@ def render_qkc(n, out):
         "local_listen = " + q(local_l),
         "admin_http = " + q(admin_l),
     ]
+    # Self-registration with the SDN. Optional: without it somebody has to add
+    # this node to the SDN's topology by hand.
+    if n.get("sdn_url"):
+        lines.append("sdn_url = " + q(url_with_port(n["sdn_url"], PORTS["sdn"]["http"])))
+        # admin_http binds 0.0.0.0, which is useless as an address for the SDN
+        # to dial back, so the announcement needs a routable IP.
+        if n.get("advertise_ip"):
+            lines.append("advertise_ip = " + q(n["advertise_ip"]))
+        if n.get("sdn_announce_secs") is not None:
+            lines.append("sdn_announce_secs = " + str(int(n["sdn_announce_secs"])))
     for lk in n.get("links", []):
         nid = int(req(lk, "neighbor_id", "qkc.link"))
         naddr = with_port(req(lk, "neighbor_addr", "qkc.link"), PORTS["qkc"]["peer"])
         typ = str(lk.get("type", "pqc")).lower()
         lines += ["", "[[links]]", "neighbor_id = " + str(nid),
                   "neighbor_peer_addr = " + q(naddr), "key_size_bits = " + str(key_bits)]
+        # Physical model of the link. The QKC does not use these — it forwards
+        # them to the SDN, which sizes the edge with r0*10^(-alpha*d/10).
+        # Only the institution knows them: its own fibre, or what it configured
+        # on the quditto. PQC edges are uncapacitated, so they can be omitted.
+        if lk.get("r0") is not None:
+            lines.append("r0 = " + str(float(lk["r0"])))
+        if lk.get("alpha") is not None:
+            lines.append("alpha = " + str(float(lk["alpha"])))
+        if lk.get("distance_km") is not None:
+            lines.append("distance_km = " + str(int(lk["distance_km"])))
         if typ == "qkd":
             kme = str(req(lk, "kme_url", "qkc.link(qkd)"))
             if "//" not in kme:

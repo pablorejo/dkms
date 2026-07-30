@@ -13,6 +13,7 @@ use clap::Parser;
 use qkc::{
     config::QkcConfig,
     http_admin,
+    sdn_client::SdnAnnouncer,
     service::QkcService,
     transport::{local, peer_server},
 };
@@ -64,6 +65,13 @@ async fn main() -> Result<()> {
         let addr = cfg.admin_http.clone();
         async move { http_admin::serve(svc, &addr).await }
     });
+
+    // Anuncio periódico a la SDN para que nos incluya en su topología. Va
+    // aparte del `select!` de abajo a propósito: si no hay `sdn_url`, o la SDN
+    // está caída, el QKC sigue relayando claves igual.
+    if let Some(announcer) = SdnAnnouncer::from_config(&cfg) {
+        tokio::spawn(announcer.run());
+    }
 
     tokio::select! {
         r = peer    => r??,

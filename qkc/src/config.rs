@@ -66,9 +66,30 @@ pub struct QkcConfig {
     /// Donde monto el HTTP admin (forwarding-table push, healthz).
     pub admin_http: String,
 
+    /// HTTP admin de la SDN (p. ej. `http://10.0.0.100:19002`) al que me
+    /// anuncio para que me incluya en su topología. Sin esto el QKC funciona
+    /// igual, pero alguien tiene que darlo de alta a mano en la SDN.
+    #[serde(default)]
+    pub sdn_url: Option<String>,
+
+    /// IP con la que me anuncio a la SDN. Necesaria porque `admin_http` suele
+    /// ser `0.0.0.0:*`, que no le sirve a la SDN para alcanzarme. Si se omite,
+    /// se usa la IP de origen que la SDN ve en la conexión.
+    #[serde(default)]
+    pub advertise_ip: Option<String>,
+
+    /// Cada cuánto reanuncio a la SDN. Es también el heartbeat del que
+    /// cuelga la expiración de nodos, así que no lo subas sin mirar el TTL.
+    #[serde(default = "default_announce_secs")]
+    pub sdn_announce_secs: u64,
+
     /// Un entry por enlace QKC↔QKC con este vecino directo.
     #[serde(default)]
     pub links: Vec<LinkConfig>,
+}
+
+fn default_announce_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +145,24 @@ pub struct LinkConfig {
     /// re-keying está desactivado.
     #[serde(default = "default_rekey_lookahead")]
     pub pqc_rekey_lookahead: u32,
+
+    // ---- modelo físico del enlace: el QKC no lo usa, se lo anuncia a la SDN.
+    //
+    // La SDN dimensiona la arista con `cap = r0 · 10^(−alpha·d/10)`, y quien
+    // conoce esos valores es la institución: con hardware QKD son su fibra, y
+    // con un quditto son los que le configuró. En enlaces PQC no se aplican
+    // (la SDN los trata como incapacitados) y se pueden omitir.
+    /// `R₀` del enlace en claves/s a distancia 0.
+    #[serde(default)]
+    pub r0: Option<f64>,
+
+    /// `α`, atenuación de la fibra en dB/km.
+    #[serde(default)]
+    pub alpha: Option<f64>,
+
+    /// Longitud del enlace en km.
+    #[serde(default)]
+    pub distance_km: Option<u32>,
 }
 
 fn default_key_size() -> u32 {
@@ -260,6 +299,39 @@ mod tests {
         );
         cfg.validate()
             .expect("PQC link without quditto_url is valid");
+    }
+
+    #[test]
+    fn sdn_announce_fields_are_optional_and_default_sanely() {
+        // Sin bloque de SDN: el QKC funciona igual, solo que nadie lo da de
+        // alta solo. No debe fallar el parseo.
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"pqc\"\nkey_size_bits = 256\n"
+        ));
+        assert!(cfg.sdn_url.is_none());
+        assert!(cfg.advertise_ip.is_none());
+        assert_eq!(cfg.sdn_announce_secs, 30);
+        assert!(cfg.links[0].r0.is_none());
+    }
+
+    #[test]
+    fn sdn_announce_fields_and_link_model_parse() {
+        let cfg = parse(
+            "qkc_id = 1\npeer_listen = \"0.0.0.0:7001\"\nlocal_listen = \"0.0.0.0:7100\"\n\
+             admin_http = \"0.0.0.0:7200\"\nsdn_url = \"http://10.0.0.100:19002\"\n\
+             advertise_ip = \"10.0.0.11\"\nsdn_announce_secs = 15\n\
+             [[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"qkd\"\nquditto_url = \"http://127.0.0.1:8081\"\n\
+             key_size_bits = 256\nr0 = 2000.0\nalpha = 0.2\ndistance_km = 5\n",
+        );
+        assert_eq!(cfg.sdn_url.as_deref(), Some("http://10.0.0.100:19002"));
+        assert_eq!(cfg.advertise_ip.as_deref(), Some("10.0.0.11"));
+        assert_eq!(cfg.sdn_announce_secs, 15);
+        assert_eq!(cfg.links[0].r0, Some(2000.0));
+        assert_eq!(cfg.links[0].alpha, Some(0.2));
+        assert_eq!(cfg.links[0].distance_km, Some(5));
+        cfg.validate().expect("link model fields are informational");
     }
 
     #[test]

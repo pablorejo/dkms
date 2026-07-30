@@ -260,6 +260,9 @@ cp .../docker/examples/node.qkc.yml node.yml
 ```yaml
 qkc_id: 1
 
+sdn_url: "10.0.0.100"          # la SDN se entera sola de este nodo
+advertise_ip: "10.0.0.11"      # IP por la que la SDN alcanza a ESTE QKC
+
 links:
   - neighbor_id: 2
     neighbor_addr: "10.0.0.12"       # IP (o IP:puerto) del QKC vecino
@@ -269,15 +272,31 @@ links:
   #   neighbor_addr: "10.0.0.13"
   #   type: qkd
   #   kme_url: "https://mi-kme:443"
+  #   r0: 2000                       # modelo del enlace, para el solver de la SDN
+  #   alpha: 0.2
+  #   distance_km: 5
 ```
 
 | campo | significado |
 |-------|-------------|
-| `qkc_id` | id numérico del nodo. Debe coincidir con el de la topología de la SDN. |
+| `qkc_id` | id numérico del nodo. |
+| `sdn_url` | HTTP admin de la SDN (puerto 19002 si no se indica). El QKC se anuncia solo y la SDN lo mete en su topología. Omítelo si prefieres dar de alta el nodo a mano. |
+| `advertise_ip` | IP con la que se anuncia. Hace falta porque el contenedor bindea `0.0.0.0`, que no le sirve a la SDN para llamarle de vuelta. |
+| `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `key_size_bits` | tamaño de las claves OTP del keystore (default 256). **Debe coincidir en los dos extremos de cada enlace.** |
 | `links[].neighbor_id` / `neighbor_addr` | id e IP del QKC vecino (puerto peer 20000 si no se indica). El enlace se declara en **ambos** extremos. |
 | `links[].type` | `pqc` (sin hardware) o `qkd` (con `kme_url` del KME ETSI-014). |
+| `links[].r0` / `alpha` / `distance_km` | modelo físico del enlace. El QKC no los usa: se los pasa a la SDN, que dimensiona la arista con `r0·10^(−alpha·d/10)`. Solo para enlaces `qkd` — los `pqc` van sin capacidad. |
 | `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
+
+**Sobre el auto-registro.** Una arista necesita a sus dos extremos dados de
+alta, así que el QKC que arranque primero la verá `pending` hasta que su vecino
+aparezca: el anuncio es un bucle, no un disparo único, y converge solo. Un
+reanuncio sin cambios no toca la topología, así que no dispara recálculos.
+
+Si los dos extremos declaran `r0`/`alpha`/`distance_km` **distintos**, la SDN se
+queda con el primero que llegó y lo avisa por log; corrige el `node.yml` que
+esté mal, porque de ese número sale la capacidad del enlace.
 
 **Paso 3 — arrancar y verificar:**
 
