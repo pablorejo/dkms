@@ -34,7 +34,10 @@
 //! en silencio hasta las claves que reciben los SAEs.
 
 use std::collections::HashMap;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
@@ -48,6 +51,10 @@ use crate::{
 
 /// Reintento del INIT mientras una época no completa.
 const INIT_RETRY: Duration = Duration::from_millis(300);
+
+/// Mínimo entre re-enlaces. Si el peer flapea, no queremos una tanda de
+/// ML-KEM por cada rebote del socket.
+const RELINK_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Coordinador del handshake ML-KEM (multi-época) de UN enlace PQC.
 pub struct PqcHandshake {
@@ -69,6 +76,8 @@ pub struct PqcHandshake {
     /// ciphertext)`. La pubkey va en la clave porque el ciphertext SOLO sirve
     /// para esa pubkey — ver [`PqcHandshake::handle_init`].
     resp_cache: Mutex<HashMap<u32, (Vec<u8>, Vec<u8>)>>,
+    /// Último re-enlace, para el rate-limit de [`RELINK_MIN_INTERVAL`].
+    last_relink: Mutex<Option<Instant>>,
 }
 
 /// Parte un payload `época_be(4) ‖ blob` en `(época, blob)`.
@@ -105,6 +114,7 @@ impl PqcHandshake {
             rekey_secs,
             pending_sk: Mutex::new(HashMap::new()),
             resp_cache: Mutex::new(HashMap::new()),
+            last_relink: Mutex::new(None),
         })
     }
 
@@ -162,26 +172,100 @@ impl PqcHandshake {
 
     /// Arranca la tarea de rotación/pre-carga. No-op en el respondedor (que es
     /// reactivo: encapsula al recibir cada INIT). El iniciador establece las
-    /// épocas `0..=lookahead` y luego añade una por cada disparo de rotación.
+    /// épocas `0..=lookahead` y luego añade una por cada disparo de rotación
+    /// **o** cuando el peer se reconecta (ver [`Self::relink`]).
     pub fn spawn_rotation(self: &Arc<Self>) {
         if !self.is_initiator() {
             return;
         }
+        // Pedimos la señal ANTES del primer INIT: así el slot existe y no
+        // se nos escapa una reconexión temprana.
+        let reconnect = self
+            .peer_out
+            .reconnect_signal(self.peer_id, &self.peer_addr);
         let me = self.clone();
         tokio::spawn(async move {
             for epoch in 0..=me.lookahead {
                 me.establish(epoch).await;
             }
-            // Sin disparadores ⇒ una sola época (comportamiento histórico).
-            if me.clock_disabled() {
-                return;
-            }
             loop {
-                me.clock.wait_rotate(me.rekey_secs).await;
-                let next = me.store.highest().unwrap_or(0).saturating_add(1);
-                me.establish(next).await;
+                // Un único dueño de `establish`: este bucle. El re-enlace
+                // NO puede ir en su propia task o dos `establish` de la
+                // misma época pisarían `pending_sk` y el RESP se
+                // decapsularía con la sk equivocada.
+                if me.clock_disabled() {
+                    // Sin rotación configurada seguimos atendiendo
+                    // reconexiones: es lo que resucita un enlace cuyo
+                    // respondedor se reinició.
+                    reconnect.notified().await;
+                    me.relink().await;
+                    continue;
+                }
+                tokio::select! {
+                    _ = me.clock.wait_rotate(me.rekey_secs) => {
+                        let next = me.store.highest().unwrap_or(0).saturating_add(1);
+                        me.establish(next).await;
+                    }
+                    _ = reconnect.notified() => me.relink().await,
+                }
             }
         });
+    }
+
+    /// Renegocia el enlace entero tras una reconexión con el peer.
+    ///
+    /// El respondedor no puede iniciar nada —si mandara INIT él, nosotros
+    /// conservaríamos nuestro secreto viejo y él adoptaría el nuevo, que es
+    /// justo la divergencia silenciosa que hay que evitar—, así que si se
+    /// reinicia se queda **sin ninguna época** y el enlace muere en los dos
+    /// sentidos: `establish` sale antes de tiempo para las épocas que
+    /// nosotros ya tenemos, así que nunca le reenviamos el INIT. Con el
+    /// default `pqc_rekey_secs = 3600` y un enlace ocioso eso era una hora
+    /// de enlace levantado y vacío.
+    ///
+    /// Que el socket se caiga y vuelva es la señal: solo pasa si el peer se
+    /// fue. Negociamos un bloque de épocas NUEVO por encima de las actuales
+    /// (nunca reutilizamos números: el mismo número con otro secreto es
+    /// indetectable) y podamos las viejas, que ya no tiene nadie enfrente.
+    /// Una reconexión por un corte de red sin reinicio también dispara
+    /// esto; cuesta tres ML-KEM y no rompe nada.
+    async fn relink(&self) {
+        let now = Instant::now();
+        {
+            let mut last = self.last_relink.lock();
+            if let Some(prev) = *last {
+                if now.duration_since(prev) < RELINK_MIN_INTERVAL {
+                    debug!(
+                        peer = self.peer_id,
+                        "qkc.pqc.relink omitido (demasiado seguido)"
+                    );
+                    return;
+                }
+            }
+            *last = Some(now);
+        }
+        let base = self.store.highest().map(|h| h + 1).unwrap_or(0);
+        warn!(
+            me = self.my_id,
+            peer = self.peer_id,
+            base,
+            "qkc.pqc.relink: el peer se reconectó (¿reinicio?); renegocio el enlace",
+        );
+        for epoch in base..=base.saturating_add(self.lookahead) {
+            self.establish(epoch).await;
+        }
+        // Podamos DESPUÉS de negociar: si vaciáramos antes, `enc_keys` se
+        // quedaría sin ninguna época mientras dura el handshake.
+        let dropped = self.store.prune_below(base);
+        self.pending_sk.lock().retain(|e, _| *e >= base);
+        self.resp_cache.lock().retain(|e, _| *e >= base);
+        info!(
+            me = self.my_id,
+            peer = self.peer_id,
+            base,
+            epocas_descartadas = dropped,
+            "qkc.pqc.relink completado",
+        );
     }
 
     fn clock_disabled(&self) -> bool {

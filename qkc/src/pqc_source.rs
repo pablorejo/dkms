@@ -173,6 +173,20 @@ impl SecretStore {
         self.notify.notify_waiters();
     }
 
+    /// Descarta (y zeroiza) toda época anterior a `epoch`.
+    ///
+    /// La usa el re-enlace tras detectar que el peer se reinició: una vez
+    /// negociado un bloque de épocas nuevo, las viejas ya no las tiene
+    /// nadie al otro lado y conservarlas solo sirve para que `enc` siga
+    /// eligiendo una que el peer no puede descifrar.
+    pub fn prune_below(&self, epoch: u32) -> usize {
+        let mut m = self.inner.lock();
+        let keep = m.split_off(&epoch); // los < epoch se quedan en `m`
+        let dropped = m.len();
+        *m = keep; // los viejos se dropean aquí → Zeroizing los borra
+        dropped
+    }
+
     pub fn get(&self, epoch: u32) -> Option<Zeroizing<[u8; 32]>> {
         self.inner.lock().get(&epoch).cloned()
     }
@@ -597,6 +611,45 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "sin bloqueo esperando una época inexistente",
         );
+    }
+
+    /// Tras un re-enlace, el iniciador negocia un bloque de épocas nuevo y
+    /// poda las viejas. El invariante que hace que el enlace vuelva a
+    /// funcionar es que `enc` acabe eligiendo `base`, que es justo lo único
+    /// que el respondedor recién reiniciado tiene.
+    #[tokio::test]
+    async fn after_a_relink_both_ends_land_on_the_same_epoch() {
+        const LOOKAHEAD: u32 = 2;
+        let base = 3u32;
+
+        // Iniciador: venía con 0..2 y negocia 3..5 encima.
+        let ini = SecretStore::new(LOOKAHEAD, 1000);
+        for e in 0..=2u32 {
+            ini.insert(e, fresh_secret(e as u8));
+        }
+        for e in base..=base + LOOKAHEAD {
+            ini.insert(e, fresh_secret(e as u8));
+        }
+        // Respondedor reiniciado: sólo tiene lo negociado tras volver.
+        let resp = SecretStore::new(LOOKAHEAD, 1000);
+        for e in base..=base + LOOKAHEAD {
+            resp.insert(e, fresh_secret(e as u8));
+        }
+
+        assert_eq!(ini.prune_below(base), 3, "se tiran las tres viejas");
+        assert_eq!(ini.lowest(), Some(base));
+        assert!(ini.get(2).is_none(), "la época podada ya no está");
+
+        let src_ini = PqcKeySource::new(256, Arc::clone(&ini), LOOKAHEAD, None);
+        let src_resp = PqcKeySource::new(256, Arc::clone(&resp), LOOKAHEAD, None);
+        let k_ini = src_ini.enc_keys(1).await.unwrap();
+        let k_resp = src_resp.enc_keys(1).await.unwrap();
+
+        assert_eq!(epoch_of(k_ini[0].key_id.as_bytes()), base);
+        assert_eq!(epoch_of(k_resp[0].key_id.as_bytes()), base);
+        // Y lo que emite cada uno es descifrable por el otro.
+        assert!(src_resp.dec_keys(&[k_ini[0].key_id]).await.unwrap().len() == 1);
+        assert!(src_ini.dec_keys(&[k_resp[0].key_id]).await.unwrap().len() == 1);
     }
 
     /// Con la ventana completa, la cota no cambia nada.

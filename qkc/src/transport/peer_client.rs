@@ -61,6 +61,13 @@ struct PeerSlot {
     /// `true` mientras el writer_loop tiene un TCP stream abierto;
     /// `false` si está en backoff de reconexión. Útil para stats.
     connected: AtomicBool,
+    /// Conexiones TCP logradas contra este peer desde el arranque.
+    connects: AtomicU64,
+    /// Se avisa en cada RE-conexión (la primera no cuenta). Que el socket
+    /// se caiga y vuelva es la única señal local de que el peer pudo
+    /// haberse reiniciado y perdido su estado — la usa el handshake PQC
+    /// para renegociar el enlace. Ver `PqcHandshake::spawn_rotation`.
+    reconnect: Arc<Notify>,
 }
 
 pub struct PeerOut {
@@ -125,6 +132,8 @@ impl PeerOut {
             dropped: AtomicU64::new(0),
             last_drop_warn_micros: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            connects: AtomicU64::new(0),
+            reconnect: Arc::new(Notify::new()),
         });
         let entry = self
             .peers
@@ -155,6 +164,13 @@ impl PeerOut {
             });
         }
         stored
+    }
+
+    /// Handle que se despierta cada vez que RE-conectamos con `peer_id`
+    /// (la primera conexión no dispara). Crea el slot si hace falta, así
+    /// que se puede pedir antes del primer `send`.
+    pub fn reconnect_signal(&self, peer_id: u32, peer_addr: &str) -> Arc<Notify> {
+        self.get_or_create(peer_id, peer_addr).reconnect.clone()
     }
 
     pub fn stats(&self, peer_id: u32) -> Option<(u64, u64)> {
@@ -192,6 +208,13 @@ async fn writer_loop(peer_id: u32, slot: Arc<PeerSlot>) {
                     info!(%peer_id, addr = %slot.addr, "qkc.peer_out.connected");
                 }
                 slot.connected.store(true, Ordering::Relaxed);
+                // La primera conexión es el arranque normal; a partir de la
+                // segunda, el peer pudo haberse reiniciado. `notify_one`
+                // guarda el permiso, así que el aviso no se pierde aunque
+                // nadie esté esperando en este instante.
+                if slot.connects.fetch_add(1, Ordering::Relaxed) > 0 {
+                    slot.reconnect.notify_one();
+                }
                 backoff = Duration::from_millis(50);
                 consecutive_failures = 0;
                 s
@@ -281,4 +304,52 @@ fn micros_since_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// La señal de reconexión es lo que resucita un enlace PQC cuyo
+    /// respondedor se reinició, así que tiene que distinguir la primera
+    /// conexión (arranque normal) de las siguientes (el peer se fue).
+    #[tokio::test]
+    async fn reconnect_fires_on_the_second_connect_but_not_the_first() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let out = PeerOut::new();
+        let signal = out.reconnect_signal(7, &addr);
+
+        // Primera conexión: el writer_loop se lanzó al pedir la señal.
+        let (first, _) = listener.accept().await.unwrap();
+        // Nadie debe haber avisado todavía.
+        let too_soon = tokio::time::timeout(Duration::from_millis(200), signal.notified()).await;
+        assert!(
+            too_soon.is_err(),
+            "la primera conexión no es una reconexión"
+        );
+
+        // El peer "se reinicia": cae el socket y el writer reconecta. Ojo:
+        // el writer solo descubre el socket muerto AL ESCRIBIR, y tras un
+        // FIN limpio la primera escritura todavía puede tener éxito — así
+        // que insistimos hasta que se vea la nueva conexión.
+        drop(first);
+        let reconnected = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                out.send(7, &addr, Frame::empty(wire::FRAME_RECV));
+                if let Ok(Ok(c)) =
+                    tokio::time::timeout(Duration::from_millis(200), listener.accept()).await
+                {
+                    return c;
+                }
+            }
+        })
+        .await;
+        assert!(reconnected.is_ok(), "el writer_loop vuelve a conectar");
+
+        let fired = tokio::time::timeout(Duration::from_secs(5), signal.notified()).await;
+        assert!(fired.is_ok(), "la reconexión sí avisa");
+    }
 }
