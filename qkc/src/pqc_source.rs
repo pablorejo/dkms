@@ -169,6 +169,14 @@ impl SecretStore {
         self.inner.lock().keys().next_back().copied()
     }
 
+    /// Época viva más baja. Todo lo anterior fue evictado por la ventana
+    /// deslizante (o nunca llegó, si el enlace se estableció con este
+    /// extremo ya arrancado) y **no volverá jamás**: esperar por ello es
+    /// tiempo tirado. Ver [`PqcKeySource::dec_keys`].
+    pub fn lowest(&self) -> Option<u32> {
+        self.inner.lock().keys().next().copied()
+    }
+
     /// Espera (con deadline) a que exista el secreto de `epoch`.
     pub async fn await_epoch(&self, epoch: u32) -> Result<Zeroizing<[u8; 32]>> {
         let deadline = Instant::now() + SECRET_WAIT;
@@ -324,18 +332,67 @@ impl KeySource for PqcKeySource {
         Ok(out)
     }
 
+    /// Deriva el material de cada `key_id` que **se pueda** derivar.
+    ///
+    /// Es best-effort a propósito. Antes bastaba un solo id irrecuperable
+    /// para tumbar el lote entero: el `?` abortaba y el
+    /// `keystore::dec_refill_loop` descartaba las 128 claves, incluidas
+    /// las 127 buenas, tras haberse bloqueado 10 s esperando la que no
+    /// existía. Con un lote envenenado por segundo el bucle pasaba el
+    /// 100 % del tiempo bloqueado, el buffer DEC no subía de cero y TODOS
+    /// los frames de ese enlace morían por timeout — el enlace quedaba
+    /// muerto en un sentido mientras el contrario funcionaba.
+    ///
+    /// De dónde salen los ids irrecuperables: si un extremo se reinicia,
+    /// el que sobrevive sigue teniendo claves ENC en buffer de épocas que
+    /// el reiniciado nunca tendrá (arranca en la época que negocie al
+    /// volver). Esas claves se emiten igual y llegan aquí.
+    ///
+    /// Las que no se puedan derivar simplemente no salen: su frame morirá
+    /// —es indescifrable de verdad— pero sin arrastrar a los demás.
     async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
         let mut out = Vec::with_capacity(ids.len());
+        // Épocas que ya han dado timeout en ESTE lote. Sin esto, N ids de
+        // una época ausente costarían N × 10 s.
+        let mut dead: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let (mut stale, mut timed_out) = (0usize, 0usize);
+        let floor = self.store.lowest();
         for id in ids {
             let epoch = epoch_of(id.as_bytes());
-            let secret = self.store.await_epoch(epoch).await?;
-            out.push(OtpKey {
-                key_id: *id,
-                material: derive_material(&secret, id.as_bytes(), self.key_bytes),
-            });
+            // Por debajo de la ventana viva: evictada o nunca recibida.
+            // Descarte inmediato, sin esperar.
+            if floor.is_some_and(|lo| epoch < lo) {
+                stale += 1;
+                continue;
+            }
+            if dead.contains(&epoch) {
+                timed_out += 1;
+                continue;
+            }
+            match self.store.await_epoch(epoch).await {
+                Ok(secret) => out.push(OtpKey {
+                    key_id: *id,
+                    material: derive_material(&secret, id.as_bytes(), self.key_bytes),
+                }),
+                Err(_) => {
+                    dead.insert(epoch);
+                    timed_out += 1;
+                }
+            }
+        }
+        if stale > 0 || timed_out > 0 {
+            tracing::warn!(
+                requested = ids.len(),
+                derived = out.len(),
+                stale,
+                timed_out,
+                window = ?(self.store.lowest(), self.store.highest()),
+                "qkc.pqc.dec_keys: claves indescifrables descartadas (el peer usó épocas \
+                 que este extremo no tiene; suele ser que uno de los dos se reinició)",
+            );
         }
         Ok(out)
     }
@@ -441,5 +498,62 @@ mod tests {
         let m0 = src_b.dec_keys(&[id0]).await.unwrap()[0].material.clone();
         let m1 = src_b.dec_keys(&[id1]).await.unwrap()[0].material.clone();
         assert_ne!(m0, m1, "distinta época ⇒ distinto material");
+    }
+
+    /// Un id de una época que este extremo nunca tuvo (el peer se reinició
+    /// y nosotros no) NO puede llevarse por delante al resto del lote.
+    ///
+    /// Es el fallo que dejaba un enlace PQC muerto en un solo sentido: el
+    /// `?` abortaba las 128 claves del lote y, de paso, bloqueaba el
+    /// `dec_refill_loop` 10 s esperando un secreto que no iba a llegar.
+    #[tokio::test]
+    async fn one_unrecoverable_id_does_not_kill_the_batch() {
+        let store = SecretStore::new(0, 1000);
+        // Ventana viva = épocas 5 y 6. La 1 se perdió.
+        store.insert(5, fresh_secret(5));
+        store.insert(6, fresh_secret(6));
+        let src = PqcKeySource::new(256, Arc::clone(&store), 0, None);
+
+        let stale = make_key_id(1);
+        let good: Vec<Uuid> = (0..4).map(|_| make_key_id(6)).collect();
+        let mut ids = vec![stale];
+        ids.extend(good.iter().copied());
+
+        let started = std::time::Instant::now();
+        let out = src.dec_keys(&ids).await.unwrap();
+
+        assert_eq!(out.len(), 4, "las 4 derivables sobreviven al id envenenado");
+        assert!(
+            out.iter().all(|k| k.key_id != stale),
+            "la irrecuperable no se inventa",
+        );
+        assert_eq!(
+            out.iter().map(|k| k.key_id).collect::<Vec<_>>(),
+            good,
+            "orden y correspondencia intactos",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "descarte inmediato: no se espera por una época bajo la ventana",
+        );
+    }
+
+    /// Varios ids de una misma época ausente cuestan UNA espera, no N.
+    #[tokio::test]
+    async fn a_missing_epoch_is_waited_for_once_per_batch() {
+        let store = SecretStore::new(0, 1000);
+        store.insert(5, fresh_secret(5));
+        let src = PqcKeySource::new(256, Arc::clone(&store), 0, None);
+        // Época 9 > la ventana: es futura, así que sí se espera... pero
+        // sólo la primera vez. Con SECRET_WAIT=10 s, tres esperas serían
+        // 30 s; una sola son 10 s.
+        let ids: Vec<Uuid> = (0..3).map(|_| make_key_id(9)).collect();
+        let started = std::time::Instant::now();
+        let out = src.dec_keys(&ids).await.unwrap();
+        assert!(out.is_empty());
+        assert!(
+            started.elapsed() < SECRET_WAIT * 2,
+            "se esperó una vez por época, no una por clave",
+        );
     }
 }
