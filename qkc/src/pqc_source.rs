@@ -301,10 +301,26 @@ impl PqcKeySource {
         }
     }
 
-    /// Época que usa `enc` ahora: `highest − lookahead` (≥ 0). Ambos extremos
-    /// la calculan igual; el iniciador adelanta `highest` al rotar.
+    /// Época que usa `enc` ahora: `highest − lookahead` (≥ 0), **acotada por
+    /// abajo a la época viva más baja**. Ambos extremos la calculan igual; el
+    /// iniciador adelanta `highest` al rotar.
+    ///
+    /// La cota importa cuando este extremo acaba de reiniciar: su ventana
+    /// empieza en la época que negoció al volver, no en cero. Sin acotar,
+    /// `highest − lookahead` apunta a una época que nunca tuvo, `enc_keys`
+    /// se bloquea 10 s y falla, y el enlace no encripta hasta que pasen
+    /// `lookahead + 1` rotaciones —con el default `pqc_rekey_secs = 3600`
+    /// y sin tráfico que fuerce rekey por volumen, eso son horas—.
+    ///
+    /// Subir a `lowest` es seguro: el peer conserva una ventana más ancha
+    /// que la nuestra (él no se reinició), así que cualquier época que
+    /// nosotros tengamos, él también.
     fn active_epoch(&self, highest: u32) -> u32 {
-        highest.saturating_sub(self.lookahead)
+        let target = highest.saturating_sub(self.lookahead);
+        match self.store.lowest() {
+            Some(lo) if lo > target => lo,
+            _ => target,
+        }
     }
 }
 
@@ -535,6 +551,50 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "descarte inmediato: no se espera por una época bajo la ventana",
+        );
+    }
+
+    /// Un extremo recién reiniciado sólo tiene las épocas negociadas desde
+    /// que volvió. `enc` debe elegir una que TENGA, no `highest − lookahead`
+    /// a ciegas: si no, no encripta hasta pasadas `lookahead + 1` rotaciones.
+    #[tokio::test]
+    async fn enc_after_a_restart_uses_an_epoch_this_end_actually_has() {
+        let store = SecretStore::new(2, 1000);
+        // Ventana tras reiniciar: sólo 8 y 9. La 7 (= 9 − lookahead) falta.
+        store.insert(8, fresh_secret(8));
+        store.insert(9, fresh_secret(9));
+        let src = PqcKeySource::new(256, Arc::clone(&store), 2, None);
+
+        let started = std::time::Instant::now();
+        let keys = src.enc_keys(3).await.unwrap();
+
+        assert_eq!(keys.len(), 3);
+        for k in &keys {
+            assert_eq!(
+                epoch_of(k.key_id.as_bytes()),
+                8,
+                "usa la más baja viva, no la 7 que no tiene",
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "sin bloqueo esperando una época inexistente",
+        );
+    }
+
+    /// Con la ventana completa, la cota no cambia nada.
+    #[tokio::test]
+    async fn enc_still_honours_lookahead_when_the_window_is_complete() {
+        let store = SecretStore::new(2, 1000);
+        for e in 0..=9u32 {
+            store.insert(e, fresh_secret(e as u8));
+        }
+        let src = PqcKeySource::new(256, Arc::clone(&store), 2, None);
+        let keys = src.enc_keys(1).await.unwrap();
+        assert_eq!(
+            epoch_of(keys[0].key_id.as_bytes()),
+            7,
+            "highest − lookahead"
         );
     }
 
