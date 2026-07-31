@@ -2,7 +2,7 @@
 # junto a este fichero.
 services:
   dkms:
-    image: ${IMAGE_PREFIX:-ORG}/dkms:latest
+    image: ${IMAGE_PREFIX:-ORG}/dkms:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes:

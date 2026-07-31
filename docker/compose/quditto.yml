@@ -11,7 +11,7 @@
 #   curl -s http://localhost:20010/api/v1/keys/1/status
 services:
   quditto:
-    image: ${IMAGE_PREFIX:-ORG}/quditto:latest
+    image: ${IMAGE_PREFIX:-ORG}/quditto:${TAG:-latest}
     network_mode: host                 # usa la red de la máquina (sin mapear puertos)
     restart: unless-stopped
     volumes:

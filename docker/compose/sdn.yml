@@ -2,7 +2,7 @@
 # global (ver examples/topology.example.yml). Cópiala como node.yml junto a esto.
 services:
   sdn:
-    image: ${IMAGE_PREFIX:-ORG}/sdn:latest
+    image: ${IMAGE_PREFIX:-ORG}/sdn:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes:

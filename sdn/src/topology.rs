@@ -1095,6 +1095,13 @@ impl TopologyStore {
                 .dkms
                 .remove(dkms_id)
                 .ok_or_else(|| SdnError::UnknownDkms(dkms_id.into()))?;
+            // Cascade to its SAEs. A SAE is served by exactly one DKMS, so
+            // without this the binding outlives the DKMS forever: `GET /saes`
+            // keeps listing it and `GET /sae/<id>/binding` 404s on a DKMS that
+            // no longer exists. Only reachable since DKMS entities started
+            // expiring (see `crate::presence`) — before that they were never
+            // removed at runtime.
+            t.saes.retain(|_, s| s.dkms_id != dkms_id);
             // Unlink dkms_by_qkc only if it pointed to this dkms.
             let qkc_id_opt = t.orrs.get(&dkms.orr_id).map(|o| o.qkc_id.clone());
             if let Some(qkc_id) = qkc_id_opt {
@@ -1632,6 +1639,31 @@ mod tests {
             assert!(!store.announce_dkms(&dkms).changed);
         }
         assert_eq!(store.load().version, settled);
+    }
+
+    #[test]
+    fn deleting_a_dkms_takes_its_saes_with_it() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        store.announce_orr(&OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "1".into(),
+        });
+        store.announce_dkms(&DkmsAnnounce {
+            id: "dkms-1".into(),
+            host: dummy_host(301, 20005),
+            orr_id: "orr_1".into(),
+            saes: vec!["sae_1".into()],
+        });
+        assert!(store.load().saes.contains_key("sae_1"));
+
+        // Un DKMS caducado se lleva sus SAE: si no, el binding sobrevive al
+        // DKMS y `GET /sae/sae_1/binding` responde 404 sobre un DKMS que ya
+        // no existe, para siempre. Detectado en el laboratorio Proxmox al
+        // apagar un nodo entero.
+        store.delete_dkms("dkms-1").unwrap();
+        assert!(!store.load().saes.contains_key("sae_1"));
     }
 
     #[test]

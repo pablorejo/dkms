@@ -1,7 +1,7 @@
 # Despliegue de un ORR. Copia tu node.yml junto a este fichero.
 services:
   orr:
-    image: ${IMAGE_PREFIX:-ORG}/orr:latest
+    image: ${IMAGE_PREFIX:-ORG}/orr:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes:

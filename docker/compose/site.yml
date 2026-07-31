@@ -5,17 +5,17 @@
 # En los node.yml de orr/dkms deja qkc_addr/orr_addr en 127.0.0.1 (co-locados).
 services:
   qkc:
-    image: ${IMAGE_PREFIX:-ORG}/qkc:latest
+    image: ${IMAGE_PREFIX:-ORG}/qkc:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes: [ "./node.qkc.yml:/config/node.yml:ro" ]
   orr:
-    image: ${IMAGE_PREFIX:-ORG}/orr:latest
+    image: ${IMAGE_PREFIX:-ORG}/orr:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes: [ "./node.orr.yml:/config/node.yml:ro" ]
   dkms:
-    image: ${IMAGE_PREFIX:-ORG}/dkms:latest
+    image: ${IMAGE_PREFIX:-ORG}/dkms:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes:
