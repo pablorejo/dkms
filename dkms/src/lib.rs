@@ -28,6 +28,7 @@ pub mod error;
 pub mod etsi_http;
 pub mod grpc_server;
 pub mod peer_client;
+pub mod peers;
 pub mod sae_binding;
 pub mod security_level;
 pub mod service;

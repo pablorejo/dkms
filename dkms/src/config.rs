@@ -147,7 +147,7 @@ pub struct SouthboundCfg {
     pub default_max_hops: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerCfg {
     /// URL base HTTPS del peer (incluye esquema y puerto). Ej:
     /// `https://dkms-b.internal:8443`. Usada solo cuando
