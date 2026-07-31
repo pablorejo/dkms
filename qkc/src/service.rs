@@ -238,6 +238,12 @@ impl QkcService {
         if let Some(pqc) = &rt.pqc {
             pqc.spawn_rotation();
         }
+        // El logger periódico de niveles se arrancó con una foto de los
+        // enlaces del boot, así que un enlace añadido aquí no saldría nunca en
+        // `keystore.levels`. Se le da el suyo propio: sin esto el enlace
+        // funciona (se ve en `/stats`) pero es invisible en los logs, que es
+        // por donde se mira cuando algo va mal.
+        keystore::spawn_level_logger(vec![(id, Arc::clone(&rt.keys))], Duration::from_secs(5));
         info!(peer = id, kind = ?link_cfg.link_type, "enlace añadido en caliente");
         Ok(true)
     }
