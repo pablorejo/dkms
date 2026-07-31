@@ -156,6 +156,23 @@ impl SecretStore {
         self.notify.notify_waiters();
     }
 
+    /// Pisa el secreto de una época. Solo lo usa el respondedor cuando el
+    /// iniciador repite esa época con una pubkey nueva (se reinició): ahí
+    /// conservar el viejo dejaría a los dos extremos con secretos distintos
+    /// para la misma época, que es indetectable —el enlace no lleva MAC— y
+    /// corrompe en silencio todo lo que viaje por él.
+    pub fn replace(&self, epoch: u32, secret: [u8; 32]) {
+        {
+            let mut m = self.inner.lock();
+            m.insert(epoch, Zeroizing::new(secret)); // el viejo se zeroiza al drop
+            while m.len() > self.keep {
+                let lo = *m.keys().next().expect("non-empty");
+                m.remove(&lo);
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
     pub fn get(&self, epoch: u32) -> Option<Zeroizing<[u8; 32]>> {
         self.inner.lock().get(&epoch).cloned()
     }

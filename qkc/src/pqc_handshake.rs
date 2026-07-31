@@ -24,8 +24,14 @@
 //! antes de la pubkey/ciphertext. No hay frames nuevos.
 //!
 //! Robustez: el iniciador **reenvía el mismo INIT** por época (misma pk/sk) con
-//! backoff hasta que su secreto está. El respondedor **cachea su ciphertext por
-//! época** y lo reenvía ante INITs duplicados (re-encapsular daría otro secreto).
+//! backoff hasta que su secreto está. El respondedor **cachea `(pubkey, ct)` por
+//! época** y reenvía el ct ante INITs duplicados (re-encapsular daría otro
+//! secreto). La pubkey forma parte de la caché a propósito: si el INIT llega con
+//! **otra** pubkey, el iniciador se reinició y hay que re-encapsular y pisar el
+//! secreto. Reenviarle el ct viejo no daría error —ML-KEM aplica *implicit
+//! rejection* y devuelve un secreto pseudoaleatorio— sino dos extremos con
+//! secretos distintos para la misma época, sin MAC que lo delate y corrompiendo
+//! en silencio hasta las claves que reciben los SAEs.
 
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
@@ -59,8 +65,10 @@ pub struct PqcHandshake {
     rekey_secs: u64,
     /// Decap keys del iniciador por época, vivas hasta que llega el RESP.
     pending_sk: Mutex<HashMap<u32, Zeroizing<Vec<u8>>>>,
-    /// Ciphertext cacheado del respondedor por época (idempotencia ante dup).
-    resp_cache: Mutex<HashMap<u32, Vec<u8>>>,
+    /// Por época, lo que el respondedor encapsuló: `(pubkey del iniciador,
+    /// ciphertext)`. La pubkey va en la clave porque el ciphertext SOLO sirve
+    /// para esa pubkey — ver [`PqcHandshake::handle_init`].
+    resp_cache: Mutex<HashMap<u32, (Vec<u8>, Vec<u8>)>>,
 }
 
 /// Parte un payload `época_be(4) ‖ blob` en `(época, blob)`.
@@ -105,6 +113,17 @@ impl PqcHandshake {
     }
 
     fn publish(&self, epoch: u32, ss: Vec<u8>) {
+        self.publish_inner(epoch, ss, false)
+    }
+
+    /// Como [`publish`](Self::publish) pero pisando el secreto que hubiera.
+    /// Solo para el re-handshake de una época que el peer repite con otra
+    /// pubkey: quedarnos con el viejo dejaría los dos extremos en desacuerdo.
+    fn publish_replacing(&self, epoch: u32, ss: Vec<u8>) {
+        self.publish_inner(epoch, ss, true)
+    }
+
+    fn publish_inner(&self, epoch: u32, ss: Vec<u8>, replace: bool) {
         if ss.len() != 32 {
             warn!(
                 peer = self.peer_id,
@@ -115,11 +134,16 @@ impl PqcHandshake {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&ss);
-        self.store.insert(epoch, arr);
+        if replace {
+            self.store.replace(epoch, arr);
+        } else {
+            self.store.insert(epoch, arr);
+        }
         info!(
             me = self.my_id,
             peer = self.peer_id,
             epoch,
+            replaced = replace,
             "qkc.pqc.handshake.established"
         );
     }
@@ -211,10 +235,37 @@ impl PqcHandshake {
             warn!(peer = self.peer_id, "qkc.pqc: INIT payload too short");
             return;
         };
-        // Idempotencia por época: si ya encapsulamos, reenvía el ct cacheado.
-        if let Some(ct) = self.resp_cache.lock().get(&epoch).cloned() {
-            self.send(FRAME_PQC_KEM_RESP, epoch, &ct);
-            return;
+        // Idempotencia por época: si ya encapsulamos PARA ESTA MISMA pubkey,
+        // reenvía el ct cacheado (es un INIT duplicado).
+        //
+        // La comparación de la pubkey no es un detalle: si el iniciador se
+        // reinició, vuelve con un keypair nuevo y repite las épocas 0..N.
+        // Devolverle el ciphertext viejo era catastrófico y silencioso —
+        // ML-KEM no falla al decapsular un ciphertext ajeno, aplica *implicit
+        // rejection* y entrega un secreto pseudoaleatorio. Los dos extremos
+        // quedaban con secretos DISTINTOS para la misma época, ambos
+        // convencidos de haber cerrado el handshake. Como el OTP del enlace
+        // no lleva MAC, los frames se "descifraban" a basura sin un solo
+        // error, y la basura subía hasta el DKMS: los dos SAEs de una
+        // petición ETSI-014 acababan con claves distintas y nadie se
+        // enteraba. Con pubkey nueva, handshake nuevo.
+        let cached = self.resp_cache.lock().get(&epoch).cloned();
+        let mut stale = false;
+        match cached {
+            Some((pk, ct)) if pk == peer_pubkey => {
+                self.send(FRAME_PQC_KEM_RESP, epoch, &ct);
+                return;
+            }
+            Some(_) => {
+                warn!(
+                    peer = self.peer_id,
+                    epoch,
+                    "qkc.pqc: el peer repite la época con otra pubkey (se reinició); \
+                     re-encapsulo y reemplazo el secreto",
+                );
+                stale = true;
+            }
+            None => {}
         }
         let kem = match common::crypto::pqc::kem_for(&self.suite) {
             Ok(k) => k,
@@ -230,10 +281,14 @@ impl PqcHandshake {
                 return;
             }
         };
-        self.publish(epoch, encap.shared_secret);
+        if stale {
+            self.publish_replacing(epoch, encap.shared_secret);
+        } else {
+            self.publish(epoch, encap.shared_secret);
+        }
         self.resp_cache
             .lock()
-            .insert(epoch, encap.ciphertext.clone());
+            .insert(epoch, (peer_pubkey.to_vec(), encap.ciphertext.clone()));
         self.send(FRAME_PQC_KEM_RESP, epoch, &encap.ciphertext);
     }
 
@@ -308,7 +363,7 @@ mod tests {
             let mut init_payload = epoch.to_be_bytes().to_vec();
             init_payload.extend_from_slice(&kp.public);
             resp.handle_init(&init_payload);
-            let ct = resp.resp_cache.lock().get(&epoch).cloned().unwrap();
+            let ct = resp.resp_cache.lock().get(&epoch).cloned().unwrap().1;
 
             // RESP = época ‖ ciphertext
             let mut resp_payload = epoch.to_be_bytes().to_vec();
@@ -334,12 +389,63 @@ mod tests {
 
         resp.handle_init(&init);
         let s1 = resp.store.get(3).unwrap();
-        let ct1 = resp.resp_cache.lock().get(&3).cloned().unwrap();
+        let ct1 = resp.resp_cache.lock().get(&3).cloned().unwrap().1;
         resp.handle_init(&init); // duplicado
         let s2 = resp.store.get(3).unwrap();
-        let ct2 = resp.resp_cache.lock().get(&3).cloned().unwrap();
+        let ct2 = resp.resp_cache.lock().get(&3).cloned().unwrap().1;
         assert_eq!(*s1, *s2, "secret stable on duplicate INIT");
         assert_eq!(ct1, ct2, "cached ciphertext stable");
+    }
+
+    /// El iniciador se reinicia y repite una época con keypair NUEVO.
+    ///
+    /// El respondedor tenía cacheado el ciphertext viejo. Reenviarlo era
+    /// silenciosamente catastrófico: ML-KEM aplica *implicit rejection* y el
+    /// iniciador decapsula a un secreto pseudoaleatorio SIN error, así que
+    /// los dos extremos acababan con secretos distintos para la misma época,
+    /// ambos convencidos de haber cerrado el handshake. Como el enlace no
+    /// lleva MAC, los frames se descifraban a basura y la basura llegaba
+    /// hasta las claves que reciben los SAEs.
+    #[tokio::test]
+    async fn a_restarted_initiator_gets_a_fresh_encapsulation() {
+        let epoch = 4u32;
+        let resp = handshake(2, 1);
+        let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
+
+        // Primer arranque del iniciador.
+        let kp_old = kem.keygen().unwrap();
+        let mut init_old = epoch.to_be_bytes().to_vec();
+        init_old.extend_from_slice(&kp_old.public);
+        resp.handle_init(&init_old);
+        let s_old = resp.store.get(epoch).unwrap();
+
+        // Se reinicia: keypair nuevo, misma época.
+        let ini = handshake(1, 2);
+        let kp_new = kem.keygen().unwrap();
+        ini.pending_sk
+            .lock()
+            .insert(epoch, Zeroizing::new(kp_new.secret.clone()));
+        let mut init_new = epoch.to_be_bytes().to_vec();
+        init_new.extend_from_slice(&kp_new.public);
+        resp.handle_init(&init_new);
+
+        let (cached_pk, ct_new) = resp.resp_cache.lock().get(&epoch).cloned().unwrap();
+        assert_eq!(cached_pk, kp_new.public, "la caché sigue a la pubkey nueva");
+
+        let mut resp_payload = epoch.to_be_bytes().to_vec();
+        resp_payload.extend_from_slice(&ct_new);
+        ini.handle_resp(&resp_payload);
+
+        let s_ini = ini.store.get(epoch).unwrap();
+        let s_resp = resp.store.get(epoch).unwrap();
+        assert_eq!(
+            *s_ini, *s_resp,
+            "tras el reinicio los dos extremos vuelven a compartir secreto",
+        );
+        assert_ne!(
+            *s_resp, *s_old,
+            "el respondedor descarta el secreto de la sesión anterior",
+        );
     }
 
     #[test]
