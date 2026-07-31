@@ -250,8 +250,27 @@ async fn writer_loop(peer_id: u32, slot: Arc<PeerSlot>) {
             let frame = match slot.queue.pop() {
                 Some(f) => f,
                 None => {
-                    slot.notify.notified().await;
-                    continue;
+                    // Con la cola vacía esperamos a que llegue algo que
+                    // enviar O a que el socket se muera. Esto último
+                    // importa: este canal es de una sola dirección (el peer
+                    // nos escribe por SU propia conexión, ver
+                    // `peer_server`), así que que se vuelva legible sólo
+                    // puede ser EOF. Sin esta rama, un enlace ocioso no se
+                    // enteraba de que el peer se había reiniciado hasta el
+                    // siguiente envío — y si el motivo de no enviar era
+                    // precisamente que el peer estaba caído, no había
+                    // siguiente envío. El handshake PQC se apoya en esta
+                    // detección para renegociar el enlace.
+                    tokio::select! {
+                        _ = slot.notify.notified() => continue,
+                        r = stream.readable() => {
+                            if peer_hung_up(peer_id, &stream, r) {
+                                slot.connected.store(false, Ordering::Relaxed);
+                                break;
+                            }
+                            continue;
+                        }
+                    }
                 }
             };
             if let Err(e) = write_frame(&mut stream, &frame).await {
@@ -297,6 +316,32 @@ async fn stats_logger(peer_id: u32, slot: Arc<PeerSlot>) {
     }
 }
 
+/// ¿El socket de salida está muerto? Se llama cuando `readable()` ha
+/// resuelto. Como el peer nunca escribe por aquí, legible = EOF o error;
+/// datos inesperados se ignoran (no rompemos el enlace por eso).
+fn peer_hung_up(peer_id: u32, stream: &TcpStream, readable: std::io::Result<()>) -> bool {
+    if let Err(e) = readable {
+        warn!(%peer_id, error = %e, "qkc.peer_out.idle_poll_err");
+        return true;
+    }
+    let mut scratch = [0u8; 64];
+    match stream.try_read(&mut scratch) {
+        Ok(0) => {
+            info!(%peer_id, "qkc.peer_out.peer_hung_up (EOF con la cola vacía)");
+            true
+        }
+        Ok(n) => {
+            warn!(%peer_id, bytes = n, "qkc.peer_out: bytes inesperados en el canal de salida");
+            false
+        }
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(e) => {
+            warn!(%peer_id, error = %e, "qkc.peer_out.idle_read_err");
+            true
+        }
+    }
+}
+
 #[inline]
 fn micros_since_epoch() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -331,23 +376,15 @@ mod tests {
             "la primera conexión no es una reconexión"
         );
 
-        // El peer "se reinicia": cae el socket y el writer reconecta. Ojo:
-        // el writer solo descubre el socket muerto AL ESCRIBIR, y tras un
-        // FIN limpio la primera escritura todavía puede tener éxito — así
-        // que insistimos hasta que se vea la nueva conexión.
+        // El peer "se reinicia": cae el socket. Sin enviar NADA — es el
+        // caso que importa, porque un enlace ocioso que no se entera de
+        // que el peer se fue no renegocia nunca.
         drop(first);
-        let reconnected = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                out.send(7, &addr, Frame::empty(wire::FRAME_RECV));
-                if let Ok(Ok(c)) =
-                    tokio::time::timeout(Duration::from_millis(200), listener.accept()).await
-                {
-                    return c;
-                }
-            }
-        })
-        .await;
-        assert!(reconnected.is_ok(), "el writer_loop vuelve a conectar");
+        let reconnected = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+        assert!(
+            reconnected.is_ok(),
+            "el writer_loop detecta el EOF con la cola vacía y reconecta",
+        );
 
         let fired = tokio::time::timeout(Duration::from_secs(5), signal.notified()).await;
         assert!(fired.is_ok(), "la reconexión sí avisa");
