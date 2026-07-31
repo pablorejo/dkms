@@ -41,8 +41,8 @@ use crate::{
     peers::PeerRegistry,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_REQUEST_ID,
-            HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
+            HDR_REQUEST_ID, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, SdnHttpClient,
     },
@@ -385,6 +385,7 @@ impl Generator {
                     ack_sent = g(&f.ack_sent),
                     ack_send_failed = g(&f.ack_send_failed),
                     ack_no_endpoint = g(&f.ack_no_endpoint),
+                    recv_corrupt = g(&f.recv_corrupt),
                     peer_ack_endpoint = self
                         .stats
                         .endpoint_of(&peer)
@@ -740,6 +741,13 @@ impl Generator {
         header.insert(
             HDR_KEY_SIZE_BITS.into(),
             (self.cfg.key_size_bytes * 8).to_string(),
+        );
+        // Integridad extremo a extremo del material: el enlace QKC cifra con
+        // OTP sin MAC, así que sin esto una corrupción por debajo se guarda
+        // como clave buena y las dos puntas acaban con claves distintas.
+        header.insert(
+            HDR_KEY_DIGEST.into(),
+            crate::southbound::orr::key_digest(&key_id_str, &bytes),
         );
         header.insert(
             HDR_TIMESTAMP_MS.into(),

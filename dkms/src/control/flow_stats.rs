@@ -59,6 +59,10 @@ pub struct PeerFlow {
     /// Claves recibidas sin `ack_endpoint` en la cabecera: imposible
     /// acusar recibo, el emisor las verá expirar.
     pub ack_no_endpoint: AtomicU64,
+    /// Claves que llegaron con la huella cambiada: corrupción en tránsito.
+    /// Se descartan sin acusar recibo. Cualquier valor > 0 aquí significa
+    /// que el enlace QKC hacia ese peer está entregando basura.
+    pub recv_corrupt: AtomicU64,
 }
 
 macro_rules! bump {
@@ -107,6 +111,7 @@ impl FlowStats {
     bump!(ack_sent);
     bump!(ack_send_failed);
     bump!(ack_no_endpoint);
+    bump!(recv_corrupt);
 
     /// Registra el `ack_endpoint` que anuncia un peer. Devuelve `true` si
     /// es la primera vez que lo vemos o si cambió — el caller lo usa para

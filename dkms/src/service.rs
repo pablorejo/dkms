@@ -78,8 +78,8 @@ use crate::{
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_SAE_ORIGIN,
-            MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
+            HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, QkcClient, SdnClient,
     },
@@ -788,6 +788,32 @@ impl DkmsService {
                     "orr buffer delivery {key_id_str}: payload {} bytes, header {bits} bits",
                     msg.payload.len(),
                 )));
+            }
+        }
+
+        // Integridad del material ANTES de guardarlo y de acusar recibo.
+        //
+        // Es la única comprobación de todo el camino: el OTP del enlace QKC no
+        // lleva MAC, así que una corrupción por debajo (secretos de época
+        // desincronizados tras reiniciar un nodo, un bit cambiado) llegaba
+        // aquí como clave buena. Se guardaba, se acusaba recibo, el emisor la
+        // daba por compartida — y semanas después los dos SAEs de una petición
+        // ETSI-014 recibían claves DISTINTAS sin que nada fallara.
+        //
+        // No acusamos recibo: el emisor la verá expirar y emitirá otra.
+        if let Some(expected) = app.get(HDR_KEY_DIGEST) {
+            let actual = crate::southbound::orr::key_digest(&key_id_str, &msg.payload);
+            if &actual != expected {
+                self.flow.recv_corrupt(&source_dkms, 1);
+                warn!(
+                    source = %source_dkms,
+                    key_id = %key_id_str,
+                    esperado = %expected,
+                    obtenido = %actual,
+                    "clave de transporte CORRUPTA en tránsito: la descarto sin acusar recibo. \
+                     Revisa el enlace QKC hacia este peer (¿se reinició un extremo?)",
+                );
+                return Ok(());
             }
         }
 

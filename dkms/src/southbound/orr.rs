@@ -65,12 +65,36 @@ pub const HDR_SAE_ORIGIN: &str = "sae_origin";
 pub const HDR_SAE_DESTINATION: &str = "sae_destination";
 /// Tamaño de la clave en bits (string decimal, ej. "256").
 pub const HDR_KEY_SIZE_BITS: &str = "key_size_bits";
+/// Huella de la clave que viaja: `hex(SHA-256(key_id ‖ bytes)[..16])`.
+///
+/// El receptor la comprueba ANTES de guardar la clave y de acusar recibo.
+/// Es la única verificación de integridad de todo el camino: el OTP del
+/// enlace QKC no lleva MAC, así que cualquier corrupción por debajo
+/// —secretos de época desincronizados tras un reinicio, un bit cambiado—
+/// llegaba aquí como material "válido", se guardaba, se acusaba recibo, y
+/// acababa haciendo que los dos SAEs de una petición ETSI-014 obtuvieran
+/// claves DISTINTAS sin un solo error.
+///
+/// Publicar la huella no debilita la clave: son 256 bits de entropía, así
+/// que la preimagen no es atacable, y va ligada al `key_id` para que no
+/// pueda reutilizarse en otra entrada.
+pub const HDR_KEY_DIGEST: &str = "key_digest";
+
 /// `request_id` de la petición ETSI 020 que disparó este envío.
 pub const HDR_REQUEST_ID: &str = "request_id";
 /// Flow id opcional (si aplica routing por flujo).
 pub const HDR_FLOW_ID: &str = "flow_id";
 /// Unix milliseconds de emisión.
 pub const HDR_TIMESTAMP_MS: &str = "timestamp_ms";
+
+/// Calcula el valor de [`HDR_KEY_DIGEST`] para una clave.
+pub fn key_digest(key_id: &str, bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(key_id.as_bytes());
+    h.update(bytes);
+    hex::encode(&h.finalize()[..16])
+}
 
 #[derive(Clone)]
 pub struct OrrClient {
@@ -189,5 +213,21 @@ mod tests {
         assert_eq!(HDR_REQUEST_ID, "request_id");
         assert_eq!(HDR_FLOW_ID, "flow_id");
         assert_eq!(HDR_TIMESTAMP_MS, "timestamp_ms");
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn digest_binds_key_id_and_bytes() {
+        let a = key_digest("id-1", &[0xABu8; 32]);
+        assert_eq!(a, key_digest("id-1", &[0xABu8; 32]), "determinista");
+        assert_ne!(a, key_digest("id-2", &[0xABu8; 32]), "ligado al key_id");
+        let mut otros = [0xABu8; 32];
+        otros[31] ^= 1;
+        assert_ne!(a, key_digest("id-1", &otros), "un bit cambiado se detecta");
+        assert_eq!(a.len(), 32, "16 bytes en hex");
     }
 }
