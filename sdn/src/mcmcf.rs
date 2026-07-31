@@ -1074,6 +1074,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: q.into(),
                 host: host(q.parse().unwrap_or(0)),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1090,12 +1091,14 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: da.into(),
             host: host(20),
+            peer_addr: None,
             tls_id: None,
             orr_id: format!("o-{qa}"),
         });
         t.upsert_dkms(Dkms {
             id: db.into(),
             host: host(21),
+            peer_addr: None,
             tls_id: None,
             orr_id: format!("o-{qb}"),
         });
@@ -1282,6 +1285,7 @@ mod tests {
         t.upsert_qkc(Qkc {
             id: "1".into(),
             host: host(1),
+            peer_addr: None,
             kme_host: None,
         });
         t.upsert_orr(Orr {
@@ -1292,12 +1296,14 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: "dA".into(),
             host: host(21),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
         t.upsert_dkms(Dkms {
             id: "dB".into(),
             host: host(22),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
@@ -1391,6 +1397,7 @@ mod tests {
         t.upsert_qkc(Qkc {
             id: "2".into(),
             host: host(2),
+            peer_addr: None,
             kme_host: None,
         });
         link(&mut t, "1", "2", 100.0);
@@ -1508,6 +1515,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: q.into(),
                 host: host(q.parse().unwrap()),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1521,6 +1529,7 @@ mod tests {
             t.upsert_dkms(Dkms {
                 id: format!("dkms-{name}"),
                 host: host(q.parse::<i64>().unwrap() + 20),
+                peer_addr: None,
                 tls_id: None,
                 orr_id: format!("o-{name}"),
             });
@@ -1659,6 +1668,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: q.into(),
                 host: host(q.parse().unwrap()),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1676,12 +1686,14 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: "dA".into(),
             host: host(201),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o-1".into(),
         });
         t.upsert_dkms(Dkms {
             id: "dB".into(),
             host: host(202),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o-2".into(),
         });
@@ -1817,6 +1829,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: q.into(),
                 host: host(q.parse().unwrap()),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1843,6 +1856,7 @@ mod tests {
             t.upsert_dkms(Dkms {
                 id: format!("dkms-{nn}"),
                 host: host(nn.parse().unwrap()),
+                peer_addr: None,
                 tls_id: None,
                 orr_id: format!("orr-{nn}"),
             });
@@ -1899,6 +1913,7 @@ mod tests {
                 t.upsert_qkc(Qkc {
                     id: id.clone(),
                     host: host(host_id),
+                    peer_addr: None,
                     kme_host: None,
                 });
             }
@@ -1929,6 +1944,7 @@ mod tests {
             t.upsert_dkms(Dkms {
                 id: format!("dkms-{name}"),
                 host: host(name.bytes().next().unwrap() as i64 + 100),
+                peer_addr: None,
                 tls_id: None,
                 orr_id: format!("o-{name}"),
             });

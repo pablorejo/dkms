@@ -501,6 +501,7 @@ pub(crate) mod tests {
             t.upsert_qkc(Qkc {
                 id: q.into(),
                 host: host(q.parse().unwrap()),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -539,12 +540,14 @@ pub(crate) mod tests {
         t.upsert_dkms(Dkms {
             id: "dA".into(),
             host: host(21),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
         t.upsert_dkms(Dkms {
             id: "dB".into(),
             host: host(23),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o3".into(),
         });

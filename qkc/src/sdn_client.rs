@@ -25,6 +25,16 @@ use tracing::{error, info, warn};
 
 use crate::config::{LinkType, QkcConfig};
 
+/// Puerto del listener TCP-peer, extraído de `peer_listen` (que suele bindear
+/// `0.0.0.0`, del que solo sirve el puerto).
+fn peer_port(peer_listen: &str) -> u16 {
+    peer_listen
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Cadencia de reintento mientras quede algo por converger (SDN inalcanzable o
 /// aristas pendientes de que arranque el vecino). Una vez todo encaja se pasa a
 /// `sdn_announce_secs`.
@@ -137,6 +147,10 @@ impl SdnAnnouncer {
             body: json!({
                 "id": cfg.qkc_id.to_string(),
                 "host": { "id": cfg.qkc_id as i64, "ip": ip, "port": port },
+                // Los vecinos se conectan al listener de peers, no al admin:
+                // la SDN necesita esta dirección para poder decirle a otro QKC
+                // dónde estoy.
+                "peer_addr": format!("{ip}:{}", peer_port(&cfg.peer_listen)),
                 "links": links,
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),

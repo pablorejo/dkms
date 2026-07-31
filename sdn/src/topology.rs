@@ -33,7 +33,13 @@ pub struct HostEndpoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Qkc {
     pub id: String,
+    /// Admin HTTP: por aquí la SDN le empuja su tabla de forwarding.
     pub host: HostEndpoint,
+    /// `ip:port` de su listener TCP-peer. **No** se deduce de `host`: ese es
+    /// el admin. Los vecinos se conectan aquí, así que la SDN lo necesita para
+    /// poder decirle a uno dónde está el otro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kme_host: Option<String>,
 }
@@ -49,7 +55,12 @@ pub struct Orr {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Dkms {
     pub id: String,
+    /// Puerto SAE (ETSI-014): por aquí le piden claves sus SAEs.
     pub host: HostEndpoint,
+    /// `ip:port` de su listener DKMS↔DKMS (ETSI-020). Distinto de `host`, que
+    /// es el de SAEs; los peers se conectan aquí.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_id: Option<i64>,
     /// Id of the ORR this DKMS uses (which in turn is anchored to one QKC).
@@ -103,6 +114,11 @@ pub struct QkcLinkAnnounce {
 pub struct QkcAnnounce {
     pub id: String,
     pub host: HostEndpoint,
+    /// `ip:port` de su listener TCP-peer, que es donde se conectan los vecinos
+    /// — `host` es el admin. Sin esto la SDN no puede decirle a un QKC dónde
+    /// está el otro.
+    #[serde(default)]
+    pub peer_addr: Option<String>,
     #[serde(default)]
     pub links: Vec<QkcLinkAnnounce>,
 }
@@ -122,6 +138,11 @@ pub struct QkcAnnounceOutcome {
     /// Neighbours whose edge already exists with *different* metadata. The
     /// existing value is kept — see `register_qkc` for why.
     pub edges_conflict: Vec<String>,
+    /// Con quién debe levantar enlace, según el grafo. Incluye los que este
+    /// QKC no declaró: es lo que permite que un nodo nuevo aparezca sin
+    /// reconfigurar a los que ya estaban.
+    #[serde(default)]
+    pub peers: Vec<QkcPeer>,
 }
 
 /// Self-announcement of an ORR: who it is, where to reach it, and which QKC it
@@ -139,11 +160,53 @@ pub struct OrrAnnounce {
 pub struct DkmsAnnounce {
     pub id: String,
     pub host: HostEndpoint,
+    /// `ip:port` de su listener DKMS↔DKMS (ETSI-020); `host` es el de SAEs.
+    #[serde(default)]
+    pub peer_addr: Option<String>,
     pub orr_id: String,
     /// SAEs atendidos por este DKMS. Los declara él porque es quien tiene sus
     /// certificados: nadie más sabe qué SAE cuelgan de dónde.
     #[serde(default)]
     pub saes: Vec<String>,
+}
+
+// ----- pares que la SDN comunica de vuelta en el anuncio
+//
+// Un módulo declara en su `node.yml` quién es y dónde está su QKC/ORR; a
+// quién tiene que hablar se lo dice la SDN, que es la única con visión
+// global. Así se despliega un nodo nuevo sin editar la config de los que ya
+// estaban.
+//
+// Los tres conjuntos van **ordenados por id**: el módulo compara lo recibido
+// con lo que tiene para decidir altas y bajas, y un orden inestable le haría
+// creer que cambió en cada latido.
+
+/// Vecino de un QKC. Lleva lo justo para levantar el enlace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QkcPeer {
+    pub qkc_id: String,
+    /// `ip:port` de su listener TCP-peer.
+    pub peer_addr: String,
+    pub link_type: LinkType,
+    pub key_size_bits: u32,
+}
+
+/// Par de un ORR.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrrPeer {
+    pub orr_id: String,
+    pub qkc_id: String,
+    /// URL gRPC completa, lista para usar.
+    pub grpc_url: String,
+}
+
+/// Par de un DKMS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkmsPeer {
+    pub dkms_id: String,
+    pub orr_id: String,
+    /// `ip:port` de su listener ETSI-020.
+    pub endpoint: String,
 }
 
 /// Result of an ORR/DKMS announcement. `accepted == false` is not an error: it
@@ -158,6 +221,12 @@ pub struct AnnounceOutcome {
     /// Id of the anchor we are still waiting for, when `accepted` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
+    /// Pares ORR, cuando el anuncio es de un ORR.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orr_peers: Vec<OrrPeer>,
+    /// Pares DKMS, cuando el anuncio es de un DKMS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dkms_peers: Vec<DkmsPeer>,
 }
 
 /// Channel kind of a QKC↔QKC link.
@@ -192,6 +261,11 @@ pub struct EdgeMeta {
     /// QKD (default) or PQC. PQC edges are uncapacitated in the MCF.
     #[serde(default)]
     pub link_type: LinkType,
+    /// Tamaño de la clave OTP del enlace. **Debe coincidir en ambos extremos**,
+    /// así que viaja con la arista: cuando la SDN le comunica este enlace al
+    /// vecino, le va este valor y no el suyo por defecto.
+    #[serde(default = "default_key_size_bits")]
+    pub key_size_bits: u32,
 }
 
 /// Respaldo cuando un QKC anuncia un enlace QKD sin declarar `r0`. Antes eran
@@ -205,6 +279,9 @@ fn default_r0() -> f64 {
 fn default_alpha() -> f64 {
     0.2
 }
+fn default_key_size_bits() -> u32 {
+    256
+}
 fn default_buf_size() -> u32 {
     100
 }
@@ -217,6 +294,7 @@ impl Default for EdgeMeta {
             alpha: default_alpha(),
             max_buffer_size: default_buf_size(),
             link_type: LinkType::default(),
+            key_size_bits: default_key_size_bits(),
         }
     }
 }
@@ -410,6 +488,87 @@ impl Topology {
         }
         let comp = self.qkd_components();
         matches!((comp.get(a), comp.get(b)), (Some(x), Some(y)) if x == y)
+    }
+}
+
+// ----------------------------------------------------------------- peers
+//
+// Qué le toca hablar a cada módulo, derivado del grafo. Es lo que la SDN
+// devuelve en la respuesta al anuncio.
+
+impl Topology {
+    /// Vecinos de `qkc_id`: los del grafo, con su dirección de peer y los
+    /// parámetros del enlace.
+    ///
+    /// Un vecino sin `peer_addr` se omite con un aviso: es un QKC de una
+    /// versión anterior que no lo anuncia, y sin esa dirección el otro extremo
+    /// no puede conectarse. Mejor omitirlo que dar un enlace inservible.
+    pub fn qkc_peers(&self, qkc_id: &str) -> Vec<QkcPeer> {
+        let Some(neighbors) = self.graph.get(qkc_id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<QkcPeer> = neighbors
+            .iter()
+            .filter_map(|n| {
+                let qkc = self.qkcs.get(n)?;
+                let Some(peer_addr) = qkc.peer_addr.clone() else {
+                    warn!(
+                        qkc = %n,
+                        "vecino sin peer_addr anunciado; no puedo decirle a nadie dónde está"
+                    );
+                    return None;
+                };
+                let meta = self.edge(qkc_id, n)?;
+                Some(QkcPeer {
+                    qkc_id: n.clone(),
+                    peer_addr,
+                    link_type: meta.link_type,
+                    key_size_bits: meta.key_size_bits,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.qkc_id.cmp(&b.qkc_id));
+        out
+    }
+
+    /// Todos los demás ORR de la red. No se filtra por adyacencia: el
+    /// transporte ORR es E2E (`max_hops = 1` por defecto), así que cualquier
+    /// par puede necesitar hablar con cualquier otro.
+    pub fn orr_peers(&self, orr_id: &str) -> Vec<OrrPeer> {
+        let mut out: Vec<OrrPeer> = self
+            .orrs
+            .values()
+            .filter(|o| o.id != orr_id)
+            .map(|o| OrrPeer {
+                orr_id: o.id.clone(),
+                qkc_id: o.qkc_id.clone(),
+                grpc_url: format!("http://{}:{}", o.host.ip, o.host.port),
+            })
+            .collect();
+        out.sort_by(|a, b| a.orr_id.cmp(&b.orr_id));
+        out
+    }
+
+    /// Todos los demás DKMS, con el ORR por el que se les llega.
+    pub fn dkms_peers(&self, dkms_id: &str) -> Vec<DkmsPeer> {
+        let mut out: Vec<DkmsPeer> = self
+            .dkms
+            .values()
+            .filter(|d| d.id != dkms_id)
+            .filter_map(|d| {
+                let Some(endpoint) = d.peer_addr.clone() else {
+                    warn!(dkms = %d.id, "peer sin peer_addr anunciado; lo omito");
+                    return None;
+                };
+                Some(DkmsPeer {
+                    dkms_id: d.id.clone(),
+                    orr_id: d.orr_id.clone(),
+                    endpoint,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.dkms_id.cmp(&b.dkms_id));
+        out
     }
 }
 
@@ -638,6 +797,7 @@ impl TopologyStore {
             let mut changed = t.upsert_qkc(Qkc {
                 id: reg.id.clone(),
                 host: reg.host.clone(),
+                peer_addr: reg.peer_addr.clone(),
                 kme_host,
             });
             for link in &reg.links {
@@ -730,6 +890,7 @@ impl TopologyStore {
             let mut changed = t.upsert_dkms(Dkms {
                 id: reg.id.clone(),
                 host,
+                peer_addr: reg.peer_addr.clone(),
                 tls_id,
                 orr_id: reg.orr_id.clone(),
             });
@@ -1133,16 +1294,19 @@ mod tests {
         t.upsert_qkc(Qkc {
             id: "1".into(),
             host: dummy_host(1, 9001),
+            peer_addr: None,
             kme_host: None,
         });
         t.upsert_qkc(Qkc {
             id: "2".into(),
             host: dummy_host(2, 9002),
+            peer_addr: None,
             kme_host: None,
         });
         t.upsert_qkc(Qkc {
             id: "3".into(),
             host: dummy_host(3, 9003),
+            peer_addr: None,
             kme_host: None,
         });
         t.add_edge(
@@ -1169,6 +1333,7 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: "d1".into(),
             host: dummy_host(21, 9201),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
@@ -1215,6 +1380,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: id.into(),
                 host: dummy_host(id.parse().unwrap(), 9000 + id.parse::<u16>().unwrap()),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1304,6 +1470,7 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: "d2".into(),
             host: dummy_host(22, 9202),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
@@ -1359,6 +1526,7 @@ mod tests {
         let q = Qkc {
             id: "1".into(),
             host: dummy_host(1, 9001),
+            peer_addr: None,
             kme_host: None,
         };
         let out = store.register_qkc(q.clone()).expect("register");
@@ -1372,6 +1540,7 @@ mod tests {
         let dup = Qkc {
             id: "1".into(),
             host: dummy_host(99, 9999),
+            peer_addr: None,
             kme_host: None,
         };
         let err = store.register_qkc(dup).unwrap_err();
@@ -1384,6 +1553,7 @@ mod tests {
         let q = Qkc {
             id: "9999".into(),
             host: dummy_host(99, 9999),
+            peer_addr: None,
             kme_host: None,
         };
         let err = store.update_qkc(q).unwrap_err();
@@ -1424,6 +1594,7 @@ mod tests {
         let bad = Dkms {
             id: "d-x".into(),
             host: dummy_host(60, 9060),
+            peer_addr: None,
             tls_id: None,
             orr_id: "no-orr".into(),
         };
@@ -1447,6 +1618,7 @@ mod tests {
             t.upsert_qkc(Qkc {
                 id: id.into(),
                 host: dummy_host(1, 1),
+                peer_addr: None,
                 kme_host: None,
             });
         }
@@ -1463,6 +1635,7 @@ mod tests {
         t.upsert_dkms(Dkms {
             id: "d1".into(),
             host: dummy_host(4, 4),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o1".into(),
         });
@@ -1472,6 +1645,7 @@ mod tests {
         let moved = Dkms {
             id: "d1".into(),
             host: dummy_host(4, 4),
+            peer_addr: None,
             tls_id: None,
             orr_id: "o2".into(),
         };
@@ -1505,6 +1679,7 @@ mod tests {
         QkcAnnounce {
             id: id.into(),
             host: dummy_host(id.parse().unwrap_or(0), 20002),
+            peer_addr: Some(format!("10.0.0.{id}:20000")),
             links: neighbors
                 .iter()
                 .map(|n| QkcLinkAnnounce {
@@ -1515,6 +1690,7 @@ mod tests {
                         alpha: 0.2,
                         max_buffer_size: 65536,
                         link_type: LinkType::Pqc,
+                        key_size_bits: 256,
                     },
                 })
                 .collect(),
@@ -1589,6 +1765,7 @@ mod tests {
         let dkms = DkmsAnnounce {
             id: "dkms-1".into(),
             host: dummy_host(301, 20005),
+            peer_addr: Some("10.0.0.301:20006".into()),
             orr_id: "orr_1".into(),
             saes: vec!["sae_1".into()],
         };
@@ -1627,6 +1804,7 @@ mod tests {
         let dkms = DkmsAnnounce {
             id: "dkms-1".into(),
             host: dummy_host(301, 20005),
+            peer_addr: Some("10.0.0.301:20006".into()),
             orr_id: "orr_1".into(),
             saes: vec![],
         };
@@ -1641,6 +1819,96 @@ mod tests {
         assert_eq!(store.load().version, settled);
     }
 
+    // ----- pares devueltos en el anuncio (auto_conf_peers)
+
+    /// Monta 1↔2↔3 (cadena, sin 1↔3) con su ORR y DKMS en cada nodo.
+    fn chain_of_three() -> TopologyStore {
+        let store = TopologyStore::new(Topology::default());
+        for id in ["1", "2", "3"] {
+            let mut a = announce(id, &[], 2000.0);
+            a.peer_addr = Some(format!("10.0.0.{id}:20000"));
+            store.announce_qkc(&a);
+        }
+        for (a, b) in [("1", "2"), ("2", "3")] {
+            let mut an = announce(a, &[b], 2000.0);
+            an.peer_addr = Some(format!("10.0.0.{a}:20000"));
+            store.announce_qkc(&an);
+        }
+        for id in ["1", "2", "3"] {
+            store.announce_orr(&OrrAnnounce {
+                id: format!("orr_{id}"),
+                host: dummy_host(id.parse().unwrap(), 20003),
+                qkc_id: id.into(),
+            });
+            store.announce_dkms(&DkmsAnnounce {
+                id: format!("dkms-{id}"),
+                host: dummy_host(id.parse().unwrap(), 20005),
+                peer_addr: Some(format!("10.0.0.{id}:20006")),
+                orr_id: format!("orr_{id}"),
+                saes: vec![],
+            });
+        }
+        store
+    }
+
+    #[test]
+    fn qkc_peers_are_its_graph_neighbours_with_a_reachable_address() {
+        let t = chain_of_three().load();
+        let p = t.qkc_peers("2");
+        assert_eq!(p.len(), 2, "el 2 está en medio de la cadena");
+        assert_eq!(p[0].qkc_id, "1");
+        assert_eq!(p[1].qkc_id, "3");
+        // La dirección es la de peer (20000), no la del admin: es donde se
+        // conecta el vecino.
+        assert_eq!(p[0].peer_addr, "10.0.0.1:20000");
+        // Los extremos solo ven a su único vecino.
+        assert_eq!(t.qkc_peers("1").len(), 1);
+    }
+
+    #[test]
+    fn a_neighbour_without_peer_addr_is_omitted_not_advertised_broken() {
+        let store = chain_of_three();
+        // Un QKC de una versión anterior: no anuncia peer_addr.
+        let mut old = announce("3", &["2"], 2000.0);
+        old.peer_addr = None;
+        store.announce_qkc(&old);
+        let p = store.load().qkc_peers("2");
+        assert!(
+            p.iter().all(|x| x.qkc_id != "3"),
+            "sin dirección de peer el enlace no se puede levantar; darlo sería peor que omitirlo"
+        );
+    }
+
+    #[test]
+    fn orr_and_dkms_peers_exclude_self_and_carry_their_anchor() {
+        let t = chain_of_three().load();
+        let o = t.orr_peers("orr_2");
+        assert_eq!(o.len(), 2);
+        assert!(o.iter().all(|x| x.orr_id != "orr_2"));
+        assert_eq!(o[0].qkc_id, "1", "el par trae el QKC del que cuelga");
+        assert!(o[0].grpc_url.starts_with("http://"));
+
+        let d = t.dkms_peers("dkms-2");
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().all(|x| x.dkms_id != "dkms-2"));
+        assert_eq!(d[0].orr_id, "orr_1");
+        // Puerto ETSI-020 (20006), no el de SAEs (20005).
+        assert!(d[0].endpoint.ends_with(":20006"));
+    }
+
+    #[test]
+    fn peer_sets_are_stable_across_calls() {
+        let t = chain_of_three().load();
+        // El módulo compara lo recibido con lo que tiene para decidir altas y
+        // bajas. Si el orden bailara, cada latido parecería un cambio y habría
+        // altas/bajas en bucle.
+        for _ in 0..10 {
+            assert_eq!(t.qkc_peers("2"), t.qkc_peers("2"));
+            assert_eq!(t.orr_peers("orr_2"), t.orr_peers("orr_2"));
+            assert_eq!(t.dkms_peers("dkms-2"), t.dkms_peers("dkms-2"));
+        }
+    }
+
     #[test]
     fn deleting_a_dkms_takes_its_saes_with_it() {
         let store = TopologyStore::new(Topology::default());
@@ -1653,6 +1921,7 @@ mod tests {
         store.announce_dkms(&DkmsAnnounce {
             id: "dkms-1".into(),
             host: dummy_host(301, 20005),
+            peer_addr: Some("10.0.0.301:20006".into()),
             orr_id: "orr_1".into(),
             saes: vec!["sae_1".into()],
         });

@@ -311,9 +311,12 @@ async fn announce_qkc(
     State(svc): State<SdnService>,
     Json(reg): Json<QkcAnnounce>,
 ) -> impl IntoResponse {
-    let out = svc.topology.announce_qkc(&reg);
+    let mut out = svc.topology.announce_qkc(&reg);
     // Un QKC no tiene ancla: siempre entra, así que siempre cuenta como vivo.
     svc.presence.touch(Kind::Qkc, &reg.id);
+    // Con quién debe hablar. Se calcula DESPUÉS del alta para que un QKC que
+    // acaba de entrar se vea a sí mismo en el grafo.
+    out.peers = svc.topology.load().qkc_peers(&reg.id);
     if out.changed {
         info!(
             qkc = %out.qkc_id,
@@ -330,10 +333,11 @@ async fn announce_orr(
     State(svc): State<SdnService>,
     Json(reg): Json<OrrAnnounce>,
 ) -> impl IntoResponse {
-    let out = svc.topology.announce_orr(&reg);
+    let mut out = svc.topology.announce_orr(&reg);
     // Solo si entró: lo que no está en la topología no puede caducar de ella.
     if out.accepted {
         svc.presence.touch(Kind::Orr, &reg.id);
+        out.orr_peers = svc.topology.load().orr_peers(&reg.id);
     }
     if out.changed {
         info!(orr = %out.id, qkc = %reg.qkc_id, "orr registered");
@@ -346,9 +350,10 @@ async fn announce_dkms(
     State(svc): State<SdnService>,
     Json(reg): Json<DkmsAnnounce>,
 ) -> impl IntoResponse {
-    let out = svc.topology.announce_dkms(&reg);
+    let mut out = svc.topology.announce_dkms(&reg);
     if out.accepted {
         svc.presence.touch(Kind::Dkms, &reg.id);
+        out.dkms_peers = svc.topology.load().dkms_peers(&reg.id);
     }
     if out.changed {
         info!(dkms = %out.id, orr = %reg.orr_id, "dkms registered");

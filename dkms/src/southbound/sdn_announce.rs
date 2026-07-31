@@ -33,6 +33,7 @@ struct Outcome {
 struct Announce {
     id: String,
     host: Host,
+    peer_addr: String,
     orr_id: String,
     saes: Vec<String>,
 }
@@ -107,7 +108,16 @@ impl SdnAnnouncer {
             url: format!("{base}/register/dkms"),
             body: json!(Announce {
                 id: cfg.node_id.clone(),
-                host: Host { id: 0, ip, port },
+                // Los SAEs entran por aquí (ETSI-014)...
+                host: Host {
+                    id: 0,
+                    ip: ip.clone(),
+                    port
+                },
+                // ...y los otros DKMS por aquí (ETSI-020). Son puertos
+                // distintos y la SDN necesita el segundo para poder decirle a
+                // un peer dónde estoy.
+                peer_addr: format!("{ip}:{}", cfg.listen.peer_addr.port()),
                 orr_id: orr_id.to_string(),
                 saes,
             }),
