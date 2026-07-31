@@ -60,6 +60,23 @@ impl PeerBuffers {
     pub fn enc_pop_pref(&self, prefs: &[KeyGrade]) -> Option<super::buffer::TransportKey> {
         prefs.iter().find_map(|&g| self.enc(g).pop_oldest())
     }
+
+    /// Tira todas las claves ENC de este peer (se zeroizan al drop) y
+    /// devuelve cuántas eran.
+    ///
+    /// `buffer_enc[peer]` aquí y `buffer_dec[yo]` en el peer son dos copias
+    /// del mismo material: si el peer se reinicia, pierde la suya y las
+    /// nuestras dejan de servir para siempre. Peor: el generador no las
+    /// repone, porque su condición de parada es que el ENC esté lleno — así
+    /// que el peer queda inalcanzable de forma permanente. Vaciarlas cuando
+    /// el peer nos dice que no reconoce una devuelve el enlace al ruedo en
+    /// segundos. Descartar claves buenas solo cuesta ancho de banda.
+    pub fn enc_clear(&self) -> usize {
+        let n = self.enc_len();
+        self.enc_qkd.clear();
+        self.enc_pqc.clear();
+        n
+    }
 }
 
 pub struct BufferPool {

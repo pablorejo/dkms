@@ -450,6 +450,7 @@ impl DkmsService {
         if !failures.is_empty() {
             for e in &failures {
                 error!(error = %e, "key distribution failure");
+                self.resync_transport_buffer_if_stale(e);
             }
             // Reembolso y retracción local.
             if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
@@ -590,6 +591,28 @@ impl DkmsService {
     }
 
     // ─── Helpers internos ──────────────────────────────────────────────
+
+    /// Si el peer rechazó el envío porque no reconoce la clave de transporte,
+    /// nuestro `buffer_enc[peer]` está desincronizado del suyo: tira el
+    /// nuestro para que el generador lo rehaga.
+    ///
+    /// Sin esto, un reinicio del peer lo dejaba inalcanzable **para siempre**.
+    /// El generador solo repone `buffer_enc` cuando baja del tope, y estaba a
+    /// tope de claves que el peer ya no tiene; cada petición SAE gastaba una
+    /// y fallaba, y con 4096 en la recámara eso no se agota nunca en la
+    /// práctica. Ver [`crate::state::pool::PeerBuffers::enc_clear`].
+    fn resync_transport_buffer_if_stale(&self, e: &DkmsError) {
+        let Some(peer) = peer_with_stale_transport_buffer(e) else {
+            return;
+        };
+        let discarded = self.pool.for_peer(peer).enc_clear();
+        warn!(
+            peer,
+            discarded,
+            "el peer no reconoce mi clave de transporte (se habrá reiniciado): \
+             descarto mi buffer_enc para que el generador lo rehaga",
+        );
+    }
 
     fn build_ext_keys_envelope(
         &self,
@@ -842,6 +865,20 @@ impl DkmsService {
     }
 }
 
+/// Peer cuyo rechazo delata que nuestro `buffer_enc` para él está obsoleto.
+///
+/// El cuerpo es el `DkmsError::TransportKeyMissing` que serializó el peer;
+/// casamos por su parte estable. Si cambias ese texto en `error.rs`, cambia
+/// también este literal — el test de abajo lo ata a la variante real.
+fn peer_with_stale_transport_buffer(e: &DkmsError) -> Option<&str> {
+    match e {
+        DkmsError::PeerRejected { peer, body, .. } if body.contains("not in buffer_dec") => {
+            Some(peer.as_str())
+        }
+        _ => None,
+    }
+}
+
 // ─── Crypto helpers ─────────────────────────────────────────────────────
 
 fn generate_session_keys(n: u32, size_bytes: usize) -> Vec<(Uuid, KeyId, Zeroizing<Vec<u8>>)> {
@@ -918,5 +955,61 @@ mod tests {
         let transport = vec![0u8; 8];
         let k = vec![0u8; 32];
         assert!(wrap_session_key(&transport, &k).is_err());
+    }
+
+    /// El literal que buscamos tiene que seguir saliendo de la variante real:
+    /// si alguien reescribe el `#[error]` de `TransportKeyMissing`, este test
+    /// cae antes de que el laboratorio descubra que el enlace ya no se cura.
+    #[test]
+    fn a_peer_that_lost_our_transport_keys_is_detected() {
+        let real_body = DkmsError::TransportKeyMissing {
+            peer: "dkms-1".into(),
+            key_id: "abc".into(),
+        }
+        .to_string();
+        let rejected = DkmsError::PeerRejected {
+            peer: "dkms-2".into(),
+            status: 503,
+            body: real_body,
+        };
+        assert_eq!(
+            peer_with_stale_transport_buffer(&rejected),
+            Some("dkms-2"),
+            "el rechazo identifica al peer cuyo buffer_enc hay que tirar",
+        );
+
+        // Otros rechazos no deben provocar que tiremos el buffer.
+        let otro = DkmsError::PeerRejected {
+            peer: "dkms-2".into(),
+            status: 429,
+            body: "rate-limited".into(),
+        };
+        assert_eq!(peer_with_stale_transport_buffer(&otro), None);
+        assert_eq!(
+            peer_with_stale_transport_buffer(&DkmsError::PeerAckTimeout {
+                peer: "dkms-2".into()
+            }),
+            None,
+        );
+    }
+
+    #[test]
+    fn enc_clear_empties_both_grades_and_counts() {
+        use common::security::KeyGrade;
+
+        use crate::state::buffer::TransportKey;
+        let pool = BufferPool::new(8);
+        let buf = pool.for_peer("dkms-2");
+        for (i, g) in [KeyGrade::Qkd, KeyGrade::Pqc].into_iter().enumerate() {
+            buf.enc(g)
+                .try_push(TransportKey::new(
+                    KeyId::new(format!("k{i}")),
+                    vec![0xAB; 32],
+                ))
+                .expect("hay hueco");
+        }
+        assert_eq!(buf.enc_len(), 2);
+        assert_eq!(buf.enc_clear(), 2, "devuelve cuántas tiró");
+        assert_eq!(buf.enc_len(), 0, "los dos grados quedan vacíos");
     }
 }
