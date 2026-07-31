@@ -37,6 +37,7 @@ use common::security::KeyGrade;
 use crate::{
     config::{DkmsConfig, GeneratorCfg, PeerTransport},
     control::ack_pending::{AckPendingEntry, AckPendingStore},
+    peers::PeerRegistry,
     southbound::{
         orr::{
             HDR_ACK_ENDPOINT, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE, HDR_REQUEST_ID,
@@ -86,9 +87,10 @@ impl BucketState {
 pub struct Generator {
     cfg: Arc<GeneratorCfg>,
     my_dkms_id: String,
-    /// Mapa peer_dkms_id → orr_id, derivado de cfg.peers en el constructor.
-    /// Solo se incluyen peers con `transport = "orr"`.
-    peers_orr: Arc<HashMap<String, String>>,
+    /// Peers DKMS, actualizables por la SDN. Antes era un `peer → orr_id`
+    /// construido una vez aquí; ahora se consulta al registro para que un peer
+    /// que entra en la red después llegue a este generador. Ver [`crate::peers`].
+    peers: Arc<PeerRegistry>,
     /// Rate cacheada por (peer, role). Solo usamos role=Enc para refill.
     rates_enc: Arc<Mutex<HashMap<String, f64>>>,
     /// `peer_dkms_id → qkd_available`, refrescado de `/rate` junto a las
@@ -123,23 +125,21 @@ impl Generator {
     /// loops llamar a [`Generator::spawn_background`].
     pub fn new(
         cfg: &DkmsConfig,
+        peers: Arc<PeerRegistry>,
         orr: Arc<OrrClient>,
         sdn_http: Arc<SdnHttpClient>,
         pool: Arc<BufferPool>,
         ack_pending: Arc<AckPendingStore>,
         demand_tracker: crate::demand_tracker::SharedDemandTracker,
     ) -> Self {
-        let mut peers_orr = HashMap::new();
+        // Aviso sobre la semilla del node.yml. El mapa efectivo lo lleva el
+        // `PeerRegistry`, que ya descarta los peers sin `orr_id`.
         for (peer_id, pc) in &cfg.peers {
-            if pc.transport == PeerTransport::Orr {
-                if let Some(orr_id) = &pc.orr_id {
-                    peers_orr.insert(peer_id.clone(), orr_id.clone());
-                } else {
-                    warn!(
-                        peer = peer_id,
-                        "generator: peer transport=orr sin orr_id configurado, se ignora"
-                    );
-                }
+            if pc.transport == PeerTransport::Orr && pc.orr_id.is_none() {
+                warn!(
+                    peer = peer_id,
+                    "generator: peer transport=orr sin orr_id configurado, se ignora"
+                );
             }
         }
         // Prefer the explicit advertised endpoint (DNS-routable in K8s)
@@ -152,7 +152,7 @@ impl Generator {
         Self {
             cfg: Arc::new(cfg.generator.clone()),
             my_dkms_id: cfg.node_id.clone(),
-            peers_orr: Arc::new(peers_orr),
+            peers,
             rates_enc: Arc::new(Mutex::new(HashMap::new())),
             qkd_avail: Arc::new(Mutex::new(HashMap::new())),
             buckets: Arc::new(Mutex::new(HashMap::new())),
@@ -199,9 +199,12 @@ impl Generator {
             info!("generator: deshabilitado por config");
             return me;
         }
-        if me.peers_orr.is_empty() {
-            info!("generator: ningún peer con transport=orr — no se generan claves");
-            return me;
+        if me.peers.orr_map().is_empty() {
+            // Antes esto era un `return` y el generador se apagaba para
+            // siempre. Con peers que llegan de la SDN eso condenaría a un DKMS
+            // que arranca solo: los bucles se lanzan igual y no hacen nada
+            // mientras el mapa esté vacío.
+            info!("generator: aún sin peers transport=orr; espero a que la SDN los mande");
         }
         let rate_loop = me.clone();
         tokio::spawn(async move {
@@ -225,7 +228,7 @@ impl Generator {
         });
         info!(
             my_dkms = %me.my_dkms_id,
-            n_peers = me.peers_orr.len(),
+            n_peers = me.peers.orr_map().len(),
             tick_ms = me.cfg.tick_ms,
             ack_timeout_ms = me.cfg.ack_timeout_ms,
             demand_refresh_ms = me.cfg.demand_refresh_ms,
@@ -261,7 +264,7 @@ impl Generator {
             // Unión de peers que aparecen en pool_snap y en peers_orr.
             let mut all_peers: std::collections::BTreeSet<String> =
                 pool_snap.iter().map(|(p, _, _)| p.clone()).collect();
-            for p in self.peers_orr.keys() {
+            for p in self.peers.orr_map().keys() {
                 all_peers.insert(p.clone());
             }
             for peer in all_peers {
@@ -405,7 +408,8 @@ impl Generator {
         // SDN ya reportó rate), así un peer se llena incluso antes de que el SDN
         // lo reporte por primera vez.
         let work: Vec<(String, f64)> = self
-            .peers_orr
+            .peers
+            .orr_map()
             .keys()
             .map(|p| {
                 let mut r = sdn_rates.get(p).copied().unwrap_or(0.0).max(floor);
@@ -493,7 +497,8 @@ impl Generator {
     /// Emite UNA clave hacia el peer: genera bytes, registra en
     /// ack_pending, envía vía ORR.
     async fn emit_key(self: Arc<Self>, peer_dkms_id: &str) -> anyhow::Result<()> {
-        let Some(dest_orr_id) = self.peers_orr.get(peer_dkms_id).cloned() else {
+        let orr_map = self.peers.orr_map();
+        let Some(dest_orr_id) = orr_map.get(peer_dkms_id).cloned() else {
             return Ok(()); // no debería pasar (filtrado antes)
         };
         let mut bytes = vec![0u8; self.cfg.key_size_bytes];
@@ -585,8 +590,8 @@ impl Generator {
     fn build_demand_report(&self, now_ms: i64) -> crate::southbound::DemandReport {
         use crate::southbound::{CommodityDemand, DemandReport};
         let cap = self.buffer_capacity_per_peer as f64;
-        let entries: Vec<CommodityDemand> = self
-            .peers_orr
+        let orr_map = self.peers.orr_map();
+        let entries: Vec<CommodityDemand> = orr_map
             .keys()
             // Skip self: the DKMS config lists every DKMS (including
             // this one) under `peers.<id>` so the SaeBindingCache can
@@ -607,7 +612,7 @@ impl Generator {
                 };
                 CommodityDemand {
                     src_dkms: self.my_dkms_id.clone(),
-                    dst_dkms: peer.clone(),
+                    dst_dkms: peer.to_string(),
                     level,
                     capacity: cap,
                     drain_rate,

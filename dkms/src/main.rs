@@ -77,6 +77,11 @@ async fn main() -> Result<()> {
     let cfg: DkmsConfig = common::config::load_config("dkms")?;
     info!(node_id = %cfg.node_id, "dkms starting");
 
+    // Los peers del node.yml son la semilla; a partir de aquí manda la SDN
+    // (ver `dkms::peers`). Se crea aquí porque lo leen el anunciador, el
+    // servicio y el generador.
+    let peers = Arc::new(dkms::peers::PeerRegistry::from_config(cfg.peers.clone()));
+
     // ─── Métricas ─────────────────────────────────────────────────────
     let metrics = Metrics::new("dkms");
     metrics
@@ -87,7 +92,9 @@ async fn main() -> Result<()> {
     // ─── Anuncio a la SDN ─────────────────────────────────────────────
     // En su propia task: si la SDN no está, o falta `sdn_http_url`, el DKMS
     // sirve claves igual. Solo deja de aparecer en la topología.
-    if let Some(announcer) = dkms::southbound::sdn_announce::SdnAnnouncer::from_config(&cfg) {
+    if let Some(announcer) =
+        dkms::southbound::sdn_announce::SdnAnnouncer::from_config(&cfg, peers.clone())
+    {
         tokio::spawn(announcer.run());
     }
 
@@ -291,6 +298,7 @@ async fn main() -> Result<()> {
         pending,
         buckets,
         sae_binding,
+        peers.clone(),
         sdn,
         qkc,
         orr.clone(),
@@ -325,6 +333,7 @@ async fn main() -> Result<()> {
             let ack_pending = Arc::new(AckPendingStore::new());
             let gen = Generator::new(
                 &cfg_with_addr,
+                peers.clone(),
                 orr_client.clone(),
                 sdn_http,
                 pool.clone(),

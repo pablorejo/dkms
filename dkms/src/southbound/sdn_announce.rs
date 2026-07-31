@@ -9,6 +9,7 @@
 //! arranca cada capa. Por eso es un bucle con backoff, que hace además de
 //! heartbeat.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use crate::config::DkmsConfig;
+use crate::peers::{PeerFromSdn, PeerRegistry};
 
 const BOOTSTRAP_RETRY: Duration = Duration::from_secs(2);
 
@@ -27,6 +29,18 @@ struct Outcome {
     changed: bool,
     #[serde(default)]
     waiting_for: Option<String>,
+    /// Con quién debe hablar este DKMS, según la SDN. Incluye peers que este
+    /// nodo no tiene en su `node.yml`: es lo que permite que un DKMS nuevo
+    /// aparezca sin reconfigurar a los que ya estaban.
+    #[serde(default)]
+    dkms_peers: Vec<PeerFromSdnWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PeerFromSdnWire {
+    dkms_id: String,
+    orr_id: String,
+    endpoint: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,13 +64,15 @@ pub struct SdnAnnouncer {
     url: String,
     body: serde_json::Value,
     period: Duration,
+    /// Donde se aplica lo que responde la SDN.
+    peers: Arc<PeerRegistry>,
 }
 
 impl SdnAnnouncer {
     /// `None` si falta `southbound.sdn_http_url` u `southbound.orr_id` (el
     /// auto-registro es opcional), o si no se puede deducir una IP alcanzable
     /// — en ese caso con un error logueado, pero sin impedir el arranque.
-    pub fn from_config(cfg: &DkmsConfig) -> Option<Self> {
+    pub fn from_config(cfg: &DkmsConfig, peers: Arc<PeerRegistry>) -> Option<Self> {
         let base = cfg
             .southbound
             .sdn_http_url
@@ -122,6 +138,7 @@ impl SdnAnnouncer {
                 saes,
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
+            peers,
         })
     }
 
@@ -150,6 +167,21 @@ impl SdnAnnouncer {
                             waiting_for = ?out.waiting_for,
                             "anunciado a la SDN",
                         );
+                    }
+                    // Aplica los peers que manda la SDN. `apply_from_sdn` es
+                    // idempotente, así que un latido sin novedades no toca
+                    // nada; solo se loguea cuando cambia de verdad.
+                    if out.accepted {
+                        let peers: Vec<PeerFromSdn> = out
+                            .dkms_peers
+                            .iter()
+                            .map(|p| PeerFromSdn {
+                                dkms_id: p.dkms_id.clone(),
+                                orr_id: p.orr_id.clone(),
+                                endpoint: p.endpoint.clone(),
+                            })
+                            .collect();
+                        self.peers.apply_from_sdn(&peers);
                     }
                     last_state = Some(now);
                     out.accepted

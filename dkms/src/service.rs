@@ -74,6 +74,7 @@ use crate::{
     demand_tracker::{DemandTracker, SharedDemandTracker},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
+    peers::PeerRegistry,
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
@@ -101,6 +102,11 @@ pub struct DkmsService {
     pub pending: Arc<PendingStore>,
     pub buckets: Arc<SaeBuckets>,
     pub sae_binding: Arc<SaeBindingCache>,
+
+    /// Peers DKMS, actualizables por la SDN. Sustituye a leer `cfg.peers`
+    /// directamente: así un DKMS que entra en la red después existe para los
+    /// que ya estaban. Ver [`crate::peers`].
+    pub peers: Arc<PeerRegistry>,
 
     pub sdn: Option<Arc<SdnClient>>,
     pub qkc: Option<Arc<QkcClient>>,
@@ -150,6 +156,7 @@ impl DkmsService {
         pending: Arc<PendingStore>,
         buckets: Arc<SaeBuckets>,
         sae_binding: Arc<SaeBindingCache>,
+        peers: Arc<PeerRegistry>,
         sdn: Option<Arc<SdnClient>>,
         qkc: Option<Arc<QkcClient>>,
         orr: Option<Arc<OrrClient>>,
@@ -162,6 +169,7 @@ impl DkmsService {
             pending,
             buckets,
             sae_binding,
+            peers,
             sdn,
             qkc,
             orr,
@@ -410,14 +418,9 @@ impl DkmsService {
                      orchestator misconfig (tls.cert_path/peer_dkms_ca required)"
                 ))
             })?;
-            let peer_cfg = self
-                .cfg
-                .peers
-                .get(peer_node.as_str())
-                .cloned()
-                .ok_or_else(|| {
-                    DkmsError::BadRequest(format!("peer dkms {peer_node} not configured"))
-                })?;
+            let peer_cfg = self.peers.get(peer_node.as_str()).ok_or_else(|| {
+                DkmsError::BadRequest(format!("peer dkms {peer_node} not configured"))
+            })?;
             let peer_id_str = peer_node.to_string();
             let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
             futures.push(Box::pin(async move {
