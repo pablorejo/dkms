@@ -8,13 +8,15 @@
 //! todavía. Eso no es un error, es orden de arranque, así que esto es un bucle
 //! con backoff igual que el del QKC. El reanuncio hace además de heartbeat.
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use crate::config::OrrConfig;
+use crate::{bootstrap, config::OrrConfig, identity::OrrIdentity, peers::PeerRegistry};
 
 const BOOTSTRAP_RETRY: Duration = Duration::from_secs(2);
 
@@ -26,6 +28,18 @@ struct Outcome {
     changed: bool,
     #[serde(default)]
     waiting_for: Option<String>,
+    /// Con quién debe hablar este ORR, según la SDN. Incluye pares que este
+    /// nodo no tiene en su `node.yml`: es lo que permite que un ORR nuevo
+    /// aparezca sin reconfigurar a los que ya estaban.
+    #[serde(default)]
+    orr_peers: Vec<OrrPeerWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OrrPeerWire {
+    orr_id: String,
+    qkc_id: String,
+    grpc_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,13 +61,27 @@ pub struct SdnAnnouncer {
     url: String,
     body: serde_json::Value,
     period: Duration,
+    /// Lo necesario para dar de alta un par en caliente: el registro donde
+    /// anotarlo y lo que pide `bootstrap::spawn_one`.
+    peers: Arc<PeerRegistry>,
+    identity: Arc<OrrIdentity>,
+    suite: String,
+    rotation_period_ms: u64,
+    epoch_history_keep: usize,
+    /// Pares con bootstrap ya lanzado. La task persiste hasta lograrlo, así
+    /// que lanzar dos para el mismo par serían dos bootstraps compitiendo.
+    spawned: HashSet<String>,
 }
 
 impl SdnAnnouncer {
     /// `None` si no hay `sdn_http_url` (el auto-registro es opcional) o si no
     /// se puede deducir una IP alcanzable — en ese caso con un error logueado,
     /// pero sin impedir que el ORR arranque.
-    pub fn from_config(cfg: &OrrConfig) -> Option<Self> {
+    pub fn from_config(
+        cfg: &OrrConfig,
+        peers: Arc<PeerRegistry>,
+        identity: Arc<OrrIdentity>,
+    ) -> Option<Self> {
         let base = cfg
             .sdn_http_url
             .as_deref()?
@@ -96,6 +124,13 @@ impl SdnAnnouncer {
                 qkc_id: cfg.qkc_id.to_string(),
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
+            peers,
+            identity,
+            suite: cfg.default_pqc_suite.clone(),
+            rotation_period_ms: cfg.rotation_period_ms,
+            epoch_history_keep: cfg.epoch_history_keep,
+            // Lo del node.yml ya lo arrancó `bootstrap::spawn_all`.
+            spawned: cfg.peer_grpc_addrs.keys().cloned().collect(),
         })
     }
 
@@ -110,8 +145,48 @@ impl SdnAnnouncer {
             .await
     }
 
+    /// Aplica los pares que manda la SDN: alta de los nuevos (registro +
+    /// bootstrap) y baja de los que ya no están (olvidando su material).
+    fn apply_peers(&mut self, peers: &[OrrPeerWire]) {
+        let wanted: HashSet<String> = peers.iter().map(|p| p.orr_id.clone()).collect();
+
+        for p in peers {
+            let Ok(qkc_id) = p.qkc_id.parse::<u32>() else {
+                warn!(orr = %p.orr_id, qkc = %p.qkc_id, "qkc_id no numérico; ignoro el par");
+                continue;
+            };
+            // `put` es idempotente, así que refrescarlo en cada latido no
+            // cuesta nada y absorbe un cambio de QKC del par.
+            self.peers.put(p.orr_id.clone(), qkc_id);
+            if self.spawned.insert(p.orr_id.clone()) {
+                info!(orr = %p.orr_id, url = %p.grpc_url, "par nuevo: arranco su bootstrap");
+                bootstrap::spawn_one(
+                    self.identity.clone(),
+                    self.peers.clone(),
+                    p.orr_id.clone(),
+                    p.grpc_url.clone(),
+                    self.suite.clone(),
+                    self.rotation_period_ms,
+                    self.epoch_history_keep,
+                );
+            }
+        }
+
+        let gone: Vec<String> = self
+            .spawned
+            .iter()
+            .filter(|id| !wanted.contains(*id))
+            .cloned()
+            .collect();
+        for id in gone {
+            info!(orr = %id, "par retirado por la SDN: olvido su material");
+            self.peers.forget(&id);
+            self.spawned.remove(&id);
+        }
+    }
+
     /// Bucle de anuncio. No termina nunca; va en su propia task.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let mut backoff = BOOTSTRAP_RETRY;
         let mut last_state: Option<(bool, Option<String>)> = None;
         loop {
@@ -124,6 +199,9 @@ impl SdnAnnouncer {
                             waiting_for = ?out.waiting_for,
                             "anunciado a la SDN",
                         );
+                    }
+                    if out.accepted {
+                        self.apply_peers(&out.orr_peers);
                     }
                     last_state = Some(now);
                     out.accepted

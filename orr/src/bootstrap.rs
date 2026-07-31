@@ -56,26 +56,50 @@ pub fn spawn_all(
     rotation_period_ms: u64,
     epoch_history_keep: usize,
 ) {
-    let local_orr_id = peers.local_orr_id().to_string();
     for (peer_id, addr) in peer_grpc_addrs {
-        let identity = identity.clone();
-        let peers = peers.clone();
-        let local_orr_id = local_orr_id.clone();
-        let suite = suite.clone();
-        tokio::spawn(async move {
-            bootstrap_peer(
-                identity,
-                peers,
-                local_orr_id,
-                peer_id,
-                addr,
-                suite,
-                rotation_period_ms,
-                epoch_history_keep,
-            )
-            .await;
-        });
+        spawn_one(
+            identity.clone(),
+            peers.clone(),
+            peer_id,
+            addr,
+            suite.clone(),
+            rotation_period_ms,
+            epoch_history_keep,
+        );
     }
+}
+
+/// Lanza el bootstrap de **un** peer. Extraído de [`spawn_all`] para poder
+/// darlos de alta en caliente: cuando la SDN le dice a este ORR que hay un peer
+/// nuevo, se llama aquí y la task hace su pubkey-fetch + secret-establish con
+/// backoff, igual que si hubiera estado en el `node.yml` desde el principio.
+///
+/// El llamante es responsable de no invocarlo dos veces para el mismo peer: la
+/// task persiste hasta lograrlo, así que dos serían dos bootstraps compitiendo.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_one(
+    identity: Arc<OrrIdentity>,
+    peers: Arc<PeerRegistry>,
+    peer_id: String,
+    addr: String,
+    suite: String,
+    rotation_period_ms: u64,
+    epoch_history_keep: usize,
+) {
+    let local_orr_id = peers.local_orr_id().to_string();
+    tokio::spawn(async move {
+        bootstrap_peer(
+            identity,
+            peers,
+            local_orr_id,
+            peer_id,
+            addr,
+            suite,
+            rotation_period_ms,
+            epoch_history_keep,
+        )
+        .await;
+    });
 }
 
 async fn bootstrap_peer(

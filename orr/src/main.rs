@@ -30,7 +30,11 @@ async fn main() -> Result<()> {
 
     // Anuncio periódico a la SDN. Fuera del `select!`: si la SDN no está o no
     // hay `sdn_http_url`, el ORR sigue enrutando igual.
-    if let Some(announcer) = orr::sdn_announce::SdnAnnouncer::from_config(&cfg) {
+    if let Some(announcer) = orr::sdn_announce::SdnAnnouncer::from_config(
+        &cfg,
+        service.peers.clone(),
+        service.identity.clone(),
+    ) {
         tokio::spawn(announcer.run());
     }
 

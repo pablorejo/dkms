@@ -150,6 +150,24 @@ impl PeerRegistry {
         self.by_orr.write().remove(orr_id);
     }
 
+    /// Olvida a un peer **por completo**: su qkc_id, su pubkey y todo su
+    /// material criptográfico.
+    ///
+    /// Lo usa el anunciador cuando la SDN deja de listar a un peer. Quitarlo
+    /// solo de `by_orr` (que es lo que hace [`Self::remove`]) dejaría vivos su
+    /// `bootstrap_secret` y sus `master_secrets` hasta que muriera el proceso.
+    /// Todos son `Zeroizing`, así que al soltarlos se borran de memoria.
+    pub fn forget(&self, orr_id: &str) {
+        self.by_orr.write().remove(orr_id);
+        self.pubkeys.write().remove(orr_id);
+        self.bootstrap_secrets.write().remove(orr_id);
+        self.master_secrets.write().remove(orr_id);
+        self.ephemeral_sks.write().remove(orr_id);
+        self.current_send_epochs.write().remove(orr_id);
+        self.rebootstrap_last_failure.write().remove(orr_id);
+        self.rebootstrap_inflight.write().remove(orr_id);
+    }
+
     /// Clave pública ML-KEM long-term del peer. `None` si no la
     /// conocemos. Solo se usa UNA VEZ en el bootstrap inicial (audit
     /// H-3: nunca más después).
