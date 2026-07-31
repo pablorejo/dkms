@@ -33,6 +33,10 @@ pub struct PeerFromSdn {
 
 pub struct PeerRegistry {
     inner: ArcSwap<HashMap<String, PeerCfg>>,
+    /// Peers del `node.yml`. **Nunca se retiran.** Mientras la SDN no los
+    /// conozca todavía, su lista llega vacía o incompleta; quitarlos entonces
+    /// desconectaría peers vivos por un simple retraso.
+    local: std::collections::HashSet<String>,
     /// `peer → orr_id` cacheado. El generador lo consulta en su bucle, así que
     /// no interesa reconstruirlo en cada vuelta.
     orr: ArcSwap<HashMap<String, String>>,
@@ -50,8 +54,10 @@ impl PeerRegistry {
     /// Arranca con lo que haya en el `node.yml`.
     pub fn from_config(seed: HashMap<String, PeerCfg>) -> Self {
         let orr = derive_orr(&seed);
+        let local = seed.keys().cloned().collect();
         Self {
             inner: ArcSwap::from_pointee(seed),
+            local,
             orr: ArcSwap::from_pointee(orr),
         }
     }
@@ -78,7 +84,13 @@ impl PeerRegistry {
     /// retira.
     pub fn apply_from_sdn(&self, peers: &[PeerFromSdn]) -> bool {
         let current = self.inner.load();
-        let mut next: HashMap<String, PeerCfg> = HashMap::with_capacity(peers.len());
+        // Se arranca de los locales, que sobreviven pase lo que pase, y encima
+        // se aplica lo de la SDN.
+        let mut next: HashMap<String, PeerCfg> = current
+            .iter()
+            .filter(|(id, _)| self.local.contains(*id))
+            .map(|(id, pc)| (id.clone(), pc.clone()))
+            .collect();
         for p in peers {
             let endpoint = if p.endpoint.contains("//") {
                 p.endpoint.clone()
@@ -177,6 +189,25 @@ mod tests {
         assert_eq!(p.orr_id.as_deref(), Some("orr_2"));
         // ...pero no en la política local.
         assert_eq!(p.max_hops, Some(3));
+    }
+
+    #[test]
+    fn a_seeded_peer_survives_an_empty_sdn_list() {
+        let mut seed = HashMap::new();
+        seed.insert(
+            "dkms-2".to_string(),
+            seed_peer("https://10.0.0.2:20006", None),
+        );
+        let r = PeerRegistry::from_config(seed);
+
+        // Mientras la SDN no conozca todavía a dkms-2, su lista llega vacía.
+        // Detectado en el laboratorio: el QKC llegó a tirar enlaces vivos por
+        // esto, destruyendo su material de clave, y se recuperaba 30 s después.
+        r.apply_from_sdn(&[]);
+        assert!(
+            r.get("dkms-2").is_some(),
+            "lo del node.yml es un suelo, no algo que la SDN pueda borrar por ir retrasada"
+        );
     }
 
     #[test]

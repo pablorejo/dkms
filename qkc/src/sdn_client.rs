@@ -98,6 +98,11 @@ pub struct SdnAnnouncer {
     /// Plantilla de la que se copian los ajustes PQC de un enlace nuevo: la
     /// SDN dice con quién hablar, no con qué suite ni cada cuánto rotar.
     link_defaults: LinkConfig,
+    /// Vecinos declarados en el `node.yml`. **Nunca se retiran.** La SDN puede
+    /// añadir enlaces y quitar los que ella misma añadió, pero no los de la
+    /// config local: mientras no conozca todavía a un vecino su lista llega
+    /// vacía, y borrarlos tiraría abajo enlaces vivos con su material de clave.
+    local_links: std::collections::HashSet<u32>,
 }
 
 impl SdnAnnouncer {
@@ -182,6 +187,7 @@ impl SdnAnnouncer {
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
             svc,
+            local_links: cfg.links.iter().map(|l| l.neighbor_id).collect(),
             // Si el node.yml declara enlaces, sus ajustes PQC son la
             // referencia local; si no, los defaults del propio config.
             link_defaults: cfg.links.first().cloned().unwrap_or_else(|| LinkConfig {
@@ -257,10 +263,11 @@ impl SdnAnnouncer {
             }
         }
 
-        // Bajas: lo que tengo y la SDN ya no lista.
+        // Bajas: solo lo que la SDN añadió y ya no lista. Los enlaces del
+        // node.yml se quedan pase lo que pase.
         let mine: Vec<u32> = self.svc.links.load().keys().copied().collect();
         for id in mine {
-            if !wanted.contains(&id) {
+            if !wanted.contains(&id) && !self.local_links.contains(&id) {
                 self.svc.remove_link(id);
             }
         }

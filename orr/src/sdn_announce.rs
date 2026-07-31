@@ -71,6 +71,10 @@ pub struct SdnAnnouncer {
     /// Pares con bootstrap ya lanzado. La task persiste hasta lograrlo, así
     /// que lanzar dos para el mismo par serían dos bootstraps compitiendo.
     spawned: HashSet<String>,
+    /// Pares del `node.yml`. **Nunca se retiran.** Mientras la SDN no conozca
+    /// todavía a un par, su lista llega vacía; borrarlos entonces tiraría
+    /// abajo su `master_secret` por un simple retraso.
+    local_peers: HashSet<String>,
 }
 
 impl SdnAnnouncer {
@@ -131,6 +135,7 @@ impl SdnAnnouncer {
             epoch_history_keep: cfg.epoch_history_keep,
             // Lo del node.yml ya lo arrancó `bootstrap::spawn_all`.
             spawned: cfg.peer_grpc_addrs.keys().cloned().collect(),
+            local_peers: cfg.peer_grpc_addrs.keys().cloned().collect(),
         })
     }
 
@@ -175,7 +180,7 @@ impl SdnAnnouncer {
         let gone: Vec<String> = self
             .spawned
             .iter()
-            .filter(|id| !wanted.contains(*id))
+            .filter(|id| !wanted.contains(*id) && !self.local_peers.contains(*id))
             .cloned()
             .collect();
         for id in gone {
