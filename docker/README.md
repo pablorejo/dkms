@@ -629,10 +629,40 @@ re-bootstrap).
 | SDN `qkcs_err>0` permanente | IP/puerto del QKC mal en la topología, o 20002 filtrado desde la SDN |
 | ORR "sin master_secret" en bucle | se reinició un solo ORR; reinicia el conjunto |
 | QKC sin `handshake.established` | vecino caído, enlace no declarado en el otro extremo, o 20000 filtrado |
-| DKMS `ack_pending` crece sin parar | 20009 del peer filtrado o `advertise_ip` mal (los ACK van a esa IP) |
+| DKMS `ack_pending` crece sin parar | 20009 del peer filtrado o `advertise_ip` mal (los ACK van a esa IP). Lee `generator.diag` — dice cuál de los dos es |
 | DKMS `qkc unreachable … continuing without it` en el boot | **normal** con transporte ORR |
 | `enc_keys` lento o falla hacia un peer | ese peer no está en los `peers` del ORR local (el material no puede viajar) |
 | la config no coincide con lo que esperabas | mira lo renderizado: `exec <rol> cat /run/cfg/…` |
+
+### Diagnosticar el ciclo de claves DKMS↔DKMS
+
+El camino tiene cuatro saltos —emito → viaja por ORR/QKC → el peer la guarda
+→ su ACK vuelve por TCP 20009— y sólo cierra el ciclo si los cuatro funcionan.
+Cada DKMS vuelca una línea `generator.state` por peer cada 5 s con un contador
+por salto:
+
+```
+peer=dkms-2 enc=… emitted=… recv=… ack_sent=… acked=… expired=… ack_miss_peer=… ack_miss_key=…
+```
+
+Se lee de izquierda a derecha; el primer cero es el salto roto. Ojo a que
+`emitted`/`acked` son de MI lado (yo genero para ese peer) y `recv`/`ack_sent`
+del contrario (él genera para mí), así que el diagnóstico completo necesita el
+log de las dos máquinas:
+
+| lectura | dónde está roto |
+|---------|-----------------|
+| `emitted=0` | no genero: sin rate del SDN, sin peers, o `generator.enabled=false` |
+| `emitted>0` aquí y `recv=0` en el peer | la clave se pierde en el ORR/QKC de ida — mira `orr.incoming master_secret missing` y `qkc.relay.handle_err` |
+| `recv>0` en el peer pero su `ack_sent=0` | no supo a dónde acusar recibo (`ack_no_endpoint`) |
+| su `ack_sent>0` y mi `acked=0` | el ACK no llega: 20009 filtrado, o le anuncié un `ack_endpoint` que no me alcanza |
+| `ack_miss_peer>0` | su `node_id` no coincide con la clave `[peers.<id>]` de mi `node.yml` |
+| `ack_miss_key>0` | los ACK llegan tarde: sube `generator.ack_timeout_ms` |
+
+Cuando `buffer_enc` está a cero se emite además una línea `generator.diag` que
+traduce los contadores a la causa concreta. Y al arrancar, el DKMS valida su
+propio `ack_endpoint` (avisa si es `0.0.0.0`/loopback y lo sondea por TCP): si
+esa comprobación falla, ningún peer podrá acusar recibo jamás.
 
 ## Notas multi-institución y límites conocidos
 

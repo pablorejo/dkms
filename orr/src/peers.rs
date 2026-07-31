@@ -87,6 +87,16 @@ pub struct PeerRegistry {
     /// primero dispara el handshake; los demás ven el flag y se
     /// limitan a dropear.
     rebootstrap_inflight: RwLock<HashMap<String, bool>>,
+    /// orr_id → URL gRPC del peer. Se siembra con `cfg.peer_grpc_addrs` y
+    /// la refresca el anunciador con lo que manda la SDN.
+    ///
+    /// Antes esto sólo existía en `cfg.peer_grpc_addrs` (inmutable), y el
+    /// re-bootstrap pasivo lo usaba como filtro anti-flood. Con peers que
+    /// llegan de la SDN ese filtro los rechazaba a todos: un peer aprendido
+    /// dinámicamente que perdiera su `master_secret` (reinicio, rotación a
+    /// medias) quedaba condenado a dropear frames para siempre, en
+    /// silencio. Que es exactamente el síntoma "emito y no llega nada".
+    grpc_addrs: RwLock<HashMap<String, String>>,
     local_orr_id: String,
     local_qkc_id: u32,
 }
@@ -102,6 +112,7 @@ impl PeerRegistry {
             current_send_epochs: RwLock::new(HashMap::new()),
             rebootstrap_last_failure: RwLock::new(HashMap::new()),
             rebootstrap_inflight: RwLock::new(HashMap::new()),
+            grpc_addrs: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -124,6 +135,7 @@ impl PeerRegistry {
             current_send_epochs: RwLock::new(HashMap::new()),
             rebootstrap_last_failure: RwLock::new(HashMap::new()),
             rebootstrap_inflight: RwLock::new(HashMap::new()),
+            grpc_addrs: RwLock::new(HashMap::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -166,6 +178,7 @@ impl PeerRegistry {
         self.current_send_epochs.write().remove(orr_id);
         self.rebootstrap_last_failure.write().remove(orr_id);
         self.rebootstrap_inflight.write().remove(orr_id);
+        self.grpc_addrs.write().remove(orr_id);
     }
 
     /// Clave pública ML-KEM long-term del peer. `None` si no la
@@ -181,6 +194,16 @@ impl PeerRegistry {
 
     pub fn remove_pubkey(&self, orr_id: &str) {
         self.pubkeys.write().remove(orr_id);
+    }
+
+    /// URL gRPC del peer, venga del `node.yml` o de la SDN. `None` = no lo
+    /// conocemos por ninguna vía, y entonces no hay a dónde re-bootstrapear.
+    pub fn grpc_addr(&self, orr_id: &str) -> Option<String> {
+        self.grpc_addrs.read().get(orr_id).cloned()
+    }
+
+    pub fn put_grpc_addr(&self, orr_id: String, url: String) {
+        self.grpc_addrs.write().insert(orr_id, url);
     }
 
     pub fn local_orr_id(&self) -> &str {

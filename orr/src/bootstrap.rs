@@ -87,6 +87,11 @@ pub fn spawn_one(
     epoch_history_keep: usize,
 ) {
     let local_orr_id = peers.local_orr_id().to_string();
+    // Único punto por el que pasan tanto los peers del `node.yml` como los
+    // que manda la SDN, así que es donde se registra su URL. El
+    // re-bootstrap pasivo la necesita para poder rehacer el handshake si
+    // luego perdemos el `master_secret` con este peer.
+    peers.put_grpc_addr(peer_id.clone(), addr.clone());
     tokio::spawn(async move {
         bootstrap_peer(
             identity,

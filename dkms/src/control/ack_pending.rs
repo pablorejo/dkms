@@ -77,13 +77,37 @@ impl AckPendingStore {
     /// Saca la entrada y devuelve sus bytes si existía. Llamada por la
     /// vía ACK al recibir confirmación del peer.
     pub fn take(&self, peer: &str, key_id: &KeyId) -> Option<AckPendingEntry> {
+        match self.take_diagnosed(peer, key_id) {
+            TakeOutcome::Hit(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Como [`take`](Self::take) pero distingue POR QUÉ falló. Los dos
+    /// fallos piden arreglos opuestos y antes eran indistinguibles: un
+    /// `UnknownPeer` es un desajuste de identidad (el `from` del ACK no es
+    /// la clave con la que tenemos al peer), un `UnknownKey` es un ACK
+    /// tardío que el reaper ya expiró.
+    pub fn take_diagnosed(&self, peer: &str, key_id: &KeyId) -> TakeOutcome {
         let mut guard = self.inner.lock();
-        let bucket = guard.get_mut(peer)?;
+        let Some(bucket) = guard.get_mut(peer) else {
+            return TakeOutcome::UnknownPeer;
+        };
         let entry = bucket.remove(key_id);
         if bucket.is_empty() {
             guard.remove(peer);
         }
-        entry
+        match entry {
+            Some(e) => TakeOutcome::Hit(e),
+            None => TakeOutcome::UnknownKey,
+        }
+    }
+
+    /// Peers con al menos una entrada pendiente. Sólo para diagnóstico:
+    /// al recibir un ACK con un `from` desconocido, se loguea junto a esta
+    /// lista para que el desajuste de identidad salte a la vista.
+    pub fn peers(&self) -> Vec<String> {
+        self.inner.lock().keys().cloned().collect()
     }
 
     /// Devuelve cuántas entradas pendientes hay para un peer concreto.
@@ -101,23 +125,40 @@ impl AckPendingStore {
             .collect()
     }
 
-    /// Recorre y elimina las entradas expiradas. Devuelve el número de
-    /// entradas eliminadas para que el caller pueda incrementar métricas.
-    pub fn reap_expired(&self, now: Instant) -> usize {
-        let mut removed = 0;
+    /// Recorre y elimina las entradas expiradas. Devuelve **cuántas por
+    /// peer**: un total agregado no dice si se está perdiendo todo hacia
+    /// un peer concreto o un poco hacia todos, que es justo lo que hay que
+    /// saber. Sólo aparecen los peers con al menos una expiración.
+    pub fn reap_expired_by_peer(&self, now: Instant) -> Vec<(String, usize)> {
+        let mut removed: Vec<(String, usize)> = Vec::new();
         let mut guard = self.inner.lock();
-        guard.retain(|_peer, bucket| {
-            bucket.retain(|_kid, entry| {
-                let alive = !entry.is_expired(now);
-                if !alive {
-                    removed += 1;
-                }
-                alive
-            });
+        guard.retain(|peer, bucket| {
+            let before = bucket.len();
+            bucket.retain(|_kid, entry| !entry.is_expired(now));
+            let n = before - bucket.len();
+            if n > 0 {
+                removed.push((peer.clone(), n));
+            }
             !bucket.is_empty()
         });
         removed
     }
+
+    /// Total de entradas expiradas. Envoltorio de
+    /// [`reap_expired_by_peer`](Self::reap_expired_by_peer).
+    pub fn reap_expired(&self, now: Instant) -> usize {
+        self.reap_expired_by_peer(now).iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// Resultado de [`AckPendingStore::take_diagnosed`].
+pub enum TakeOutcome {
+    /// El ACK casó: aquí está la clave, lista para `buffer_enc`.
+    Hit(AckPendingEntry),
+    /// No hay ninguna entrada pendiente para ese peer.
+    UnknownPeer,
+    /// El peer existe pero ese `key_id` ya no: expirado o ACK duplicado.
+    UnknownKey,
 }
 
 /// Arc<AckPendingStore> es el tipo que comparten Generator + ack socket.
@@ -149,6 +190,48 @@ mod tests {
     fn take_missing_returns_none() {
         let store = AckPendingStore::new();
         assert!(store.take("dkms-22", &id("nope")).is_none());
+    }
+
+    #[test]
+    fn take_diagnosed_separates_unknown_peer_from_unknown_key() {
+        let store = AckPendingStore::new();
+        let now = Instant::now();
+        store.insert(
+            "dkms-22",
+            id("k1"),
+            AckPendingEntry::new(vec![0xAB; 32], now + Duration::from_secs(30), KeyGrade::Qkd),
+        );
+        // ACK con un `from` que no conocemos → desajuste de identidad.
+        assert!(matches!(
+            store.take_diagnosed("DKMS-22", &id("k1")),
+            TakeOutcome::UnknownPeer
+        ));
+        // Peer correcto, key_id que ya no está → ACK tardío / duplicado.
+        assert!(matches!(
+            store.take_diagnosed("dkms-22", &id("otra")),
+            TakeOutcome::UnknownKey
+        ));
+        assert!(matches!(
+            store.take_diagnosed("dkms-22", &id("k1")),
+            TakeOutcome::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn reap_expired_reports_per_peer() {
+        let store = AckPendingStore::new();
+        let now = Instant::now();
+        let dead =
+            || AckPendingEntry::new(vec![0xEF; 32], now - Duration::from_secs(1), KeyGrade::Qkd);
+        store.insert("dkms-2", id("a"), dead());
+        store.insert("dkms-2", id("b"), dead());
+        store.insert("dkms-3", id("c"), dead());
+        let mut by_peer = store.reap_expired_by_peer(now);
+        by_peer.sort();
+        assert_eq!(
+            by_peer,
+            vec![("dkms-2".to_string(), 2), ("dkms-3".to_string(), 1)]
+        );
     }
 
     #[test]

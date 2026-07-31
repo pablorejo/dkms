@@ -70,7 +70,7 @@ use etsi::{
 use crate::{
     admission::Admission,
     config::DkmsConfig,
-    control::{BatchedAckClient, Generator, SaeBufferBuckets},
+    control::{BatchedAckClient, FlowStats, Generator, SaeBufferBuckets},
     demand_tracker::{DemandTracker, SharedDemandTracker},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
@@ -128,6 +128,10 @@ pub struct DkmsService {
     /// `DKMS_BUFFER` por ORR). Si `None`, el delivery pump no manda ACK
     /// (los peers entonces verán expiraciones del ack_pending).
     pub ack_client: Option<Arc<BatchedAckClient>>,
+    /// Contadores del ciclo emit → deliver → ACK, compartidos con el
+    /// Generator y el socket de ACK. Aquí se alimenta el lado receptor
+    /// (`recv`, `ack_*`). Ver [`crate::control::flow_stats`].
+    pub flow: Arc<FlowStats>,
     /// Token buckets per `(peer, sae)` con límites dinámicos
     /// (refill = link_capacity/N_SAEs, capacity = occupancy/N_SAEs).
     /// Si `None`, se usa el legacy `SaeBuckets` por master-SAE en su
@@ -176,6 +180,10 @@ impl DkmsService {
             peer_client,
             generator: None,
             ack_client: None,
+            // Se crea aquí y `main.rs` la pasa al Generator y al
+            // BatchedAckClient, que nacen después: así los dos sentidos
+            // del camino de claves cuentan sobre la misma tabla.
+            flow: Arc::new(FlowStats::new()),
             sae_buffer_buckets: None,
             admission: Admission::new(),
             demand_tracker: Arc::new(DemandTracker::default()),
@@ -775,13 +783,40 @@ impl DkmsService {
         // acota por la rate del SDN y los SAEs drenan vía pop.
         let _ = buf.dec.try_push(key);
 
+        // Contadores del camino de claves. `recv` es la mitad del
+        // diagnóstico que faltaba: sin él, "no le llegan mis claves" y "no
+        // me llegan sus ACK" se ven exactamente igual desde el emisor.
+        let n_recv = self
+            .flow
+            .peer(&source_dkms)
+            .recv
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n_recv == 0 {
+            info!(
+                source = %source_dkms,
+                ack_endpoint = ack_endpoint.as_deref().unwrap_or("<none>"),
+                "dkms: primera clave recibida de este peer por ORR",
+            );
+        }
+
         // ACK siempre (TCP plano, no ORR), batched por
         // `BatchedAckClient` para amortizar el coste de open/close
         // bajo carga sostenida.
         if let Some(ep) = ack_endpoint {
+            // Un cambio de `ack_endpoint` a mitad de despliegue (peer
+            // recreado con otra IP) explicaría ACKs que dejan de llegar;
+            // se loguea una vez por valor, no por clave.
+            if self.flow.note_endpoint(&source_dkms, &ep) {
+                info!(
+                    source = %source_dkms,
+                    ack_endpoint = %ep,
+                    "dkms: acusaré recibo a este peer en esta dirección",
+                );
+            }
             if let Some(client) = self.ack_client.clone() {
-                client.enqueue(ep, key_id_str.clone()).await;
+                client.enqueue(&source_dkms, ep, key_id_str.clone()).await;
             } else {
+                self.flow.ack_no_endpoint(&source_dkms, 1);
                 debug!(
                     source = %source_dkms,
                     key_id = %key_id_str,
@@ -789,6 +824,7 @@ impl DkmsService {
                 );
             }
         } else {
+            self.flow.ack_no_endpoint(&source_dkms, 1);
             debug!(
                 source = %source_dkms,
                 key_id = %key_id_str,

@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 
 use common::ids::KeyId;
 
-use crate::control::Generator;
+use crate::control::{flow_stats::FlowStats, Generator};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckFrame {
@@ -41,6 +41,11 @@ pub struct AckFrame {
 pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let listener = common::net::bind_reuse_addr(addr).await?;
     info!(%addr, "dkms.ack_socket listening");
+    // Direcciones remotas ya vistas: la primera conexión de cada peer se
+    // loguea a INFO. Sin esto, "no llega ni un ACK" y "llegan pero no
+    // casan" son indistinguibles sin activar debug.
+    let seen: Arc<parking_lot::Mutex<std::collections::HashSet<std::net::IpAddr>>> =
+        Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(p) => p,
@@ -50,17 +55,24 @@ pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> any
             }
         };
         let _ = stream.set_nodelay(true);
+        if seen.lock().insert(peer.ip()) {
+            info!(from_ip = %peer.ip(), "dkms.ack_socket: primera conexión de ACK desde esta IP");
+        }
         debug!(%peer, "dkms.ack_socket accept");
         let gen = generator.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(gen, stream).await {
+            if let Err(e) = handle_conn(gen, stream, peer).await {
                 debug!(error = %e, %peer, "dkms.ack_socket conn ended");
             }
         });
     }
 }
 
-async fn handle_conn(generator: Arc<Generator>, stream: TcpStream) -> anyhow::Result<()> {
+async fn handle_conn(
+    generator: Arc<Generator>,
+    stream: TcpStream,
+    remote: std::net::SocketAddr,
+) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
@@ -76,7 +88,7 @@ async fn handle_conn(generator: Arc<Generator>, stream: TcpStream) -> anyhow::Re
         let frame: AckFrame = match serde_json::from_str(trimmed) {
             Ok(f) => f,
             Err(e) => {
-                warn!(error = %e, line = trimmed, "dkms.ack_socket bad frame");
+                warn!(error = %e, line = trimmed, %remote, "dkms.ack_socket bad frame");
                 continue;
             }
         };
@@ -90,7 +102,13 @@ async fn handle_conn(generator: Arc<Generator>, stream: TcpStream) -> anyhow::Re
                 miss += 1;
             }
         }
-        debug!(from = %frame.from, ok, miss, "dkms.ack_socket batch processed");
+        // Un batch entero fallido es la firma de un desajuste de identidad
+        // o de un `ack_timeout_ms` demasiado corto; `on_ack` ya distingue
+        // cuál de los dos y lo loguea con rate-limit.
+        if ok == 0 && miss > 0 {
+            debug!(from = %frame.from, %remote, miss, "dkms.ack_socket batch entero sin casar");
+        }
+        debug!(from = %frame.from, %remote, ok, miss, "dkms.ack_socket batch processed");
     }
 }
 
@@ -153,15 +171,26 @@ impl AckClient {
 #[derive(Clone)]
 pub struct BatchedAckClient {
     inner: Arc<AckClient>,
-    pending: Arc<parking_lot::Mutex<HashMap<String, Vec<String>>>>,
+    /// `peer_dkms_id → (ack_endpoint, key_ids en cola)`. Indexado por peer
+    /// y no por dirección para que los contadores de
+    /// [`crate::control::flow_stats`] hablen el mismo idioma que el resto
+    /// del camino de claves.
+    pending: Arc<parking_lot::Mutex<HashMap<String, (String, Vec<String>)>>>,
+    stats: Arc<FlowStats>,
     max_keys: usize,
 }
 
 impl BatchedAckClient {
-    pub fn new(client: AckClient, max_keys: usize, flush_interval: Duration) -> Self {
+    pub fn new(
+        client: AckClient,
+        max_keys: usize,
+        flush_interval: Duration,
+        stats: Arc<FlowStats>,
+    ) -> Self {
         let b = Self {
             inner: Arc::new(client),
             pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            stats,
             max_keys,
         };
         let me = b.clone();
@@ -176,15 +205,21 @@ impl BatchedAckClient {
         b
     }
 
-    /// Encola un ACK. Si la cola para ese peer_addr llega al cap, hace
-    /// flush inmediato.
-    pub async fn enqueue(&self, peer_addr: String, key_id: String) {
+    /// Encola un ACK hacia `peer_id` en la dirección que él anunció. Si la
+    /// cola llega al cap, hace flush inmediato.
+    pub async fn enqueue(&self, peer_id: &str, peer_addr: String, key_id: String) {
+        self.stats.ack_enqueued(peer_id, 1);
         let flush_now: Option<Vec<String>> = {
             let mut g = self.pending.lock();
-            let bucket = g.entry(peer_addr.clone()).or_default();
-            bucket.push(key_id);
-            if bucket.len() >= self.max_keys {
-                Some(std::mem::take(bucket))
+            let bucket = g
+                .entry(peer_id.to_owned())
+                .or_insert_with(|| (peer_addr.clone(), Vec::new()));
+            // El peer puede haber cambiado de dirección (redespliegue con
+            // otra IP): mandamos siempre a la última anunciada.
+            bucket.0 = peer_addr.clone();
+            bucket.1.push(key_id);
+            if bucket.1.len() >= self.max_keys {
+                Some(std::mem::take(&mut bucket.1))
             } else {
                 None
             }
@@ -195,25 +230,58 @@ impl BatchedAckClient {
             // connect+write+shutdown del send_batch. Antes, cada bucket que
             // se llenaba (max_keys=32) congelaba el pump → keys entrantes
             // se acumulaban en el broadcast channel → Lagged → expired.
-            let inner = self.inner.clone();
-            let addr = peer_addr.clone();
+            let me = self.clone();
+            let peer = peer_id.to_owned();
             tokio::spawn(async move {
-                if let Err(e) = inner.send_batch(&addr, &batch).await {
-                    warn!(peer_addr = %addr, error = %e, "ack_socket send_batch (full) failed");
-                }
+                me.send_and_count(&peer, &peer_addr, batch, "full").await;
             });
         }
     }
 
+    /// Manda un batch y contabiliza el resultado. `why` distingue el flush
+    /// por cola llena del periódico, para leer en el log si el ritmo de
+    /// ACK lo marca la carga o el temporizador.
+    async fn send_and_count(&self, peer_id: &str, addr: &str, batch: Vec<String>, why: &str) {
+        let n = batch.len() as u64;
+        match self.inner.send_batch(addr, &batch).await {
+            Ok(()) => {
+                let before = self
+                    .stats
+                    .peer(peer_id)
+                    .ack_sent
+                    .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                if before == 0 {
+                    info!(
+                        peer = peer_id,
+                        ack_endpoint = %addr,
+                        "dkms.ack_socket: primer ACK enviado a este peer",
+                    );
+                }
+                debug!(peer = peer_id, ack_endpoint = %addr, n, why, "ack_socket batch enviado");
+            }
+            Err(e) => {
+                self.stats.ack_send_failed(peer_id, n);
+                // Contamos claves, no intentos: es lo que el emisor verá
+                // expirar al otro lado.
+                warn!(
+                    peer = peer_id,
+                    ack_endpoint = %addr,
+                    error = %e,
+                    keys_perdidas = n,
+                    why,
+                    "ack_socket: no pude entregar el ACK; el peer verá estas claves expirar",
+                );
+            }
+        }
+    }
+
     async fn flush_all(&self) {
-        let snapshot: Vec<(String, Vec<String>)> = {
+        let snapshot: Vec<(String, String, Vec<String>)> = {
             let mut g = self.pending.lock();
-            let drained: Vec<(String, Vec<String>)> = g
-                .iter_mut()
-                .filter(|(_, v)| !v.is_empty())
-                .map(|(k, v)| (k.clone(), std::mem::take(v)))
-                .collect();
-            drained
+            g.iter_mut()
+                .filter(|(_, (_, v))| !v.is_empty())
+                .map(|(peer, (addr, v))| (peer.clone(), addr.clone(), std::mem::take(v)))
+                .collect()
         };
         // 2026-05-24: paralelizamos el flush por peer. Antes el bucle
         // era secuencial y un peer lento (connect_timeout 2 s) bloqueaba
@@ -221,12 +289,10 @@ impl BatchedAckClient {
         // superando el ack_timeout_ms del sender (30 s), que entonces
         // borraba ack_pending con reaper → Generator::on_ack no-op →
         // enc no crecía → observed_rate=0 con 72/380 commodities en BA.
-        let tasks = snapshot.into_iter().map(|(addr, batch)| {
-            let inner = self.inner.clone();
+        let tasks = snapshot.into_iter().map(|(peer, addr, batch)| {
+            let me = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = inner.send_batch(&addr, &batch).await {
-                    warn!(peer_addr = %addr, error = %e, "ack_socket send_batch (tick) failed");
-                }
+                me.send_and_count(&peer, &addr, batch, "tick").await;
             })
         });
         futures::future::join_all(tasks).await;

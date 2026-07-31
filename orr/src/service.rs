@@ -768,12 +768,17 @@ impl OrrService {
         // forzar floods de re-bootstrap mandándonos frames con `from`
         // arbitrarios. `peer_grpc_addrs` viene del TOML/configmap, es
         // confiable.
-        let addr = match self.cfg.peer_grpc_addrs.get(peer_id) {
-            Some(a) => a.clone(),
+        // El registro incluye tanto los peers del `node.yml` como los que
+        // mandó la SDN. Consultar aquí `cfg.peer_grpc_addrs` (estático)
+        // dejaba fuera a todo peer aprendido en caliente: su re-bootstrap
+        // no se disparaba nunca y sus frames se dropeaban en silencio.
+        let addr = match self.peers.grpc_addr(peer_id) {
+            Some(a) => a,
             None => {
-                debug!(
+                warn!(
                     peer = %peer_id,
-                    "orr.passive_rebootstrap skip (peer not in peer_grpc_addrs)"
+                    "orr.passive_rebootstrap: no sé la URL gRPC de este peer, no puedo \
+                     rehacer el handshake. Sus frames se seguirán dropeando",
                 );
                 return;
             }

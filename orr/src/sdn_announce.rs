@@ -163,6 +163,11 @@ impl SdnAnnouncer {
             // `put` es idempotente, así que refrescarlo en cada latido no
             // cuesta nada y absorbe un cambio de QKC del par.
             self.peers.put(p.orr_id.clone(), qkc_id);
+            // Refrescamos la URL en cada latido, no sólo al darlo de alta:
+            // un peer redesplegado con otra IP debe seguir siendo
+            // alcanzable para el re-bootstrap pasivo.
+            self.peers
+                .put_grpc_addr(p.orr_id.clone(), p.grpc_url.clone());
             if self.spawned.insert(p.orr_id.clone()) {
                 info!(orr = %p.orr_id, url = %p.grpc_url, "par nuevo: arranco su bootstrap");
                 bootstrap::spawn_one(

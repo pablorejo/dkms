@@ -36,7 +36,8 @@ use common::security::KeyGrade;
 
 use crate::{
     config::{DkmsConfig, GeneratorCfg, PeerTransport},
-    control::ack_pending::{AckPendingEntry, AckPendingStore},
+    control::ack_pending::{AckPendingEntry, AckPendingStore, TakeOutcome},
+    control::flow_stats::{classify_endpoint, EndpointVerdict, FlowStats},
     peers::PeerRegistry,
     southbound::{
         orr::{
@@ -103,6 +104,10 @@ pub struct Generator {
     /// dos snapshots — clave para validar la rate asignada por el SDN.
     /// `peer_dkms_id → contador`. Se accede sin lock porque AtomicU64.
     emit_counters: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    /// Contadores de todo el ciclo emit → deliver → ACK, compartidos con el
+    /// socket de ACK y con el pump de deliveries del ORR. Ver
+    /// [`crate::control::flow_stats`].
+    pub stats: Arc<FlowStats>,
     pool: Arc<BufferPool>,
     pub ack_pending: Arc<AckPendingStore>,
     orr: Arc<OrrClient>,
@@ -131,6 +136,7 @@ impl Generator {
         pool: Arc<BufferPool>,
         ack_pending: Arc<AckPendingStore>,
         demand_tracker: crate::demand_tracker::SharedDemandTracker,
+        stats: Arc<FlowStats>,
     ) -> Self {
         // Aviso sobre la semilla del node.yml. El mapa efectivo lo lleva el
         // `PeerRegistry`, que ya descarta los peers sin `orr_id`.
@@ -157,6 +163,7 @@ impl Generator {
             qkd_avail: Arc::new(Mutex::new(HashMap::new())),
             buckets: Arc::new(Mutex::new(HashMap::new())),
             emit_counters: Arc::new(Mutex::new(HashMap::new())),
+            stats,
             pool,
             ack_pending,
             orr,
@@ -226,15 +233,77 @@ impl Generator {
         tokio::spawn(async move {
             demand_loop.run_demand_loop().await;
         });
+        let probe = me.clone();
+        tokio::spawn(async move {
+            probe.check_ack_endpoint().await;
+        });
         info!(
             my_dkms = %me.my_dkms_id,
             n_peers = me.peers.orr_map().len(),
             tick_ms = me.cfg.tick_ms,
             ack_timeout_ms = me.cfg.ack_timeout_ms,
             demand_refresh_ms = me.cfg.demand_refresh_ms,
+            ack_endpoint = me.ack_endpoint.as_deref().unwrap_or("<none>"),
             "generator background started",
         );
         me
+    }
+
+    /// Comprueba que el `ack_endpoint` que anunciamos a los peers sirve
+    /// para algo. Es la causa raíz más silenciosa del ciclo de claves: si
+    /// la dirección anunciada no es enrutable, el peer manda su ACK a la
+    /// nada (o, con `0.0.0.0`, a su propio socket) y aquí sólo se ve
+    /// `ack_pending` creciendo hasta el tope y el reaper expirando.
+    ///
+    /// Dos comprobaciones:
+    ///
+    ///  1. **Estática**: ¿es `0.0.0.0` / `127.0.0.1`? Entonces ningún peer
+    ///     de otra máquina podrá acusar recibo. `WARN` inmediato.
+    ///  2. **Activa**: abrir un TCP contra la dirección anunciada. Si ni
+    ///     siquiera desde esta máquina se puede, está mal la IP o el socket
+    ///     no llegó a bindear. No prueba el cortafuegos del peer, pero
+    ///     descarta la mitad de los casos sin salir del nodo.
+    async fn check_ack_endpoint(self: Arc<Self>) {
+        let Some(ep) = self.ack_endpoint.clone() else {
+            warn!(
+                "generator: sin ack_endpoint anunciado — los peers no podrán acusar recibo \
+                 y todas las claves emitidas expirarán (define generator.ack_socket_addr \
+                 o generator.ack_advertised_endpoint)"
+            );
+            return;
+        };
+        match classify_endpoint(&ep) {
+            EndpointVerdict::Wildcard => warn!(
+                ack_endpoint = %ep,
+                "generator: el ack_endpoint anunciado es una wildcard; al conectarse, el peer \
+                 la reinterpreta como localhost y su ACK acaba en su PROPIO socket. Pon \
+                 generator.ack_advertised_endpoint (o advertise_ip) con la IP enrutable",
+            ),
+            EndpointVerdict::Loopback => warn!(
+                ack_endpoint = %ep,
+                "generator: el ack_endpoint anunciado es loopback; sólo vale si todos los DKMS \
+                 comparten máquina. Desde otro host el ACK nunca llegará",
+            ),
+            EndpointVerdict::Routable => {}
+        }
+        // Damos margen a que el listener bindee antes de sondearlo.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(&ep))
+            .await
+        {
+            Ok(Ok(_)) => {
+                info!(ack_endpoint = %ep, "generator: ack_endpoint alcanzable (sonda local ok)")
+            }
+            Ok(Err(e)) => warn!(
+                ack_endpoint = %ep, error = %e,
+                "generator: el ack_endpoint anunciado NO es alcanzable ni desde esta máquina; \
+                 ningún peer podrá acusar recibo",
+            ),
+            Err(_) => warn!(
+                ack_endpoint = %ep,
+                "generator: timeout conectando al ack_endpoint anunciado desde esta máquina",
+            ),
+        }
     }
 
     /// Cada 5s loguea el estado de buffers ENC, DEC, ack_pending y la
@@ -261,11 +330,16 @@ impl Generator {
                     .map(|(p, c)| (p.clone(), c.load(Ordering::Relaxed)))
                     .collect()
             };
-            // Unión de peers que aparecen en pool_snap y en peers_orr.
+            // Unión de peers que aparecen en pool_snap, en peers_orr y en
+            // los contadores de flujo — este último incluye peers de los
+            // que sólo recibimos, que de otro modo serían invisibles.
             let mut all_peers: std::collections::BTreeSet<String> =
                 pool_snap.iter().map(|(p, _, _)| p.clone()).collect();
             for p in self.peers.orr_map().keys() {
                 all_peers.insert(p.clone());
+            }
+            for p in self.stats.peer_ids() {
+                all_peers.insert(p);
             }
             for peer in all_peers {
                 let (enc_len, dec_len) = pool_snap
@@ -287,6 +361,8 @@ impl Generator {
                     0.0
                 };
                 prev.insert(peer.clone(), (emit_total, now));
+                let f = self.stats.peer(&peer);
+                let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
                 info!(
                     peer = %peer,
                     enc = enc_len,
@@ -295,19 +371,129 @@ impl Generator {
                     emit_total,
                     observed_keys_per_s = format!("{observed_rate:.1}"),
                     sdn_rate_keys_per_s = format!("{rate_sdn:.1}"),
+                    // ── ida: yo genero para este peer ──────────────────
+                    emitted = g(&f.emitted),
+                    emit_failed = g(&f.emit_failed),
+                    // ── vuelta: sus ACK ────────────────────────────────
+                    acked = g(&f.acked),
+                    expired = g(&f.expired),
+                    ack_miss_peer = g(&f.ack_miss_unknown_peer),
+                    ack_miss_key = g(&f.ack_miss_unknown_key),
+                    enc_full = g(&f.enc_full),
+                    // ── sentido contrario: él genera para mí ───────────
+                    recv = g(&f.recv),
+                    ack_sent = g(&f.ack_sent),
+                    ack_send_failed = g(&f.ack_send_failed),
+                    ack_no_endpoint = g(&f.ack_no_endpoint),
+                    peer_ack_endpoint = self
+                        .stats
+                        .endpoint_of(&peer)
+                        .unwrap_or_else(|| "<sin recibir>".into()),
                     "generator.state",
                 );
+                self.diagnose(&peer, &f, enc_len, ack_pending);
             }
         }
+    }
+
+    /// Traduce los contadores a una frase accionable. Se emite junto a
+    /// `generator.state` sólo cuando hay algo roto, para que el operador no
+    /// tenga que correlacionar doce números a mano.
+    fn diagnose(
+        &self,
+        peer: &str,
+        f: &crate::control::flow_stats::PeerFlow,
+        enc_len: usize,
+        ack_pending: usize,
+    ) {
+        // Sano: hay claves utilizables. Nada que decir.
+        if enc_len > 0 {
+            return;
+        }
+        let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        let (emitted, acked, expired) = (g(&f.emitted), g(&f.acked), g(&f.expired));
+        let (miss_peer, miss_key) = (g(&f.ack_miss_unknown_peer), g(&f.ack_miss_unknown_key));
+        if emitted == 0 {
+            // Sin emisión no hay nada que acusar. Puede ser normal en el
+            // arranque; sólo molestamos si además hay pendientes.
+            if ack_pending == 0 {
+                debug!(peer, "generator.diag: aún sin emitir hacia este peer");
+            }
+            return;
+        }
+        let cause = if miss_peer > 0 {
+            "sus ACK llegan con un `from` que no casa con el id con el que lo tengo \
+             configurado (desajuste de identidad: revisa node_id del peer vs la clave \
+             [peers.<id>] de mi node.yml)"
+        } else if miss_key > 0 && acked == 0 {
+            "sus ACK llegan TARDE: el reaper ya había expirado la clave. Sube \
+             generator.ack_timeout_ms o baja la rate de emisión"
+        } else if acked == 0 && expired > 0 {
+            "emito y nada vuelve: o la clave no llega al peer (mira `recv` en SU log) \
+             o su ACK no llega aquí (TCP hacia mi ack_endpoint bloqueado, o le anuncié \
+             una dirección no enrutable)"
+        } else {
+            return;
+        };
+        warn!(
+            peer,
+            emitted,
+            acked,
+            expired,
+            ack_miss_peer = miss_peer,
+            ack_miss_key = miss_key,
+            my_ack_endpoint = self.ack_endpoint.as_deref().unwrap_or("<none>"),
+            "generator.diag: buffer_enc vacío — {cause}",
+        );
     }
 
     /// Punto de entrada del ACK socket: el peer confirma que recibió la
     /// clave `key_id`. Movemos la entrada de `ack_pending[peer]` a
     /// `BufferPool.enc[peer]`. Devuelve `true` si se movió.
     pub fn on_ack(&self, peer_dkms_id: &str, key_id: &KeyId) -> bool {
-        let Some(entry) = self.ack_pending.take(peer_dkms_id, key_id) else {
-            debug!(peer = peer_dkms_id, key_id = %key_id, "generator.on_ack miss");
-            return false;
+        let entry = match self.ack_pending.take_diagnosed(peer_dkms_id, key_id) {
+            TakeOutcome::Hit(e) => e,
+            TakeOutcome::UnknownPeer => {
+                self.stats.ack_miss_unknown_peer(peer_dkms_id, 1);
+                // Rate-limitado a la primera y luego cada potencia de 2:
+                // un desajuste de identidad produce un miss por CLAVE.
+                let n = self
+                    .stats
+                    .peer(peer_dkms_id)
+                    .ack_miss_unknown_peer
+                    .load(Ordering::Relaxed);
+                if n.is_power_of_two() {
+                    warn!(
+                        ack_from = peer_dkms_id,
+                        key_id = %key_id,
+                        misses = n,
+                        pending_peers = ?self.ack_pending.peers(),
+                        "generator.on_ack: ACK de un peer del que no espero nada. \
+                         El `from` del ACK debe ser idéntico al id con el que emito \
+                         (compara con pending_peers)",
+                    );
+                }
+                return false;
+            }
+            TakeOutcome::UnknownKey => {
+                self.stats.ack_miss_unknown_key(peer_dkms_id, 1);
+                let n = self
+                    .stats
+                    .peer(peer_dkms_id)
+                    .ack_miss_unknown_key
+                    .load(Ordering::Relaxed);
+                if n.is_power_of_two() {
+                    warn!(
+                        peer = peer_dkms_id,
+                        key_id = %key_id,
+                        misses = n,
+                        ack_timeout_ms = self.cfg.ack_timeout_ms,
+                        "generator.on_ack: ACK tardío o duplicado — la clave ya no estaba \
+                         en ack_pending (probablemente la expiró el reaper)",
+                    );
+                }
+                return false;
+            }
         };
         let buf = self.pool.for_peer(peer_dkms_id);
         let grade = entry.grade;
@@ -317,6 +503,7 @@ impl Generator {
         };
         if let Err(rejected) = buf.enc(grade).try_push(key) {
             // Buffer lleno: la clave se descarta (zeroize en Drop).
+            self.stats.enc_full(peer_dkms_id, 1);
             warn!(
                 peer = peer_dkms_id,
                 key_id = %rejected.id,
@@ -324,8 +511,20 @@ impl Generator {
             );
             return false;
         }
-        self.counter_for(peer_dkms_id)
+        let n = self
+            .counter_for(peer_dkms_id)
             .fetch_add(1, Ordering::Relaxed);
+        self.stats.acked(peer_dkms_id, 1);
+        if n == 0 {
+            // Hito: el ciclo emit→ACK se cerró por primera vez con este
+            // peer. Sin esta línea, un despliegue sano y uno roto se ven
+            // igual durante los primeros 5 s.
+            info!(
+                peer = peer_dkms_id,
+                grade = ?grade,
+                "generator: primer ACK de este peer — el ciclo de claves está cerrado",
+            );
+        }
         debug!(peer = peer_dkms_id, key_id = %key_id, "generator.ack ok → buffer_enc");
         true
     }
@@ -501,6 +700,9 @@ impl Generator {
         let Some(dest_orr_id) = orr_map.get(peer_dkms_id).cloned() else {
             return Ok(()); // no debería pasar (filtrado antes)
         };
+        if self.ack_endpoint.is_none() {
+            self.stats.ack_no_endpoint(peer_dkms_id, 1);
+        }
         let mut bytes = vec![0u8; self.cfg.key_size_bytes];
         rand::thread_rng().fill_bytes(&mut bytes);
         let key_id_str = Uuid::new_v4().to_string();
@@ -564,7 +766,21 @@ impl Generator {
         {
             // Si el ORR falla, no esperamos ACK — retiramos del pending.
             let _ = self.ack_pending.take(peer_dkms_id, &key_id);
+            self.stats.emit_failed(peer_dkms_id, 1);
             return Err(anyhow::anyhow!(e.to_string()));
+        }
+        let n = self
+            .stats
+            .peer(peer_dkms_id)
+            .emitted
+            .fetch_add(1, Ordering::Relaxed);
+        if n == 0 {
+            info!(
+                peer = peer_dkms_id,
+                dest_orr = %dest_orr_id,
+                ack_endpoint = self.ack_endpoint.as_deref().unwrap_or("<none>"),
+                "generator: primera clave emitida hacia este peer",
+            );
         }
         Ok(())
     }
@@ -572,9 +788,20 @@ impl Generator {
     async fn run_reaper_loop(self: Arc<Self>) {
         let period = Duration::from_millis(self.cfg.ack_reaper_ms);
         loop {
-            let removed = self.ack_pending.reap_expired(Instant::now());
-            if removed > 0 {
-                warn!(removed, "generator.ack_reaper: expired pending keys");
+            // Por peer, no agregado: un total no distingue "se pierde todo
+            // hacia un peer" de "se pierde un poco hacia todos".
+            let removed = self.ack_pending.reap_expired_by_peer(Instant::now());
+            if !removed.is_empty() {
+                let total: usize = removed.iter().map(|(_, n)| n).sum();
+                for (peer, n) in &removed {
+                    self.stats.expired(peer, *n as u64);
+                }
+                warn!(
+                    removed = total,
+                    by_peer = ?removed,
+                    ack_timeout_ms = self.cfg.ack_timeout_ms,
+                    "generator.ack_reaper: expired pending keys",
+                );
             }
             tokio::time::sleep(period).await;
         }
