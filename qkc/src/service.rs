@@ -1,5 +1,6 @@
 //! `QkcService` — handle Arc-shared entre todos los listeners y workers.
 
+use arc_swap::ArcSwap;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -11,7 +12,7 @@ use std::{
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     config::{LinkConfig, LinkType, QkcConfig},
@@ -76,7 +77,10 @@ pub struct LinkRuntime {
 pub struct QkcService {
     pub cfg: Arc<QkcConfig>,
     pub routing: Arc<ForwardingTable>,
-    pub links: Arc<HashMap<u32, LinkRuntime>>,
+    /// Enlaces vivos. `ArcSwap` como la `routing` de al lado: la SDN puede
+    /// darle uno nuevo en caliente cuando aparece un vecino, sin reiniciar.
+    /// Se lee por frame, así que la lectura tiene que ser barata.
+    pub links: Arc<ArcSwap<HashMap<u32, Arc<LinkRuntime>>>>,
     pub peer_out: Arc<PeerOut>,
     /// Senders hacia conexiones locales (ORR).
     pub local_out: Arc<Mutex<Vec<mpsc::Sender<wire::Frame>>>>,
@@ -94,6 +98,33 @@ impl QkcService {
         // via the QKD table, possibly around a multi-hop QKD path).
         let mut direct_qkd = HashSet::with_capacity(cfg.links.len());
         for link in &cfg.links {
+            let rt = Self::build_link(&cfg, link, &peer_out)?;
+            direct.insert(link.neighbor_id);
+            if link.link_type == LinkType::Qkd {
+                direct_qkd.insert(link.neighbor_id);
+            }
+            links.insert(link.neighbor_id, Arc::new(rt));
+        }
+        let routing = ForwardingTable::new_with_grades(direct, direct_qkd);
+        Ok(Self {
+            cfg: Arc::new(cfg),
+            routing: Arc::new(routing),
+            links: Arc::new(ArcSwap::from_pointee(links)),
+            peer_out,
+            local_out: Arc::new(Mutex::new(Vec::new())),
+            stats: Arc::new(ServiceStats::default()),
+        })
+    }
+
+    /// Construye el runtime de UN enlace: fuente de claves, keystore y, si es
+    /// PQC, su handshake. Extraído del constructor para poder crear enlaces
+    /// después del arranque, cuando la SDN anuncia un vecino nuevo.
+    fn build_link(
+        cfg: &QkcConfig,
+        link: &LinkConfig,
+        peer_out: &Arc<PeerOut>,
+    ) -> Result<LinkRuntime, QkcError> {
+        {
             // La fuente de claves depende del tipo de enlace; el resto del
             // KeyStore es idéntico (mismo hot path, mismo NOTIFY).
             let (kme, pqc): (Arc<dyn KeySource>, Option<Arc<PqcHandshake>>) = match link.link_type {
@@ -124,7 +155,7 @@ impl QkcService {
                         cfg.qkc_id,
                         link.neighbor_id,
                         link.neighbor_peer_addr.clone(),
-                        Arc::clone(&peer_out),
+                        Arc::clone(peer_out),
                         Arc::clone(&store),
                         Arc::clone(&clock),
                         lookahead,
@@ -143,42 +174,27 @@ impl QkcService {
             };
             let keys = KeyStore::new(
                 Arc::clone(&kme),
-                Arc::clone(&peer_out),
+                Arc::clone(peer_out),
                 link.neighbor_id,
                 link.neighbor_peer_addr.clone(),
                 cfg.qkc_id,
                 link.key_size_bits,
             );
-            links.insert(
-                link.neighbor_id,
-                LinkRuntime {
-                    cfg: link.clone(),
-                    kme,
-                    keys,
-                    pqc,
-                },
-            );
-            direct.insert(link.neighbor_id);
-            if link.link_type == LinkType::Qkd {
-                direct_qkd.insert(link.neighbor_id);
-            }
+            Ok(LinkRuntime {
+                cfg: link.clone(),
+                kme,
+                keys,
+                pqc,
+            })
         }
-        let routing = ForwardingTable::new_with_grades(direct, direct_qkd);
-        Ok(Self {
-            cfg: Arc::new(cfg),
-            routing: Arc::new(routing),
-            links: Arc::new(links),
-            peer_out,
-            local_out: Arc::new(Mutex::new(Vec::new())),
-            stats: Arc::new(ServiceStats::default()),
-        })
     }
 
     /// Bootstrap de background tasks: arranca los workers de refill de
     /// cada KeyStore + un logger periódico de niveles.
     pub fn bootstrap_keystores(&self) {
-        let mut for_logger = Vec::with_capacity(self.links.len());
-        for (peer_id, link) in self.links.iter() {
+        let snap = self.links.load();
+        let mut for_logger = Vec::with_capacity(snap.len());
+        for (peer_id, link) in snap.iter() {
             link.keys.spawn_workers();
             // Enlaces PQC: arranca la tarea de rotación/pre-carga de épocas
             // (no-op en el respondedor, que es reactivo a los INIT; el
@@ -197,12 +213,57 @@ impl QkcService {
         self.cfg.qkc_id
     }
 
-    pub fn link_to(&self, neighbor_id: u32) -> Option<&LinkRuntime> {
-        self.links.get(&neighbor_id)
+    pub fn link_to(&self, neighbor_id: u32) -> Option<Arc<LinkRuntime>> {
+        self.links.load().get(&neighbor_id).cloned()
+    }
+
+    /// Da de alta un enlace en caliente. No-op si ya existe.
+    ///
+    /// El handshake se coordina solo: el iniciador es el de `qkc_id` menor y
+    /// `spawn_rotation` es no-op en el respondedor, así que un enlace creado
+    /// aquí arranca igual que uno del `node.yml`, sin coordinación extra.
+    pub fn add_link(&self, link_cfg: LinkConfig) -> Result<bool, QkcError> {
+        let id = link_cfg.neighbor_id;
+        if self.links.load().contains_key(&id) {
+            return Ok(false);
+        }
+        let rt = Arc::new(Self::build_link(&self.cfg, &link_cfg, &self.peer_out)?);
+        let mut next = (**self.links.load()).clone();
+        next.insert(id, Arc::clone(&rt));
+        self.links.store(Arc::new(next));
+        // El enrutado tiene que enterarse o el enlace existe pero no se usa.
+        self.routing
+            .add_direct(id, link_cfg.link_type == LinkType::Qkd);
+        rt.keys.spawn_workers();
+        if let Some(pqc) = &rt.pqc {
+            pqc.spawn_rotation();
+        }
+        info!(peer = id, kind = ?link_cfg.link_type, "enlace añadido en caliente");
+        Ok(true)
+    }
+
+    /// Retira un enlace. Devuelve `true` si estaba.
+    ///
+    /// Al soltar el `LinkRuntime` se sueltan su `KeyStore` y su
+    /// `PqcHandshake`, y con ellos el `SecretStore`, cuyas épocas son
+    /// `Zeroizing`: el material del enlace se borra de memoria. Los frames que
+    /// estuvieran en vuelo hacia ese peer ya tienen su `Arc`, así que terminan
+    /// sin romperse; simplemente no habrá más.
+    pub fn remove_link(&self, neighbor_id: u32) -> bool {
+        if !self.links.load().contains_key(&neighbor_id) {
+            return false;
+        }
+        let mut next = (**self.links.load()).clone();
+        next.remove(&neighbor_id);
+        self.links.store(Arc::new(next));
+        self.routing.remove_direct(neighbor_id);
+        info!(peer = neighbor_id, "enlace retirado; su material se libera");
+        true
     }
 
     pub fn neighbor_peer_addr(&self, neighbor_id: u32) -> Option<String> {
         self.links
+            .load()
             .get(&neighbor_id)
             .map(|l| l.cfg.neighbor_peer_addr.clone())
     }
@@ -256,5 +317,77 @@ impl QkcService {
 
     pub fn prune_local(&self) {
         self.local_out.lock().retain(|tx| !tx.is_closed());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(links: Vec<LinkConfig>) -> QkcConfig {
+        QkcConfig {
+            qkc_id: 1,
+            peer_listen: "127.0.0.1:0".into(),
+            local_listen: "127.0.0.1:0".into(),
+            admin_http: "127.0.0.1:0".into(),
+            sdn_url: None,
+            advertise_ip: None,
+            sdn_announce_secs: 30,
+            links,
+        }
+    }
+
+    fn pqc_link(neighbor: u32) -> LinkConfig {
+        LinkConfig {
+            neighbor_id: neighbor,
+            neighbor_peer_addr: format!("127.0.0.1:{}", 20000 + neighbor),
+            link_type: LinkType::Pqc,
+            quditto_url: None,
+            pqc_suite: crate::config::default_pqc_suite(),
+            key_size_bits: 256,
+            pqc_rekey_keys: 1000,
+            pqc_rekey_secs: 3600,
+            pqc_rekey_lookahead: 2,
+            r0: None,
+            alpha: None,
+            distance_km: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_can_be_added_after_boot() {
+        // Un QKC que arranca sin vecinos: antes esto era el estado final para
+        // siempre, porque `links` se construía una vez.
+        let svc = QkcService::new(cfg_with(vec![])).unwrap();
+        assert!(svc.link_to(2).is_none());
+        assert!(!svc.routing.is_direct_neighbor(2));
+
+        assert!(svc.add_link(pqc_link(2)).unwrap());
+        assert!(svc.link_to(2).is_some());
+        // El enrutado tiene que enterarse: si no, el enlace existe pero nadie
+        // lo usa.
+        assert!(svc.routing.is_direct_neighbor(2));
+    }
+
+    #[tokio::test]
+    async fn adding_a_link_twice_is_a_no_op() {
+        let svc = QkcService::new(cfg_with(vec![])).unwrap();
+        assert!(svc.add_link(pqc_link(2)).unwrap());
+        // El anunciador lo llama en cada latido; un alta repetida no puede
+        // reemplazar el KeyStore ni relanzar el handshake.
+        assert!(!svc.add_link(pqc_link(2)).unwrap());
+        assert_eq!(svc.links.load().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn removing_a_link_drops_it_from_routing_too() {
+        let svc = QkcService::new(cfg_with(vec![pqc_link(2)])).unwrap();
+        assert!(svc.routing.is_direct_neighbor(2));
+
+        assert!(svc.remove_link(2));
+        assert!(svc.link_to(2).is_none());
+        assert!(!svc.routing.is_direct_neighbor(2));
+        // Idempotente: quitar lo que ya no está no es un error.
+        assert!(!svc.remove_link(2));
     }
 }

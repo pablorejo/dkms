@@ -23,7 +23,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use crate::config::{LinkType, QkcConfig};
+use crate::config::{
+    default_pqc_suite, default_rekey_keys, default_rekey_lookahead, default_rekey_secs, LinkConfig,
+    LinkType, QkcConfig,
+};
+use crate::service::QkcService;
 
 /// Puerto del listener TCP-peer, extraído de `peer_listen` (que suele bindear
 /// `0.0.0.0`, del que solo sirve el puerto).
@@ -52,6 +56,24 @@ struct AnnounceOutcome {
     edges_pending: Vec<String>,
     #[serde(default)]
     edges_conflict: Vec<String>,
+    /// Con quién debe tener enlace, según la SDN. Incluye vecinos que este QKC
+    /// no declaró: es lo que permite que un nodo nuevo aparezca sin
+    /// reconfigurar a los que ya estaban.
+    #[serde(default)]
+    peers: Vec<QkcPeerWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QkcPeerWire {
+    qkc_id: String,
+    peer_addr: String,
+    link_type: String,
+    #[serde(default = "default_key_size")]
+    key_size_bits: u32,
+}
+
+fn default_key_size() -> u32 {
+    256
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +93,11 @@ pub struct SdnAnnouncer {
     url: String,
     body: serde_json::Value,
     period: Duration,
+    /// Donde se dan de alta y de baja los enlaces.
+    svc: QkcService,
+    /// Plantilla de la que se copian los ajustes PQC de un enlace nuevo: la
+    /// SDN dice con quién hablar, no con qué suite ni cada cuánto rotar.
+    link_defaults: LinkConfig,
 }
 
 impl SdnAnnouncer {
@@ -80,7 +107,7 @@ impl SdnAnnouncer {
     /// Devuelve `None` **con un error logueado** si hay `sdn_url` pero no se
     /// puede deducir una IP alcanzable: preferimos que el QKC siga sirviendo
     /// claves y que el fallo se vea en el log, a no arrancar.
-    pub fn from_config(cfg: &QkcConfig) -> Option<Self> {
+    pub fn from_config(cfg: &QkcConfig, svc: QkcService) -> Option<Self> {
         let sdn_url = cfg.sdn_url.as_deref()?.trim_end_matches('/').to_string();
 
         // El puerto sale de admin_http (es donde la SDN empuja el forwarding);
@@ -154,6 +181,23 @@ impl SdnAnnouncer {
                 "links": links,
             }),
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
+            svc,
+            // Si el node.yml declara enlaces, sus ajustes PQC son la
+            // referencia local; si no, los defaults del propio config.
+            link_defaults: cfg.links.first().cloned().unwrap_or_else(|| LinkConfig {
+                neighbor_id: 0,
+                neighbor_peer_addr: String::new(),
+                link_type: LinkType::Pqc,
+                quditto_url: None,
+                pqc_suite: default_pqc_suite(),
+                key_size_bits: 256,
+                pqc_rekey_keys: default_rekey_keys(),
+                pqc_rekey_secs: default_rekey_secs(),
+                pqc_rekey_lookahead: default_rekey_lookahead(),
+                r0: None,
+                alpha: None,
+                distance_km: None,
+            }),
         })
     }
 
@@ -168,6 +212,58 @@ impl SdnAnnouncer {
             .error_for_status()?
             .json::<AnnounceOutcome>()
             .await
+    }
+
+    /// Aplica los enlaces que manda la SDN.
+    ///
+    /// Solo se crean enlaces **PQC**: uno QKD necesita un `kme_url` que apunta
+    /// al KME de esta institución, y eso la SDN no lo sabe ni puede inventarlo.
+    /// Los QKD siguen viniendo del `node.yml`.
+    fn apply_peers(&self, peers: &[QkcPeerWire]) {
+        let wanted: std::collections::HashSet<u32> =
+            peers.iter().filter_map(|p| p.qkc_id.parse().ok()).collect();
+
+        for p in peers {
+            let Ok(id) = p.qkc_id.parse::<u32>() else {
+                warn!(qkc = %p.qkc_id, "id de vecino no numérico; lo ignoro");
+                continue;
+            };
+            if p.link_type != "pqc" {
+                // Un enlace QKD anunciado por la SDN se ignora si no lo
+                // teníamos ya: sin `kme_url` no se puede levantar.
+                if self.svc.link_to(id).is_none() {
+                    warn!(
+                        peer = id,
+                        "la SDN anuncia un enlace QKD que no tengo configurado; hace falta su                          kme_url en el node.yml, la SDN no puede saberlo"
+                    );
+                }
+                continue;
+            }
+            if self.svc.link_to(id).is_some() {
+                continue;
+            }
+            let cfg = LinkConfig {
+                neighbor_id: id,
+                neighbor_peer_addr: p.peer_addr.clone(),
+                link_type: LinkType::Pqc,
+                quditto_url: None,
+                key_size_bits: p.key_size_bits,
+                ..self.link_defaults.clone()
+            };
+            match self.svc.add_link(cfg) {
+                Ok(true) => info!(peer = id, addr = %p.peer_addr, "enlace nuevo, dicho por la SDN"),
+                Ok(false) => {}
+                Err(e) => warn!(peer = id, error = %e, "no pude levantar el enlace"),
+            }
+        }
+
+        // Bajas: lo que tengo y la SDN ya no lista.
+        let mine: Vec<u32> = self.svc.links.load().keys().copied().collect();
+        for id in mine {
+            if !wanted.contains(&id) {
+                self.svc.remove_link(id);
+            }
+        }
     }
 
     /// Bucle de anuncio. No termina nunca; va en su propia task.
@@ -199,6 +295,7 @@ impl SdnAnnouncer {
                             "anunciado a la SDN",
                         );
                     }
+                    self.apply_peers(&out.peers);
                     last = Some(now);
                     out.edges_pending.is_empty()
                 }

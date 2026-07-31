@@ -89,7 +89,7 @@ async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
 
     // Resolver claves de descifrado del buffer DEC, esperando al worker
     // si miss (warm-up race del NOTIFY ↔ frame).
-    let dec_keys = lookup_or_fetch_dec(in_link, &key_ids).await?;
+    let dec_keys = lookup_or_fetch_dec(&in_link, &key_ids).await?;
     let plaintext = decrypt(&frame.payload, &key_ids, &dec_keys, in_chunk_bytes)?;
 
     // ¿Local-deliver o forward? En ambos casos el QKC NO toca
@@ -185,7 +185,7 @@ async fn forward_plaintext(
         .ok_or(QkcError::UnknownNeighbor(next_hop))?;
     let chunk_bytes = (out_link.cfg.key_size_bits / 8) as usize;
     let needed = num_chunks(plaintext.len(), chunk_bytes);
-    let enc_keys = take_or_fetch_enc(out_link, needed).await?;
+    let enc_keys = take_or_fetch_enc(&out_link, needed).await?;
     let (ciphertext, ids) = encrypt(plaintext, &enc_keys)?;
     send_frame_to_peer(
         svc,

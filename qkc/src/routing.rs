@@ -56,11 +56,11 @@ pub struct ForwardingTable {
     /// routing is inert and `next_hop_graded` behaves like the legacy table.
     qkd_table: ArcSwap<HashMap<u32, Vec<NextHop>>>,
     /// Direct neighbours short-circuit table lookup (any link type).
-    direct: HashSet<u32>,
+    direct: ArcSwap<HashSet<u32>>,
     /// Subset of `direct` reachable over a **QKD** link. A QKD-grade frame may
     /// only short-circuit through these (a direct PQC neighbour must go via
     /// the QKD table, which may route around through a multi-hop QKD path).
-    direct_qkd: HashSet<u32>,
+    direct_qkd: ArcSwap<HashSet<u32>>,
 }
 
 impl ForwardingTable {
@@ -76,8 +76,8 @@ impl ForwardingTable {
         Self {
             table: ArcSwap::from_pointee(HashMap::new()),
             qkd_table: ArcSwap::from_pointee(HashMap::new()),
-            direct: direct_neighbors,
-            direct_qkd,
+            direct: ArcSwap::from_pointee(direct_neighbors),
+            direct_qkd: ArcSwap::from_pointee(direct_qkd),
         }
     }
 
@@ -88,7 +88,7 @@ impl ForwardingTable {
     /// is ignored.
     #[inline]
     pub fn next_hop(&self, dest_id: u32, hash: u64) -> Option<u32> {
-        if self.direct.contains(&dest_id) {
+        if self.direct.load().contains(&dest_id) {
             return Some(dest_id);
         }
         let table = self.table.load();
@@ -110,7 +110,7 @@ impl ForwardingTable {
         if qkd_only {
             let qkd = self.qkd_table.load();
             if !qkd.is_empty() {
-                if self.direct_qkd.contains(&dest_id) {
+                if self.direct_qkd.load().contains(&dest_id) {
                     return Some(dest_id);
                 }
                 return pick(qkd.get(&dest_id)?, hash);
@@ -159,8 +159,34 @@ impl ForwardingTable {
         (**self.table.load()).clone()
     }
 
+    /// Da de alta un vecino directo. Lo llama [`crate::service::QkcService::add_link`]
+    /// cuando la SDN anuncia uno nuevo: sin esto el enlace existiría pero el
+    /// enrutado no lo usaría.
+    pub fn add_direct(&self, peer_id: u32, is_qkd: bool) {
+        let mut d = (**self.direct.load()).clone();
+        d.insert(peer_id);
+        self.direct.store(Arc::new(d));
+        if is_qkd {
+            let mut q = (**self.direct_qkd.load()).clone();
+            q.insert(peer_id);
+            self.direct_qkd.store(Arc::new(q));
+        }
+    }
+
+    /// Retira un vecino directo de ambos conjuntos.
+    pub fn remove_direct(&self, peer_id: u32) {
+        let mut d = (**self.direct.load()).clone();
+        if d.remove(&peer_id) {
+            self.direct.store(Arc::new(d));
+        }
+        let mut q = (**self.direct_qkd.load()).clone();
+        if q.remove(&peer_id) {
+            self.direct_qkd.store(Arc::new(q));
+        }
+    }
+
     pub fn is_direct_neighbor(&self, peer_id: u32) -> bool {
-        self.direct.contains(&peer_id)
+        self.direct.load().contains(&peer_id)
     }
 }
 

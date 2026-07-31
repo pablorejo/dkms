@@ -168,7 +168,7 @@ async fn get_stats(State(svc): State<QkcService>) -> impl IntoResponse {
         "local_out_registered": svc.local_out.lock().len(),
     });
     let mut links = serde_json::Map::new();
-    for (peer_id, link) in svc.links.iter() {
+    for (peer_id, link) in svc.links.load().iter() {
         let l = link.keys.levels();
         let (sent, dropped) = svc.peer_out.stats(*peer_id).unwrap_or((0, 0));
         links.insert(

@@ -169,19 +169,19 @@ fn default_key_size() -> u32 {
     1024
 }
 
-fn default_pqc_suite() -> String {
+pub(crate) fn default_pqc_suite() -> String {
     common::crypto::pqc::suite::ML_KEM_768.to_string()
 }
 
-fn default_rekey_keys() -> u64 {
+pub(crate) fn default_rekey_keys() -> u64 {
     1000
 }
 
-fn default_rekey_secs() -> u64 {
+pub(crate) fn default_rekey_secs() -> u64 {
     3600
 }
 
-fn default_rekey_lookahead() -> u32 {
+pub(crate) fn default_rekey_lookahead() -> u32 {
     2
 }
 
