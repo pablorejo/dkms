@@ -629,6 +629,7 @@ re-bootstrap).
 | SDN `qkcs_err>0` permanente | IP/puerto del QKC mal en la topología, o 20002 filtrado desde la SDN |
 | ORR "sin master_secret" en bucle | se reinició un solo ORR; reinicia el conjunto |
 | QKC sin `handshake.established` | vecino caído, enlace no declarado en el otro extremo, o 20000 filtrado |
+| enlace PQC vivo pero sin tráfico en un sentido, `keystore.levels … enc=0 dec=0 taken=0` | reiniciaste **sólo** el extremo de id mayor: el otro no re-negocia épocas que ya tiene. Baja `pqc_rekey_secs` (60) o reinicia también el otro extremo |
 | DKMS `ack_pending` crece sin parar | 20009 del peer filtrado o `advertise_ip` mal (los ACK van a esa IP). Lee `generator.diag` — dice cuál de los dos es |
 | DKMS `qkc unreachable … continuing without it` en el boot | **normal** con transporte ORR |
 | `enc_keys` lento o falla hacia un peer | ese peer no está en los `peers` del ORR local (el material no puede viajar) |
