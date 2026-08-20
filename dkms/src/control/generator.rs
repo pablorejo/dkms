@@ -374,6 +374,17 @@ impl Generator {
                     dec = dec_len,
                     ack_pending,
                     emit_total,
+                    // El techo que para la emisión: mientras
+                    // `enc + ack_pending >= emit_capacity` no se generan más
+                    // claves para este peer, porque lo que drena el ENC es la
+                    // demanda de los SAE. Con las dos cifras al lado, un
+                    // `enc` clavado en el techo se lee como "en reposo,
+                    // esperando demanda" y no como una avería. Importa cuando
+                    // el peer se reinicia: sus buffers son sólo RAM, así que
+                    // se queda a cero y no recibe nada hasta que aquí drene
+                    // algo — y estas claves ENC ya no tienen su mitad DEC
+                    // enfrente.
+                    emit_capacity = self.buffer_capacity_per_peer,
                     observed_keys_per_s = format!("{observed_rate:.1}"),
                     sdn_rate_keys_per_s = format!("{rate_sdn:.1}"),
                     // Techo real del token bucket. La rate del SDN por sí sola

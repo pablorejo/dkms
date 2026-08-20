@@ -38,6 +38,14 @@ async fn main() -> Result<()> {
         tokio::spawn(announcer.run());
     }
 
+    // Línea de estado periódica. Es lo único que hay para ver desde fuera si
+    // el bootstrap ha convergido con cada par; ver `orr::stats`.
+    orr::stats::spawn_state_logger(
+        service.stats.clone(),
+        service.peers.clone(),
+        std::time::Duration::from_secs(5),
+    );
+
     let grpc = tokio::spawn({
         let svc = service.clone();
         async move { orr::grpc_server::serve(svc, &cfg.grpc_addr).await }

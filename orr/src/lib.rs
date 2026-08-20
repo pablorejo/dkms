@@ -38,3 +38,4 @@ pub mod rotation;
 pub mod sdn_announce;
 pub mod sdn_client;
 pub mod service;
+pub mod stats;

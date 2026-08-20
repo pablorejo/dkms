@@ -45,6 +45,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 use wire::{Frame, FRAME_LOCAL_SEND};
 
+use crate::stats::OrrStats;
 use crate::{
     bootstrap,
     config::OrrConfig,
@@ -88,6 +89,8 @@ pub struct OrrService {
     /// Cache `dst_orr_id → path` single-path. La invalidación se
     /// dispara en `TopologyEvent` (background loop).
     path_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Contadores de la línea `orr.state`. Ver [`crate::stats`].
+    pub stats: Arc<OrrStats>,
 }
 
 impl OrrService {
@@ -168,6 +171,7 @@ impl OrrService {
             deliveries_tx,
             sdn,
             path_cache: Arc::new(RwLock::new(HashMap::new())),
+            stats: Arc::new(OrrStats::default()),
         };
 
         // Pump entrante: cada frame `FRAME_LOCAL_DELIVER` del QKC pasa
@@ -285,7 +289,7 @@ impl OrrService {
             });
         }
 
-        match max_hops {
+        let out = match max_hops {
             0 => {
                 self.send_passthrough(dest_orr, payload, app_header, grade)
                     .await
@@ -303,7 +307,16 @@ impl OrrService {
                     .await
             }
             n => Err(OrrError::InvalidPath(format!("max_hops inválido: {n}"))),
-        }
+        };
+        // Se cuenta aquí y no en cada modo: es el único punto por el que pasan
+        // los cuatro, así que `sent + send_failed` es el total real de
+        // intentos de salida y las dos cifras se pueden comparar entre sí.
+        OrrStats::bump(if out.is_ok() {
+            &self.stats.sent
+        } else {
+            &self.stats.send_failed
+        });
+        out
     }
 
     /// `max_hops = 0`: el ORR no añade capa onion. Empuja el payload
@@ -575,6 +588,7 @@ impl OrrService {
     // ─── incoming: pelar onion vs. entregar passthrough ────────────────
 
     async fn handle_incoming(&self, frame: Frame) -> Result<()> {
+        OrrStats::bump(&self.stats.recv);
         let header = OrrHeader::decode(&frame.header_orr_mp)?;
         let dkms_map = dkms_header::decode(&frame.header_dkms_mp)?;
 
@@ -630,11 +644,14 @@ impl OrrService {
                     latest = ?self.peers.latest_epoch_for(&from),
                     "orr.incoming master_secret missing for epoch (drop)",
                 );
+                OrrStats::bump(&self.stats.dropped_no_secret);
                 self.trigger_passive_rebootstrap(&from);
                 return Ok(());
             }
         };
-        let peeled = onion::peel(&ms, &key_id, &payload, header.max_hops)?;
+        let peeled = onion::peel(&ms, &key_id, &payload, header.max_hops).inspect_err(|_| {
+            OrrStats::bump(&self.stats.peel_failed);
+        })?;
         match peeled {
             Peeled::Deliver(body) => {
                 debug!(from = %header.from, to = %header.to, "orr.onion deliver");
@@ -653,6 +670,7 @@ impl OrrService {
                     next_qkc,
                     "orr.onion forward",
                 );
+                OrrStats::bump(&self.stats.relayed);
                 self.forward_onion(header, dkms_map, inner, next_qkc).await
             }
         }
@@ -734,6 +752,7 @@ impl OrrService {
             received_at_unix_ms: now_unix_ms(),
             pqc_decapsulated: header.key_id.is_some(),
         };
+        OrrStats::bump(&self.stats.delivered);
         if self.deliveries_tx.send(msg).is_err() {
             debug!("orr.deliver no_subscribers");
         }

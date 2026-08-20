@@ -244,6 +244,48 @@ impl SdnService {
         });
     }
 
+    /// Línea `topology.state` periódica.
+    ///
+    /// La topología sólo se podía mirar sondeando `GET /topology`, así que un
+    /// despliegue que no converge no deja rastro en los logs: cuando alguien
+    /// va a mirar por qué un DKMS no recibe claves, lo primero que necesita
+    /// saber es si la SDN llegó a ver los módulos, y eso ya no está.
+    ///
+    /// `declared` es el número de QKC que declaran algún enlace, y va al lado
+    /// de `edges` a propósito: la arista existe si la declara **alguno** de
+    /// sus dos extremos, así que ver `declared > 0` con `edges = 0` señala
+    /// directamente al caso "los vecinos declarados todavía no han
+    /// registrado" — el `pending` de siempre — sin tener que ir al `qkc
+    /// registered` de cada uno.
+    fn spawn_topology_state_logger(&self, every: Duration) {
+        let topology = self.topology.clone();
+        let presence = self.presence.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let t = topology.load();
+                let declared = t.declared.values().filter(|l| !l.is_empty()).count();
+                info!(
+                    version = t.version,
+                    qkcs = t.qkcs.len(),
+                    orrs = t.orrs.len(),
+                    dkms = t.dkms.len(),
+                    saes = t.saes.len(),
+                    edges = t.edges.len(),
+                    declared,
+                    // Módulos con anuncio vivo. Menos que la suma de los de
+                    // arriba significa que hay entidades dadas de alta a mano,
+                    // que no caducan nunca; más, que algo se anunció y no entró
+                    // (le falta su ancla).
+                    announced = presence.len(),
+                    "topology.state",
+                );
+            }
+        });
+    }
+
     pub async fn run_background_tasks(self) -> Result<()> {
         info!("sdn: background tasks started");
         // Attach the debouncer now, inside the tokio runtime. Honour
@@ -254,6 +296,7 @@ impl SdnService {
         self.attach_debouncer(window_override, None);
 
         self.spawn_presence_sweeper();
+        self.spawn_topology_state_logger(Duration::from_secs(5));
 
         // Version watcher → broadcast TopologyEvent + push de forwarding
         // tables a los QKCs. Dispara en dos eventos:

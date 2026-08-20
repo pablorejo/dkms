@@ -221,6 +221,48 @@ impl QkcService {
             for_logger.push((*peer_id, Arc::clone(&link.keys)));
         }
         keystore::spawn_level_logger(for_logger, Duration::from_secs(5));
+        self.spawn_link_state_logger(Duration::from_secs(5));
+    }
+
+    /// Línea `qkc.links` periódica: los enlaces vivos y los que se declararon
+    /// y no existen.
+    ///
+    /// `keystore.levels` sale por enlace vivo, así que un enlace que no llegó
+    /// a montarse no aparece en ningún sitio — y una ausencia no se ve. Desde
+    /// que un vecino se puede declarar sólo por id, ese caso es normal
+    /// durante unos segundos (se espera a que la SDN diga la dirección) y un
+    /// fallo si se queda: `waiting` no vacío de forma persistente significa
+    /// que la SDN no reconoce ese vecino, casi siempre porque el vecino no se
+    /// ha registrado o porque el id está mal escrito en el `node.yml`.
+    fn spawn_link_state_logger(&self, every: Duration) {
+        let links = Arc::clone(&self.links);
+        let cfg = Arc::clone(&self.cfg);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let snap = links.load();
+                // Ordenados: dos vueltas seguidas tienen que poder compararse
+                // de un vistazo.
+                let mut live: Vec<u32> = snap.keys().copied().collect();
+                live.sort_unstable();
+                let mut waiting: Vec<u32> = cfg
+                    .links
+                    .iter()
+                    .filter(|l| !snap.contains_key(&l.neighbor_id))
+                    .map(|l| l.neighbor_id)
+                    .collect();
+                waiting.sort_unstable();
+                info!(
+                    me = cfg.qkc_id,
+                    live = ?live,
+                    declared = cfg.links.len(),
+                    waiting = ?waiting,
+                    "qkc.links",
+                );
+            }
+        });
     }
 
     pub fn qkc_id(&self) -> u32 {
