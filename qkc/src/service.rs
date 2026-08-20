@@ -98,6 +98,20 @@ impl QkcService {
         // via the QKD table, possibly around a multi-hop QKD path).
         let mut direct_qkd = HashSet::with_capacity(cfg.links.len());
         for link in &cfg.links {
+            // Un vecino declarado solo por id espera a que la SDN diga dónde
+            // está. Montarlo ahora daría un `PeerOut` apuntando a "", que
+            // reintenta `invalid socket address` para siempre y deja el
+            // keystore esperando un secreto que no va a llegar. El anuncio lo
+            // lleva igual —solo viaja el id, nunca la dirección—, así que la
+            // arista se crea en la SDN y su respuesta trae el `peer_addr`;
+            // ahí lo levanta `apply_peers` con `add_link`.
+            if link.neighbor_peer_addr.is_empty() {
+                info!(
+                    peer = link.neighbor_id,
+                    "vecino declarado sin dirección: espero a que la SDN diga dónde está",
+                );
+                continue;
+            }
             let rt = Self::build_link(&cfg, link, &peer_out)?;
             direct.insert(link.neighbor_id);
             if link.link_type == LinkType::Qkd {
@@ -358,6 +372,42 @@ mod tests {
             alpha: None,
             distance_km: None,
         }
+    }
+
+    /// Un vecino declarado solo por id no se monta en el arranque: sin
+    /// dirección, el `PeerOut` apuntaría a "" y reintentaría `invalid socket
+    /// address` indefinidamente, con el keystore esperando un secreto que no
+    /// llega. Se queda a la espera de que la SDN diga dónde está — y no entra
+    /// en la tabla de enrutado, o se anunciaría como vecino directo un camino
+    /// que no existe.
+    #[tokio::test]
+    async fn a_neighbour_without_an_address_waits_for_the_sdn() {
+        let mut by_id = pqc_link(2);
+        by_id.neighbor_peer_addr = String::new();
+        let svc = QkcService::new(cfg_with(vec![by_id])).unwrap();
+
+        assert!(svc.link_to(2).is_none(), "no se monta sin dirección");
+        assert!(!svc.routing.is_direct_neighbor(2));
+
+        // Cuando la SDN contesta con el `peer_addr`, `apply_peers` lo levanta
+        // por la vía normal.
+        assert!(svc.add_link(pqc_link(2)).unwrap());
+        assert!(svc.link_to(2).is_some());
+        assert!(svc.routing.is_direct_neighbor(2));
+        assert_eq!(
+            svc.neighbor_peer_addr(2).as_deref(),
+            Some("127.0.0.1:20002"),
+            "con la dirección que dijo la SDN",
+        );
+    }
+
+    /// Los vecinos con dirección siguen montándose en el arranque: declararla
+    /// es lo que permite levantar el enlace sin depender de la SDN.
+    #[tokio::test]
+    async fn a_neighbour_with_an_address_is_still_built_at_boot() {
+        let svc = QkcService::new(cfg_with(vec![pqc_link(2)])).unwrap();
+        assert!(svc.link_to(2).is_some());
+        assert!(svc.routing.is_direct_neighbor(2));
     }
 
     #[tokio::test]

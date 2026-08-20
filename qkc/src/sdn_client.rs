@@ -240,11 +240,18 @@ impl SdnAnnouncer {
                 if self.svc.link_to(id).is_none() {
                     warn!(
                         peer = id,
-                        "la SDN anuncia un enlace QKD que no tengo configurado; hace falta su                          kme_url en el node.yml, la SDN no puede saberlo"
+                        "la SDN anuncia un enlace QKD que no tengo configurado; hace falta su \
+                         kme_url en el node.yml, la SDN no puede saberlo"
                     );
                 }
                 continue;
             }
+            // Aquí se levanta también el vecino que el `node.yml` declaró
+            // solo por id: sin dirección no se montó en el arranque, así que
+            // llega como ausente y se crea ahora con el `peer_addr` que dice
+            // la SDN — la única que lo sabe de todos, porque cada QKC anuncia
+            // el suyo. Un enlace que ya existe no se toca: rehacerlo tiraría
+            // su `SecretStore` y con él el material vivo.
             if self.svc.link_to(id).is_some() {
                 continue;
             }

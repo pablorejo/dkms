@@ -97,9 +97,19 @@ pub struct LinkConfig {
     /// ID del QKC vecino al otro lado del enlace.
     pub neighbor_id: u32,
 
-    /// `host:port` del listener TCP-peer de ese QKC. Necesario para AMBOS
-    /// tipos de enlace: los QKD relayean frames por él y los PQC además
-    /// hacen el handshake ML-KEM por este mismo canal.
+    /// `host:port` del listener TCP-peer de ese QKC: los QKD relayean frames
+    /// por él y los PQC además hacen el handshake ML-KEM por ese mismo canal.
+    ///
+    /// **Opcional en un enlace PQC cuando hay `sdn_url`.** La dirección no
+    /// viaja en el anuncio —la SDN ya la sabe, porque cada QKC anuncia la
+    /// suya— y vuelve en la lista de peers de la respuesta. Declarar solo
+    /// `neighbor_id` deja que diga la SDN dónde está el vecino, que es lo
+    /// único que ella conoce de todos; el enlace no se monta hasta que
+    /// conteste, así que sin SDN no hay enlace (ver [`QkcConfig::validate`]).
+    ///
+    /// Un enlace QKD sí la exige: la SDN no crea enlaces QKD —necesitan un
+    /// `quditto_url` que no puede inventar— así que nadie la rellenaría.
+    #[serde(default)]
     pub neighbor_peer_addr: String,
 
     /// Tipo de canal: `qkd` (default) o `pqc`. Ver [`LinkType`].
@@ -224,6 +234,15 @@ impl QkcConfig {
             }
             match link.link_type {
                 LinkType::Qkd => {
+                    // La SDN solo crea enlaces PQC, así que aquí no hay quien
+                    // rellene la dirección después.
+                    if link.neighbor_peer_addr.is_empty() {
+                        return Err(QkcError::BadRequest(format!(
+                            "QKD link to {} requires neighbor_peer_addr: the SDN only creates PQC \
+                             links, so nothing would fill it in",
+                            link.neighbor_id
+                        )));
+                    }
                     if link.quditto_url.is_none() {
                         return Err(QkcError::BadRequest(format!(
                             "QKD link to {} requires quditto_url",
@@ -232,6 +251,17 @@ impl QkcConfig {
                     }
                 }
                 LinkType::Pqc => {
+                    // Sin dirección, el único que puede decir dónde está el
+                    // vecino es la SDN. Sin ella el enlace no se montaría
+                    // nunca y el síntoma sería un QKC sano que no cifra con
+                    // nadie; mejor no arrancar.
+                    if link.neighbor_peer_addr.is_empty() && self.sdn_url.is_none() {
+                        return Err(QkcError::BadRequest(format!(
+                            "PQC link to {} has no neighbor_peer_addr and there is no sdn_url to \
+                             learn it from: declare one of the two",
+                            link.neighbor_id
+                        )));
+                    }
                     if link.quditto_url.is_some() {
                         return Err(QkcError::BadRequest(format!(
                             "PQC link to {} must not set quditto_url",
@@ -263,6 +293,53 @@ mod tests {
 
     fn parse(toml_str: &str) -> QkcConfig {
         toml::from_str(toml_str).expect("valid TOML")
+    }
+
+    /// Un vecino se puede declarar solo por id: la dirección la pone la SDN,
+    /// que es la única que la conoce de todos los QKC. Lo que el QKC sabe de
+    /// su topología es con QUIÉN tiene fibra, no dónde está el otro.
+    #[test]
+    fn a_pqc_neighbour_may_be_declared_by_id_alone() {
+        let cfg = parse(&format!(
+            "{BASE}sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\n"
+        ));
+        assert_eq!(cfg.links[0].neighbor_id, 2);
+        assert!(
+            cfg.links[0].neighbor_peer_addr.is_empty(),
+            "sin dirección hasta que conteste la SDN"
+        );
+        cfg.validate().expect("con sdn_url es válido");
+    }
+
+    /// ...pero sin SDN no hay quien la rellene, y el enlace no se montaría
+    /// nunca: un QKC aparentemente sano que no cifra con nadie. Mejor no
+    /// arrancar que dejarlo así.
+    #[test]
+    fn a_neighbour_by_id_alone_needs_an_sdn_to_resolve_it() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\n"
+        ));
+        let err = cfg
+            .validate()
+            .expect_err("sin sdn_url no se puede resolver");
+        assert!(
+            format!("{err}").contains("no sdn_url"),
+            "el error debe decir qué falta, no solo que falla: {err}"
+        );
+    }
+
+    /// La SDN no crea enlaces QKD —necesitan un `quditto_url` que no puede
+    /// inventar—, así que ahí la dirección sigue siendo obligatoria.
+    #[test]
+    fn a_qkd_neighbour_still_needs_its_address() {
+        let cfg = parse(&format!(
+            "{BASE}sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"qkd\"\n\
+             quditto_url = \"http://kme:20010\"\n"
+        ));
+        let err = cfg.validate().expect_err("un QKD sin dirección no vale");
+        assert!(format!("{err}").contains("neighbor_peer_addr"), "{err}");
     }
 
     #[test]
