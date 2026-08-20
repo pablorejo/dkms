@@ -617,6 +617,34 @@ impl Topology {
         }
         let key = orr.id.clone();
         let changed = self.orrs.get(&key) != Some(&orr);
+        // Si se ha movido de QKC, el de origen se quedó sin ORR y no puede
+        // seguir apuntando a este. `orr_by_qkc` es lo que `GetOrrPath` usa
+        // para montar el camino ORR-level, así que una entrada rancia manda
+        // el tráfico por un ORR que ya no cuelga de ahí. El camino manual
+        // (`update_orr`) ya lo limpiaba; este, por donde entran TODOS los
+        // anuncios, no.
+        if let Some(old) = self.orrs.get(&key).map(|o| o.qkc_id.clone()) {
+            if old != orr.qkc_id && self.orr_by_qkc.get(&old).map(String::as_str) == Some(&*key) {
+                self.orr_by_qkc.remove(&old);
+            }
+        }
+        // `orr_by_qkc` es 1:1 y se queda con el último. Que dos ORR cuelguen
+        // del mismo QKC no lo soporta el modelo, y falla en silencio: el
+        // desplazado deja de ser resoluble por su QKC, así que el material
+        // sale cifrado para el ORR equivocado. Medido el 2026-08-20 al
+        // re-anclar un ORR sobre un QKC ocupado — `recv_corrupt` al 100 % en
+        // todo lo que enviaba un DKMS, mientras lo que recibía estaba bien y
+        // la topología se veía perfecta.
+        if let Some(other) = self.orr_by_qkc.get(&orr.qkc_id) {
+            if other != &key {
+                warn!(
+                    qkc = %orr.qkc_id, displaced = %other, new = %key,
+                    "two ORRs on the same QKC: the index is 1:1 and keeps the last one. The \
+                     displaced ORR stops being resolvable by its QKC and its DKMS will get key \
+                     material encrypted for the wrong ORR — give each QKC its own ORR",
+                );
+            }
+        }
         self.orr_by_qkc.insert(orr.qkc_id.clone(), key.clone());
         self.orrs.insert(key, orr);
         changed
@@ -630,8 +658,31 @@ impl Topology {
         let qkc_id = orr.qkc_id.clone();
         let key = dkms.id.clone();
         let changed = self.dkms.get(&key) != Some(&dkms);
-        // First-write-wins on the dkms_by_qkc index — Python keeps the latest
-        // overwrite, we mirror that to stay 1:1.
+        // El índice va por el QKC del ORR del que cuelga, así que cambiar de
+        // ORR puede cambiar de QKC. Igual que en `upsert_orr`: el de origen se
+        // quedó sin DKMS y no puede seguir apuntándole.
+        let old_qkc = self
+            .dkms
+            .get(&key)
+            .map(|d| d.orr_id.clone())
+            .and_then(|orr_id| self.orrs.get(&orr_id).map(|o| o.qkc_id.clone()));
+        if let Some(old) = old_qkc {
+            if old != qkc_id && self.dkms_by_qkc.get(&old).map(String::as_str) == Some(&*key) {
+                self.dkms_by_qkc.remove(&old);
+            }
+        }
+        // El índice es 1:1 por QKC: si cuelgan varios DKMS del mismo, gana el
+        // último en anunciarse y el otro deja de ser resoluble por su QKC.
+        // Mismo fallo silencioso que en `upsert_orr`.
+        if let Some(other) = self.dkms_by_qkc.get(&qkc_id) {
+            if other != &key {
+                warn!(
+                    qkc = %qkc_id, displaced = %other, new = %key,
+                    "two DKMS resolve to the same QKC: the index is 1:1 and keeps the last one. \
+                     The displaced one stops being reachable through it",
+                );
+            }
+        }
         self.dkms_by_qkc.insert(qkc_id, key.clone());
         self.dkms.insert(key, dkms);
         changed
@@ -2058,6 +2109,73 @@ mod tests {
         // Los SAE del DKMS entran con él: sin esto la SDN no puede resolver
         // `sae -> DKMS` y el intercambio ETSI-014 entre nodos falla.
         assert_eq!(t.saes["sae_1"].dkms_id, "dkms-1");
+    }
+
+    /// Mover un ORR de QKC por anuncio tiene que dejar el índice inverso
+    /// limpio. `update_orr` —el camino manual— ya quitaba la entrada vieja;
+    /// `upsert_orr`, que es por donde entran todos los anuncios, no. El QKC
+    /// que se quedó sin ORR seguía figurando con el suyo, y ese índice es lo
+    /// que `GetOrrPath` usa para montar el camino ORR-level: la SDN mandaba
+    /// el tráfico por un ORR que ya no cuelga de ahí.
+    #[test]
+    fn re_anchoring_an_orr_clears_the_index_of_the_qkc_it_left() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        store.announce_orr(&OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "1".into(),
+        });
+        assert_eq!(store.load().orr_by_qkc.get("1").unwrap(), "orr_1");
+
+        let out = store.announce_orr(&OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "2".into(),
+        });
+        assert!(out.changed);
+        let t = store.load();
+        assert_eq!(t.orrs.get("orr_1").unwrap().qkc_id, "2");
+        assert_eq!(t.orr_by_qkc.get("2").map(String::as_str), Some("orr_1"));
+        assert!(
+            !t.orr_by_qkc.contains_key("1"),
+            "el qkc 1 se quedó sin ORR: no puede seguir apuntando al que se fue",
+        );
+    }
+
+    /// Lo mismo para el DKMS, cuyo índice va por el QKC del ORR del que
+    /// cuelga: mover el DKMS a un ORR de otro QKC dejaba el de origen
+    /// apuntándole.
+    #[test]
+    fn re_anchoring_a_dkms_clears_the_index_of_the_qkc_it_left() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        for (orr, qkc, port) in [("orr_1", "1", 20003), ("orr_2", "2", 20103)] {
+            store.announce_orr(&OrrAnnounce {
+                id: orr.into(),
+                host: dummy_host(201, port),
+                qkc_id: qkc.into(),
+            });
+        }
+        let dkms = |orr: &str| DkmsAnnounce {
+            id: "dkms-1".into(),
+            host: dummy_host(301, 20005),
+            peer_addr: Some("10.0.0.301:20006".into()),
+            orr_id: orr.into(),
+            saes: vec![],
+        };
+        store.announce_dkms(&dkms("orr_1"));
+        assert_eq!(store.load().dkms_by_qkc.get("1").unwrap(), "dkms-1");
+
+        store.announce_dkms(&dkms("orr_2"));
+        let t = store.load();
+        assert_eq!(t.dkms_by_qkc.get("2").map(String::as_str), Some("dkms-1"));
+        assert!(
+            !t.dkms_by_qkc.contains_key("1"),
+            "el qkc 1 se quedó sin DKMS: no puede seguir apuntándole",
+        );
     }
 
     #[test]
