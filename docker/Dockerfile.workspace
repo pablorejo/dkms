@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1.7
 #
+# NO SIRVE PARA EL DESPLIEGUE MULTI-HOST de docker/README.md. Estas imágenes
+# arrancan el binario pelado, sin `entrypoint.sh`/`render_config.py`, así que
+# no saben leer el `node.yml` que montan los compose de `docker/compose/` —
+# el qkc, además, muere al instante con "required arguments were not provided:
+# --config". Para desplegar, usa `docker/Dockerfile` (vía `make images`,
+# `scripts/deploy-images.sh` o `docker buildx bake`), que compila los cinco
+# binarios en la misma pasada compartida.
+#
 # Build all five DKMS runtime binaries (dkms, orr, qkc, sdn, quditto) from
 # the Cargo workspace in a single compile pass, then assemble one runtime
 # image per binary via independent `--target` stages.

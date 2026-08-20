@@ -15,7 +15,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 : "${TAG:=local}"
 : "${IMAGE_PREFIX:=pablopio}"
-: "${DOCKERFILE:=$REPO_ROOT/docker/Dockerfile.workspace}"
+# docker/Dockerfile es el contrato de imagen del despliegue multi-host: trae
+# entrypoint.sh + render_config.py, que convierten el node.yml montado en la
+# config nativa del binario. Dockerfile.workspace produce el binario pelado,
+# que ese despliegue no puede arrancar (el qkc muere con "required arguments
+# were not provided: --config"). Los cinco binarios se compilan igualmente de
+# una pasada, en la etapa `build` compartida.
+: "${DOCKERFILE:=$REPO_ROOT/docker/Dockerfile}"
 : "${PLATFORM:=linux/amd64}"
 : "${BUILDKIT_PROGRESS:=auto}"
 export BUILDKIT_PROGRESS DOCKER_BUILDKIT=1
@@ -50,7 +56,7 @@ for binary in "${BINARIES[@]}"; do
     docker build \
         --platform "$PLATFORM" \
         --file "$DOCKERFILE" \
-        --target "image-${binary}" \
+        --build-arg "MODULE=${binary}" \
         --tag "$image" \
         .
     echo

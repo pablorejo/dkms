@@ -42,25 +42,25 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
-# Map component → docker image name (without prefix), file, target, context.
+# Map component → docker image name (without prefix), file, build-arg, context.
 declare -A IMAGE_NAME=(
     [dkms]=dkms       [orr]=orr           [qkc]=qkc       [sdn]=sdn   [quditto]=quditto
 )
 
+# docker/Dockerfile, no Dockerfile.workspace: es el que trae entrypoint.sh +
+# render_config.py, sin los cuales el despliegue multi-host no puede arrancar
+# la imagen (monta un node.yml, no un TOML). Ver la nota en build-images.sh.
 declare -A IMAGE_FILE=(
-    [dkms]=docker/Dockerfile.workspace
-    [orr]=docker/Dockerfile.workspace
-    [qkc]=docker/Dockerfile.workspace
-    [sdn]=docker/Dockerfile.workspace
-    [quditto]=docker/Dockerfile.workspace
+    [dkms]=docker/Dockerfile
+    [orr]=docker/Dockerfile
+    [qkc]=docker/Dockerfile
+    [sdn]=docker/Dockerfile
+    [quditto]=docker/Dockerfile
 )
 
-declare -A IMAGE_TARGET=(
-    [dkms]=image-dkms
-    [orr]=image-orr
-    [qkc]=image-qkc
-    [sdn]=image-sdn
-    [quditto]=image-quditto
+# Un solo `runtime` parametrizado por MODULE, en vez de un target por binario.
+declare -A IMAGE_MODULE=(
+    [dkms]=dkms       [orr]=orr           [qkc]=qkc       [sdn]=sdn   [quditto]=quditto
 )
 
 declare -A IMAGE_CONTEXT=(
@@ -91,7 +91,7 @@ build_one() {
     local name="${IMAGE_NAME[$comp]:-}"
     local file="${IMAGE_FILE[$comp]:-}"
     local context="${IMAGE_CONTEXT[$comp]:-.}"
-    local target="${IMAGE_TARGET[$comp]:-}"
+    local module="${IMAGE_MODULE[$comp]:-}"
 
     if [[ -z "$name" || -z "$file" ]]; then
         echo "Error: unknown component '$comp'" >&2
@@ -103,7 +103,7 @@ build_one() {
     if [[ -n "${IMMUTABLE_TAG}" ]]; then
         args+=("--tag" "${IMAGE_PREFIX}/${name}:${IMMUTABLE_TAG}")
     fi
-    [[ -n "$target" ]] && args+=("--target" "$target")
+    [[ -n "$module" ]] && args+=("--build-arg" "MODULE=$module")
     args+=("$context")
 
     echo "──── build ${comp} → ${image} ────"
