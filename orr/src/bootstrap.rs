@@ -167,7 +167,35 @@ async fn bootstrap_peer(
         let mut backoff = Duration::from_millis(250);
         let max_backoff = Duration::from_secs(30);
         loop {
-            match attempt_establish(&identity, &suite, &pk, &local_orr_id, &peer_id, &addr).await {
+            // `has_bootstrap` es un check-then-act y no basta para excluir al
+            // otro camino que también hace encap: `trigger_passive_rebootstrap`.
+            // Si los dos corren a la vez, cada uno genera un shared_secret
+            // distinto, el peer se queda con el último que le llega y este
+            // lado con el suyo — y a partir de ahí todo lo que se cifre entre
+            // ellos sale ruido. Observado el 2026-08-02 al dar de alta un nodo
+            // en caliente: orr_4 guardó DOS bootstrap_secret de orr_1 con 28 ms
+            // de diferencia y el par 1↔4 quedó entregando el 100 % de las
+            // claves de transporte corruptas (lo cazó el `key_digest` del DKMS,
+            // que es lo único que hay ahí abajo mirando).
+            //
+            // El flag se toma por intento, no durante todo el bucle: así el
+            // camino pasivo —que además refresca la pubkey— puede intervenir
+            // entre reintentos si este handshake no consigue converger.
+            if peers.has_bootstrap(&peer_id) {
+                break;
+            }
+            if !peers.try_mark_rebootstrap_inflight(&peer_id) {
+                debug!(
+                    peer = %peer_id,
+                    "orr.bootstrap espera: otro establecimiento en vuelo para este par"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            let attempt =
+                attempt_establish(&identity, &suite, &pk, &local_orr_id, &peer_id, &addr).await;
+            peers.clear_rebootstrap_inflight(&peer_id);
+            match attempt {
                 Ok(secret) => {
                     // OBJ-011: guardar como bootstrap_secret (HMAC key),
                     // NO como master_secret.
