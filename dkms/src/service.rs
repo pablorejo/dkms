@@ -93,6 +93,50 @@ use crate::{
 /// que un SAE puede pedir típicamente (256 bits).
 const TRANSPORT_KEY_BYTES: usize = 32;
 
+// Límites ETSI-014 de este KME. Son a la vez lo que `/status` publica y lo que
+// `check_request_limits` exige: un solo sitio, para que no puedan divergir.
+const MAX_KEY_PER_REQUEST: u32 = 64;
+const MAX_KEY_SIZE_BITS: u32 = 4096;
+const MIN_KEY_SIZE_BITS: u32 = 64;
+const MAX_SAE_ID_COUNT: usize = 16;
+
+/// Comprueba una petición ETSI-014 contra los límites que este KME **anuncia**
+/// en `/status`.
+///
+/// Anunciarlos y no comprobarlos es peor que no anunciarlos: el SAE los lee,
+/// se fía y pide dentro de lo permitido, mientras el KME acepta cualquier
+/// cosa. Sin esta comprobación (verificado en el testbed el 2026-08-02),
+/// `number` era libre —una petición podía vaciar el buffer de golpe—, un
+/// `size` de 7 bits devolvía en silencio una clave de 8, distinta de la
+/// pedida y sin forma de que el SAE lo note, y un `size` disparatado acababa
+/// en un 500 en lugar de en un rechazo limpio.
+fn check_request_limits(body: &Etsi014KeyRequest, n_saes: usize) -> Result<()> {
+    if body.number > MAX_KEY_PER_REQUEST {
+        return Err(DkmsError::BadRequest(format!(
+            "number {} exceeds max_key_per_request {MAX_KEY_PER_REQUEST}",
+            body.number
+        )));
+    }
+    if !body.size.is_multiple_of(8) {
+        return Err(DkmsError::BadRequest(format!(
+            "size {} is not a multiple of 8 bits",
+            body.size
+        )));
+    }
+    if body.size < MIN_KEY_SIZE_BITS || body.size > MAX_KEY_SIZE_BITS {
+        return Err(DkmsError::BadRequest(format!(
+            "size {} outside [{MIN_KEY_SIZE_BITS}, {MAX_KEY_SIZE_BITS}] bits",
+            body.size
+        )));
+    }
+    if n_saes > MAX_SAE_ID_COUNT {
+        return Err(DkmsError::BadRequest(format!(
+            "{n_saes} destination SAEs exceeds max_SAE_ID_count {MAX_SAE_ID_COUNT}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct DkmsService {
     pub cfg: Arc<DkmsConfig>,
@@ -211,7 +255,7 @@ impl DkmsService {
     // ─── ETSI 014 ──────────────────────────────────────────────────────
 
     #[instrument(skip(self))]
-    pub async fn status_for(&self, _requester: &SaeId, slave: &SaeId) -> Result<Etsi014Status> {
+    pub async fn status_for(&self, requester: &SaeId, slave: &SaeId) -> Result<Etsi014Status> {
         let target_node = self
             .sae_binding
             .resolve(slave)
@@ -223,15 +267,18 @@ impl DkmsService {
         Ok(Etsi014Status {
             source_kme_id: self.cfg.node_id.clone(),
             target_kme_id: target_node.into_inner(),
-            master_sae_id: String::new(),
+            // El SAE que pregunta ES el maestro de esta consulta; su identidad
+            // viene del cert de cliente, así que ya la tenemos verificada.
+            // Devolverla vacía era una desviación de ETSI-014 sin motivo.
+            master_sae_id: requester.to_string(),
             slave_sae_id: slave.to_string(),
             key_size: 256,
             stored_key_count,
             max_key_count: self.cfg.buffer.capacity_per_peer as u64,
-            max_key_per_request: 64,
-            max_key_size: 4096,
-            min_key_size: 64,
-            max_sae_id_count: 16,
+            max_key_per_request: MAX_KEY_PER_REQUEST,
+            max_key_size: MAX_KEY_SIZE_BITS,
+            min_key_size: MIN_KEY_SIZE_BITS,
+            max_sae_id_count: MAX_SAE_ID_COUNT as u32,
             status_extension: None,
         })
     }
@@ -257,6 +304,10 @@ impl DkmsService {
             .collect();
         authorized.sort();
         authorized.dedup();
+
+        // Después del dedup: lo que limita `max_SAE_ID_count` es el número de
+        // destinos reales, no cuántas veces los repita el cliente.
+        check_request_limits(&body, authorized.len())?;
 
         // 2) Agrupar por DKMS destino (resolución await).
         let me = self.self_node();
@@ -1017,6 +1068,60 @@ mod tests {
             }),
             None,
         );
+    }
+
+    /// Los límites de `/status` tienen que rechazar, no recortar en silencio.
+    #[test]
+    fn request_limits_reject_what_status_says_is_too_much() {
+        let ok = Etsi014KeyRequest {
+            number: 1,
+            size: 256,
+            ..Default::default()
+        };
+        assert!(check_request_limits(&ok, 1).is_ok());
+        assert!(
+            check_request_limits(
+                &Etsi014KeyRequest {
+                    number: MAX_KEY_PER_REQUEST,
+                    ..ok.clone()
+                },
+                1
+            )
+            .is_ok(),
+            "el máximo anunciado es válido, no uno menos"
+        );
+
+        // number por encima de max_key_per_request: antes devolvía las 65.
+        assert!(check_request_limits(
+            &Etsi014KeyRequest {
+                number: MAX_KEY_PER_REQUEST + 1,
+                ..ok.clone()
+            },
+            1
+        )
+        .is_err());
+
+        // size no múltiplo de 8: antes redondeaba a 8 bits y devolvía 200.
+        assert!(check_request_limits(
+            &Etsi014KeyRequest {
+                size: 7,
+                ..ok.clone()
+            },
+            1
+        )
+        .is_err());
+
+        // fuera del rango anunciado: antes el extremo alto acababa en 500.
+        for size in [MIN_KEY_SIZE_BITS - 8, MAX_KEY_SIZE_BITS + 8, 100_000] {
+            assert!(
+                check_request_limits(&Etsi014KeyRequest { size, ..ok.clone() }, 1).is_err(),
+                "size {size} debería rechazarse"
+            );
+        }
+
+        // Y el recuento de destinos, que se mide tras deduplicar.
+        assert!(check_request_limits(&ok, MAX_SAE_ID_COUNT).is_ok());
+        assert!(check_request_limits(&ok, MAX_SAE_ID_COUNT + 1).is_err());
     }
 
     #[test]
