@@ -176,6 +176,28 @@ impl PqcHandshake {
     /// **o** cuando el peer se reconecta (ver [`Self::relink`]).
     pub fn spawn_rotation(self: &Arc<Self>) {
         if !self.is_initiator() {
+            // El respondedor no puede renegociar —solo el lex-menor manda
+            // INIT—, pero su lado DEC sí detecta cuando las ventanas se han
+            // separado. Sin esto la petición de resincronización se quedaría
+            // en un atómico que nadie lee y el operador no vería más que
+            // frames descartados. Si el enlace falla en los dos sentidos, el
+            // iniciador lo detectará por su cuenta y lo arreglará; si solo
+            // falla en este, hace falta intervención.
+            let me = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    let peer_epoch = me.store.resync_requested().await;
+                    warn!(
+                        me = me.my_id,
+                        peer = me.peer_id,
+                        peer_epoch,
+                        mia = ?(me.store.lowest(), me.store.highest()),
+                        "qkc.pqc: el peer cifra con épocas que no tengo y este extremo es el \
+                         respondedor, así que no puede renegociar. Si el iniciador no lo \
+                         detecta también por su lado, el enlace no se recupera solo",
+                    );
+                }
+            });
             return;
         }
         // Pedimos la señal ANTES del primer INIT: así el slot existe y no
@@ -195,10 +217,12 @@ impl PqcHandshake {
                 // decapsularía con la sk equivocada.
                 if me.clock_disabled() {
                     // Sin rotación configurada seguimos atendiendo
-                    // reconexiones: es lo que resucita un enlace cuyo
-                    // respondedor se reinició.
-                    reconnect.notified().await;
-                    me.relink().await;
+                    // reconexiones y peticiones de resincronización: son lo
+                    // que resucita un enlace cuyo respondedor se reinició.
+                    tokio::select! {
+                        _ = reconnect.notified() => me.relink(0).await,
+                        peer_epoch = me.store.resync_requested() => me.relink(peer_epoch).await,
+                    }
                     continue;
                 }
                 tokio::select! {
@@ -206,7 +230,12 @@ impl PqcHandshake {
                         let next = me.store.highest().unwrap_or(0).saturating_add(1);
                         me.establish(next).await;
                     }
-                    _ = reconnect.notified() => me.relink().await,
+                    _ = reconnect.notified() => me.relink(0).await,
+                    // El lado DEC ha visto al peer cifrar con épocas que no
+                    // tenemos. Es la única forma de enterarse: las ventanas de
+                    // los dos extremos pueden separarse tras un reinicio y
+                    // nadie lo nota hasta que llega un frame indescifrable.
+                    peer_epoch = me.store.resync_requested() => me.relink(peer_epoch).await,
                 }
             }
         });
@@ -229,7 +258,14 @@ impl PqcHandshake {
     /// indetectable) y podamos las viejas, que ya no tiene nadie enfrente.
     /// Una reconexión por un corte de red sin reinicio también dispara
     /// esto; cuesta tres ML-KEM y no rompe nada.
-    async fn relink(&self) {
+    ///
+    /// `peer_epoch` es la época más alta que el peer ha usado y que nosotros
+    /// no tenemos (0 si no se sabe). El bloque nuevo se negocia **por encima
+    /// de las dos ventanas**: si nos quedáramos en la nuestra, el peer —cuya
+    /// ventana está más alta— seguiría cifrando con las suyas y el enlace
+    /// no convergería nunca. Es exactamente lo que se vio en el testbed el
+    /// 2026-08-03: `dec_misses == dec_lookups` de forma permanente.
+    async fn relink(&self, peer_epoch: u32) {
         let now = Instant::now();
         {
             let mut last = self.last_relink.lock();
@@ -244,12 +280,14 @@ impl PqcHandshake {
             }
             *last = Some(now);
         }
-        let base = self.store.highest().map(|h| h + 1).unwrap_or(0);
+        let mine = self.store.highest().map(|h| h + 1).unwrap_or(0);
+        let base = mine.max(peer_epoch.saturating_add(1));
         warn!(
             me = self.my_id,
             peer = self.peer_id,
             base,
-            "qkc.pqc.relink: el peer se reconectó (¿reinicio?); renegocio el enlace",
+            peer_epoch,
+            "qkc.pqc.relink: renegocio el enlace (reconexión del peer o épocas suyas que no tengo)",
         );
         for epoch in base..=base.saturating_add(self.lookahead) {
             self.establish(epoch).await;

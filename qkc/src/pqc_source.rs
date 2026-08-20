@@ -32,7 +32,7 @@
 //! (`b"orr.onion.v1"`) para que las dos derivaciones nunca coincidan.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -116,6 +116,19 @@ pub struct SecretStore {
     /// Nº máximo de épocas vivas (ventana deslizante).
     keep: usize,
     notify: Notify,
+    /// Época más alta que el peer ha usado y que este extremo **no tiene**,
+    /// o 0 si no hay nada pendiente. La levanta el lado DEC al descartar
+    /// claves indescifrables y la consume el bucle de rotación del
+    /// iniciador, que es el único que puede renegociar.
+    ///
+    /// Existe porque las dos ventanas de épocas pueden separarse sin que
+    /// ninguno de los dos lo sepa: cada extremo calcula su época activa a
+    /// partir de SU propio store, y un reinicio deja al que arranca con una
+    /// ventana baja y al otro con la suya alta. El que arranca no puede
+    /// adivinar la del peer — pero cada frame que recibe se la dice, en los
+    /// 4 primeros bytes del `key_id`.
+    resync_epoch: AtomicU32,
+    resync: Notify,
 }
 
 impl SecretStore {
@@ -136,7 +149,31 @@ impl SecretStore {
             inner: Mutex::new(BTreeMap::new()),
             keep: lookahead as usize + 1 + span,
             notify: Notify::new(),
+            resync_epoch: AtomicU32::new(0),
+            resync: Notify::new(),
         })
+    }
+
+    /// Avisa de que el peer está cifrando con `epoch`, que aquí no existe.
+    ///
+    /// Se queda con la más alta vista: el bloque que negocie el iniciador
+    /// tiene que quedar por encima de la ventana del peer, o este seguirá
+    /// usando la suya y no converge.
+    pub fn request_resync(&self, epoch: u32) {
+        self.resync_epoch.fetch_max(epoch, Ordering::Relaxed);
+        self.resync.notify_one();
+    }
+
+    /// Espera a que alguien pida resincronizar y devuelve la época más alta
+    /// del peer que no pudimos descifrar.
+    pub async fn resync_requested(&self) -> u32 {
+        loop {
+            let pending = self.resync_epoch.swap(0, Ordering::Relaxed);
+            if pending > 0 {
+                return pending;
+            }
+            self.resync.notified().await;
+        }
     }
 
     /// Inserta el secreto de una época (idempotente), evicta+zeroiza las más
@@ -441,6 +478,17 @@ impl KeySource for PqcKeySource {
                  que este extremo no tiene; suele ser que uno de los dos se reinició)",
             );
         }
+        // Detectarlo y limitarse a contarlo dejaba el enlace tirando el 100 %
+        // de lo que le llegaba para siempre (testbed 2026-08-03: un enlace con
+        // dec_misses == dec_lookups que no se recuperaba solo). Se pide una
+        // resincronización con la época MÁS ALTA que el peer haya usado: el
+        // iniciador negociará un bloque por encima de ella y los dos extremos
+        // vuelven a la misma ventana. `relink` ya está rate-limitado, así que
+        // una tormenta de frames indescifrables no dispara una tormenta de
+        // handshakes.
+        if let Some(&peer_epoch) = dead.iter().max() {
+            self.store.request_resync(peer_epoch);
+        }
         Ok(out)
     }
 }
@@ -684,6 +732,48 @@ mod tests {
         assert!(
             started.elapsed() < SECRET_WAIT * 2,
             "se esperó una vez por época, no una por clave",
+        );
+    }
+
+    /// El lado DEC no puede limitarse a contar los frames indescifrables: si
+    /// las ventanas de los dos extremos se separan (un reinicio deja al que
+    /// arranca abajo y al otro arriba), el enlace tira el 100 % de lo que
+    /// recibe y no se recupera solo. Pedir resincronización con la época MÁS
+    /// ALTA vista es lo que permite al iniciador negociar por encima de las
+    /// dos ventanas.
+    #[tokio::test]
+    async fn an_unknown_peer_epoch_asks_for_a_resync_with_that_epoch() {
+        let store = SecretStore::new(0, 1000);
+        store.insert(5, fresh_secret(5));
+        let src = PqcKeySource::new(256, Arc::clone(&store), 0, None);
+
+        // El peer cifra con 9 y con 11: ninguna existe aquí.
+        let ids = vec![make_key_id(9), make_key_id(11)];
+        let out = src.dec_keys(&ids).await.unwrap();
+        assert!(out.is_empty(), "no se puede derivar ninguna");
+
+        let asked = tokio::time::timeout(Duration::from_secs(1), store.resync_requested())
+            .await
+            .expect("debe haber una petición pendiente");
+        assert_eq!(asked, 11, "se pide con la época más alta, no la primera");
+    }
+
+    /// Sin frames indescifrables no se pide nada: el bucle de rotación no
+    /// debe despertarse ni renegociar porque sí.
+    #[tokio::test]
+    async fn a_decryptable_batch_asks_for_nothing() {
+        let store = SecretStore::new(0, 1000);
+        store.insert(5, fresh_secret(5));
+        let src = PqcKeySource::new(256, Arc::clone(&store), 0, None);
+
+        let out = src.dec_keys(&[make_key_id(5)]).await.unwrap();
+        assert_eq!(out.len(), 1);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), store.resync_requested())
+                .await
+                .is_err(),
+            "no debería haber petición de resincronización",
         );
     }
 }
