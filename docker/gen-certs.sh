@@ -56,7 +56,11 @@ else
   echo "[gen-certs] reutilizando CA existente en $OUT"
 fi
 
-SAN="URI:dkms://${NODE_ID},IP:${IP},DNS:localhost"
+# IP:127.0.0.1 además de DNS:localhost: un SAE co-locado con su DKMS apunta a
+# `https://127.0.0.1:20005`, y una IP literal en la URL solo casa contra un SAN
+# de tipo iPAddress — el DNS:localhost no la cubre. Sin esto el handshake muere
+# con "no alternative certificate subject name matches target host name".
+SAN="URI:dkms://${NODE_ID},IP:${IP},IP:127.0.0.1,DNS:localhost"
 echo "[gen-certs] emitiendo cert de $NODE_ID (SAN: $SAN)"
 openssl req -newkey rsa:2048 -nodes -keyout "$OUT/${NODE_ID}.key" \
   -out "$OUT/${NODE_ID}.csr" -subj "/CN=${NODE_ID}"
