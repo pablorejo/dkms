@@ -159,8 +159,28 @@ async fn run_session(
         }
     });
 
+    // Un `JoinHandle` solo se puede sondear hasta que devuelve `Ready`; a
+    // partir de ahí, volver a tocarlo es un panic de tokio ("JoinHandle polled
+    // after completion") y, con `panic = "abort"` en el perfil release, la
+    // muerte del proceso. Si el bucle sale por la rama del reader, el `select!`
+    // YA lo consumió: el `await` de limpieza de después sería ese segundo
+    // sondeo. `is_finished()` no protege — precisamente devuelve `true` en ese
+    // caso, y el `await` venía después. Observado en el testbed el 2026-08-02:
+    // el ORR de un nodo acumuló 10 reinicios así, cada uno rehaciendo el
+    // bootstrap con todos sus peers.
+    //
+    // `biased` va de la mano: fija que, con el reader ya terminado y un frame
+    // en la cola, se salga por la rama del reader en vez de a cara o cruz. Sin
+    // ese orden, `reader_done` dependería de qué rama eligiera el sorteo.
+    let mut reader_done = false;
     loop {
         tokio::select! {
+            biased;
+            _ = &mut read_task => {
+                // Reader terminó (EOF, error). Salir para reconectar.
+                reader_done = true;
+                break;
+            }
             outgoing = send_rx.recv() => {
                 let Some(frame) = outgoing else { break; };
                 if let Err(e) = write_frame(&mut write_half, &frame).await {
@@ -168,15 +188,51 @@ async fn run_session(
                     break;
                 }
             }
-            _ = &mut read_task => {
-                // Reader terminó (EOF, error). Salir para reconectar.
-                break;
-            }
         }
     }
 
-    if !read_task.is_finished() {
+    if !reader_done {
         read_task.abort();
+        let _ = read_task.await;
     }
-    let _ = read_task.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// El QKC cierra la conexión: `run_session` debe volver limpiamente.
+    ///
+    /// Regresión de un panic real (testbed 2026-08-02): al salir del bucle por
+    /// la rama del reader, el `select!` ya había consumido su `JoinHandle`, y
+    /// el `await` de limpieza posterior lo sondeaba una segunda vez —
+    /// "JoinHandle polled after completion". En release, con
+    /// `panic = "abort"`, eso mata el ORR entero; aquí el panic se propaga y
+    /// tumba el test, que es justo lo que se quiere.
+    #[tokio::test]
+    async fn session_returns_cleanly_when_the_qkc_hangs_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // EOF inmediato: el reader del ORR termina enseguida.
+            sock.shutdown().await.ok();
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        // Un frame esperando en la cola: es la situación en la que ambas ramas
+        // del `select!` están listas a la vez.
+        tx.send(Frame::empty(FRAME_LOCAL_DELIVER))
+            .await
+            .expect("encolar");
+
+        tokio::time::timeout(Duration::from_secs(5), run_session(stream, &mut rx, None))
+            .await
+            .expect("run_session no debe colgarse");
+    }
 }
