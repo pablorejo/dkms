@@ -1,0 +1,12 @@
+# Nodo D — ORR. SIN `peers` ni `peer_grpc_addrs`.
+#
+# `Topology::orr_peers` devuelve TODOS los demás ORR (el transporte ORR es E2E,
+# max_hops = 1), así que orr_4 debe recibir orr_1, orr_2 y orr_3 en la
+# respuesta al anuncio y arrancar su bootstrap con los tres sin que nadie se
+# los escriba aquí.
+orr_id: "orr_4"
+qkc_id: 4
+qkc_addr: "127.0.0.1:20001"
+sdn_url: "http://192.168.50.201:19000"
+advertise_ip: "__ADVERTISE_IP__"
+sdn_announce_secs: 15

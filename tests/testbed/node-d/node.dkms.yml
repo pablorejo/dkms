@@ -1,0 +1,14 @@
+# Nodo D — DKMS. SIN `peers`.
+#
+# `Topology::dkms_peers` devuelve todos los demás DKMS con el ORR por el que se
+# les llega, así que dkms-4 debe aprender dkms-1/2/3 por la SDN. `sae_bindings`
+# sí se queda: de ahí saca el DKMS los SAE que anuncia (ver
+# southbound/sdn_announce.rs), y sin él la SDN no sabría que sae_4 existe.
+node_id: "dkms-4"
+advertise_ip: "__ADVERTISE_IP__"
+orr_addr: "127.0.0.1:20003"
+sdn_endpoint: "http://192.168.50.201:19000"
+orr_id: "orr_4"
+sdn_announce_secs: 15
+sae_bindings:
+  sae_4: "dkms-4"

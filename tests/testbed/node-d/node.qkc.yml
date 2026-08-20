@@ -1,0 +1,18 @@
+# Nodo D — QKC. Declara UN SOLO enlace, hacia el QKC 3 (node-c).
+#
+# Es deliberado: el resto de la relación con la red tiene que llegarle a D
+# —y a los demás— por la respuesta al anuncio de la SDN. Si aquí se listaran
+# los tres vecinos, el test pasaría por el suelo local y no probaría nada del
+# auto-peering, que es justo lo que se quiere verificar.
+#
+# El par de este enlace, node-c, NO tiene al 4 en su node.yml: se lo tiene que
+# decir la SDN ("enlace nuevo, dicho por la SDN") y además registrarlo en su
+# tabla de forwarding, o el enlace existe y no se enruta por él.
+qkc_id: 4
+sdn_url: "192.168.50.201"
+advertise_ip: "__ADVERTISE_IP__"
+sdn_announce_secs: 15
+links:
+  - neighbor_id: 3
+    neighbor_addr: "192.168.50.204"
+    type: pqc

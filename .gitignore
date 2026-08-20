@@ -52,6 +52,7 @@ node_modules/
 
 # Personal roadmap / scratch notes (local only)
 tareas.md
+problemas_escalado.md
 
 # Plots and raw metrics from local test runs (regeneradas en cada sesión)
 tests/plots/
@@ -80,3 +81,5 @@ docs/Paper_congreso/
 .nothing.md
 .orr_qkc_quidtto.md
 .results.md
+# Material TLS del testbed: se genera con tests/testbed/provision_certs.sh y
+# vive fuera del repo (~/.dkms-testbed). Nunca commitear claves privadas.
