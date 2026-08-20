@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use tracing::info;
 
 use crate::config::{PeerCfg, PeerTransport};
@@ -220,5 +221,94 @@ mod tests {
         assert!(r.apply_from_sdn(&[from_sdn("dkms-2", "orr_2", "10.0.0.2:20006")]));
         assert!(r.get("dkms-3").is_none());
         assert_eq!(r.orr_map().len(), 1);
+    }
+}
+
+/// Con qué **ejecución** de cada peer estamos hablando.
+///
+/// Los buffers del DKMS son sólo RAM, así que un peer que se reinicia vuelve
+/// sin nada, y nuestra copia del material que compartíamos con él queda
+/// inservible: `buffer_enc[peer]` aquí es el mismo material que
+/// `buffer_dec[yo]` allí. Cada `DKMS_BUFFER` lleva la encarnación del
+/// emisor ([`crate::southbound::orr::HDR_INCARNATION`]), y cuando cambia es
+/// que se reinició.
+///
+/// Se mira sobre el tráfico de relleno del propio peer y no sobre los ACK: un
+/// DKMS que arranca tiene el ENC vacío, así que emite enseguida, mientras que
+/// los ACK sólo llegan si nosotros emitimos — y si estamos parados en el tope
+/// no emitimos, que es exactamente la situación de la que hay que salir.
+#[derive(Debug, Default)]
+pub struct PeerIncarnations {
+    seen: DashMap<String, String>,
+}
+
+impl PeerIncarnations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Anota la encarnación que acabamos de oír de `peer`.
+    ///
+    /// Devuelve `Some(anterior)` **sólo** si el peer se ha reiniciado. La
+    /// primera vez que se le oye no lo es: es que acabamos de arrancar
+    /// nosotros, y tirar el buffer ahí sería tirar material bueno en cada
+    /// arranque.
+    pub fn note(&self, peer: &str, incarnation: &str) -> Option<String> {
+        let previous = self
+            .seen
+            .insert(peer.to_string(), incarnation.to_string())?;
+        (previous != incarnation).then_some(previous)
+    }
+}
+
+#[cfg(test)]
+mod incarnation_tests {
+    use super::PeerIncarnations;
+
+    #[test]
+    fn the_first_sighting_of_a_peer_is_not_a_restart() {
+        let inc = PeerIncarnations::new();
+        assert_eq!(inc.note("dkms-2", "aaaa"), None, "acabamos de arrancar");
+    }
+
+    #[test]
+    fn the_same_incarnation_is_not_a_restart() {
+        let inc = PeerIncarnations::new();
+        inc.note("dkms-2", "aaaa");
+        for _ in 0..5 {
+            assert_eq!(
+                inc.note("dkms-2", "aaaa"),
+                None,
+                "cada clave que llega no puede tirar el buffer",
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_incarnation_reports_the_one_it_replaces() {
+        let inc = PeerIncarnations::new();
+        inc.note("dkms-2", "aaaa");
+        assert_eq!(inc.note("dkms-2", "bbbb"), Some("aaaa".to_string()));
+        // Y una sola vez: el resto del relleno no vuelve a tirar nada.
+        assert_eq!(inc.note("dkms-2", "bbbb"), None);
+    }
+
+    #[test]
+    fn peers_are_tracked_independently() {
+        let inc = PeerIncarnations::new();
+        inc.note("dkms-2", "aaaa");
+        inc.note("dkms-3", "cccc");
+        assert_eq!(inc.note("dkms-2", "bbbb"), Some("aaaa".to_string()));
+        assert_eq!(inc.note("dkms-3", "cccc"), None, "el otro no se ha movido");
+    }
+
+    /// Un peer que la SDN retira y devuelve NO se olvida: sus buffers siguen
+    /// aquí, así que su vuelta con otra encarnación tiene que seguir tirando
+    /// el material viejo. Olvidarle sería justo saltarse esa limpieza.
+    #[test]
+    fn a_peer_that_leaves_and_returns_is_still_a_restart() {
+        let inc = PeerIncarnations::new();
+        inc.note("dkms-2", "aaaa");
+        assert_eq!(inc.note("dkms-2", "bbbb"), Some("aaaa".to_string()));
     }
 }

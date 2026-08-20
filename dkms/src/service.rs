@@ -74,12 +74,13 @@ use crate::{
     demand_tracker::{DemandTracker, SharedDemandTracker},
     error::{DkmsError, Result},
     peer_client::PeerHttpClient,
+    peers::PeerIncarnations,
     peers::PeerRegistry,
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
-            HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS,
+            HDR_MSG_TYPE, HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, QkcClient, SdnClient,
     },
@@ -193,6 +194,11 @@ pub struct DkmsService {
     /// the Generator's demand loop. Used by the MCMCF-λ solver as
     /// `δ_k` (drain rate per commodity).
     pub demand_tracker: SharedDemandTracker,
+
+    /// Última ejecución conocida de cada peer. Ver
+    /// [`crate::peers::PeerIncarnations`] y
+    /// [`DkmsService::forget_material_of_previous_incarnation`].
+    peer_incarnations: Arc<PeerIncarnations>,
 }
 
 impl DkmsService {
@@ -211,6 +217,7 @@ impl DkmsService {
         peer_client: Option<Arc<PeerHttpClient>>,
     ) -> Self {
         Self {
+            peer_incarnations: Arc::new(PeerIncarnations::new()),
             cfg,
             metrics,
             pool,
@@ -643,6 +650,52 @@ impl DkmsService {
 
     // ─── Helpers internos ──────────────────────────────────────────────
 
+    /// Registra la ejecución del peer y, si ha cambiado, olvida el material
+    /// que compartíamos con la anterior.
+    ///
+    /// El reinicio de un DKMS lo dejaba sin recibir nada de sus peers hasta
+    /// que un SAE pidiera claves y el rechazo delatara el desfase
+    /// (`resync_transport_buffer_if_stale`). Sin demanda no había rechazo:
+    /// medido el 2026-08-20, un nodo reiniciado emitía con normalidad y se
+    /// quedaba con `dec=0 recv=0` contra todos sus peers indefinidamente,
+    /// mientras sus `buffer_enc` seguían a tope de claves cuya mitad DEC ya
+    /// no existía. El detector es su propio tráfico de relleno: un DKMS que
+    /// arranca tiene el ENC vacío, así que emite enseguida, y cada
+    /// `DKMS_BUFFER` lleva su encarnación.
+    ///
+    /// Se tiran las tres cosas que quedan colgando de la ejecución anterior:
+    /// nuestro `buffer_enc` (su `buffer_dec` ya no las tiene), nuestro
+    /// `buffer_dec` (su `buffer_enc` tampoco) y lo pendiente de ACK, que
+    /// cuenta contra el tope de emisión y retrasaría el relleno un TTL
+    /// entero.
+    fn note_peer_incarnation(&self, peer: &str, incarnation: &str) {
+        if let Some(previous) = self.peer_incarnations.note(peer, incarnation) {
+            self.forget_material_of_previous_incarnation(peer, &previous, incarnation);
+        }
+    }
+
+    fn forget_material_of_previous_incarnation(&self, peer: &str, previous: &str, current: &str) {
+        let buf = self.pool.for_peer(peer);
+        let enc = buf.enc_clear();
+        let dec = buf.dec.len();
+        buf.dec.clear();
+        let pending = self
+            .generator
+            .as_ref()
+            .map(|g| g.ack_pending.drop_peer(peer))
+            .unwrap_or(0);
+        warn!(
+            peer,
+            previous,
+            current,
+            enc_discarded = enc,
+            dec_discarded = dec,
+            ack_pending_discarded = pending,
+            "el peer se ha reiniciado: olvido el material compartido con su ejecución anterior \
+             para que el generador vuelva a llenarle el buffer",
+        );
+    }
+
     /// Si el peer rechazó el envío porque no reconoce la clave de transporte,
     /// nuestro `buffer_enc[peer]` está desincronizado del suyo: tira el
     /// nuestro para que el generador lo rehaga.
@@ -828,6 +881,11 @@ impl DkmsService {
             })?
             .clone();
         let ack_endpoint = app.get(HDR_ACK_ENDPOINT).cloned();
+
+        // Antes de guardar nada: ¿sigue siendo la misma ejecución del peer?
+        if let Some(inc) = app.get(HDR_INCARNATION) {
+            self.note_peer_incarnation(&source_dkms, inc);
+        }
 
         let bits = app
             .get(HDR_KEY_SIZE_BITS)

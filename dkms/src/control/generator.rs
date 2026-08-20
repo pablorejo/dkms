@@ -41,8 +41,8 @@ use crate::{
     peers::PeerRegistry,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
-            HDR_REQUEST_ID, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS,
+            HDR_MSG_TYPE, HDR_REQUEST_ID, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, SdnHttpClient,
     },
@@ -781,6 +781,14 @@ impl Generator {
                 .to_string(),
         );
         header.insert(HDR_REQUEST_ID.into(), format!("gen-{key_id_str}"));
+        // Con qué ejecución del proceso está hablando el peer. Si no coincide
+        // con la que recuerda, sabe que nos reiniciamos y que su copia del
+        // material compartido ya no vale — sin tener que gastar una clave y
+        // que le rebotemos.
+        header.insert(
+            HDR_INCARNATION.into(),
+            crate::southbound::orr::incarnation().into(),
+        );
         if let Some(ep) = &self.ack_endpoint {
             header.insert(HDR_ACK_ENDPOINT.into(), ep.clone());
         }

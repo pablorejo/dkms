@@ -87,6 +87,26 @@ pub const HDR_FLOW_ID: &str = "flow_id";
 /// Unix milliseconds de emisión.
 pub const HDR_TIMESTAMP_MS: &str = "timestamp_ms";
 
+/// Identificador de **esta ejecución** del DKMS emisor. Cambia en cada
+/// arranque y con nada más.
+///
+/// Es lo que permite a un peer enterarse de que nos hemos reiniciado sin
+/// tener que fallar primero. `buffer_enc[peer]` aquí y `buffer_dec[yo]` allí
+/// son dos copias del mismo material, y los buffers son sólo RAM: al
+/// reiniciar perdemos la nuestra y la suya queda inservible. Ver
+/// [`crate::state::pool::PeerBuffers::enc_clear`].
+pub const HDR_INCARNATION: &str = "incarnation";
+
+/// Identificador aleatorio de esta ejecución del proceso, en hexadecimal.
+///
+/// Aleatorio y no un reloj: dos arranques dentro del mismo segundo, o un
+/// reloj que va hacia atrás, darían el mismo valor y el peer no vería el
+/// reinicio — precisamente el caso que esto tiene que cazar.
+pub fn incarnation() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| format!("{:016x}", rand::random::<u64>()))
+}
+
 /// Calcula el valor de [`HDR_KEY_DIGEST`] para una clave.
 pub fn key_digest(key_id: &str, bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};

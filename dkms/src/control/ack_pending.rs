@@ -111,6 +111,21 @@ impl AckPendingStore {
     }
 
     /// Devuelve cuántas entradas pendientes hay para un peer concreto.
+    /// Tira todo lo pendiente de ACK de `peer` y devuelve cuánto era.
+    ///
+    /// Para cuando el peer se reinicia: esas claves ya viajaron, y quien
+    /// tenía que acusarlas recibo ya no existe. Esperar a que expiren cuenta
+    /// contra el tope de emisión (`enc + pending >= capacity`), así que sin
+    /// esto el generador seguiría parado un TTL entero después de saber que
+    /// hay que rellenar.
+    pub fn drop_peer(&self, peer: &str) -> usize {
+        self.inner
+            .lock()
+            .remove(peer)
+            .map(|entries| entries.len())
+            .unwrap_or(0)
+    }
+
     pub fn pending_count(&self, peer: &str) -> usize {
         self.inner.lock().get(peer).map(|m| m.len()).unwrap_or(0)
     }
@@ -248,5 +263,35 @@ mod tests {
         assert_eq!(n, 1);
         assert!(store.take("dkms-22", &id("dead")).is_none());
         assert!(store.take("dkms-22", &id("alive")).is_some());
+    }
+
+    /// Un peer que se reinicia deja pendientes ACK que ya nadie va a mandar.
+    /// Cuentan contra el tope de emisión, así que hay que soltarlos al
+    /// enterarse y no esperar a que expiren.
+    #[test]
+    fn dropping_a_peer_releases_everything_pending_for_it() {
+        let store = AckPendingStore::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for k in ["k1", "k2", "k3"] {
+            store.insert(
+                "dkms-2",
+                KeyId::new(k),
+                AckPendingEntry::new(vec![0u8; 32], deadline, KeyGrade::Pqc),
+            );
+        }
+        store.insert(
+            "dkms-3",
+            KeyId::new("otra"),
+            AckPendingEntry::new(vec![0u8; 32], deadline, KeyGrade::Pqc),
+        );
+
+        assert_eq!(store.drop_peer("dkms-2"), 3);
+        assert_eq!(store.pending_count("dkms-2"), 0);
+        assert_eq!(
+            store.pending_count("dkms-3"),
+            1,
+            "los demás peers no se tocan",
+        );
+        assert_eq!(store.drop_peer("dkms-2"), 0, "idempotente");
     }
 }
