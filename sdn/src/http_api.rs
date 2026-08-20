@@ -321,6 +321,7 @@ async fn announce_qkc(
         info!(
             qkc = %out.qkc_id,
             added = ?out.edges_added,
+            removed = ?out.edges_removed,
             pending = ?out.edges_pending,
             "qkc registered",
         );

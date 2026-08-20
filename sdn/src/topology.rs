@@ -10,7 +10,7 @@
 //! current snapshot, mutate, and atomically swap it in.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -138,6 +138,10 @@ pub struct QkcAnnounceOutcome {
     /// Neighbours whose edge already exists with *different* metadata. The
     /// existing value is kept — see `register_qkc` for why.
     pub edges_conflict: Vec<String>,
+    /// Vecinos cuya arista se ha retirado porque este anuncio dejó de
+    /// declararla y el otro extremo tampoco la declara.
+    #[serde(default)]
+    pub edges_removed: Vec<String>,
     /// Con quién debe levantar enlace, según el grafo. Incluye los que este
     /// QKC no declaró: es lo que permite que un nodo nuevo aparezca sin
     /// reconfigurar a los que ya estaban.
@@ -345,6 +349,27 @@ pub struct Topology {
     pub graph: HashMap<String, HashSet<String>>,
     /// Physical metadata, keyed by sorted (qkc_a, qkc_b).
     pub edges: HashMap<EdgeKey, EdgeMeta>,
+
+    /// Qué enlaces **declara** cada QKC, por declarante y vecino. No es el
+    /// grafo: es lo que cada institución dice de sí misma, y el grafo se
+    /// deriva de aquí.
+    ///
+    /// Existe para que un anuncio pueda *retirar* un enlace, no solo añadirlo.
+    /// Sin esta memoria `announce_qkc` no distingue "ya no tengo fibra con
+    /// aquel" de "nunca hablé de aquel", así que una arista solo desaparecía
+    /// al caducar un nodo entero: recablear era imposible y la SDN llegaba a
+    /// rehacerle al QKC el enlace que el operador acababa de quitarle.
+    ///
+    /// La arista (a,b) existe **si y solo si** `a` declara `b` **o** `b`
+    /// declara `a`. Con un extremo basta, y es deliberado por los dos lados:
+    /// el arranque de uno no puede borrar lo que declaró el otro, y quien
+    /// retira su enlace no depende de que el vecino lo retire también.
+    ///
+    /// Se guarda lo que declara un QKC aunque el vecino no exista todavía —
+    /// eso es la arista "pendiente"— y se conserva si el vecino se cae: sigue
+    /// siendo verdad que este extremo tiene fibra hacia allí, así que cuando
+    /// el otro vuelva la arista se rehace sola.
+    pub declared: HashMap<String, BTreeMap<String, EdgeMeta>>,
 
     /// Monotonically increasing snapshot version. Bumped on every mutation.
     pub version: i64,
@@ -627,6 +652,139 @@ impl Topology {
         self.saes.remove(sae_id).is_some()
     }
 
+    /// Sustituye **en bloque** lo que `qkc_id` declara y deja el grafo como
+    /// digan las declaraciones de todos.
+    ///
+    /// En bloque, no incremental: el anuncio es la verdad completa sobre los
+    /// enlaces de ese QKC, y es justo lo que permite retirar uno. Solo se
+    /// recalculan las aristas de los vecinos implicados —los de antes y los
+    /// de ahora—, así que un latido idéntico no mueve nada ni bumpea la
+    /// versión, que es lo que mantiene quieto al solver.
+    fn apply_declared_links(
+        &mut self,
+        qkc_id: &str,
+        links: BTreeMap<String, EdgeMeta>,
+        out: &mut QkcAnnounceOutcome,
+    ) -> bool {
+        let prev = self
+            .declared
+            .insert(qkc_id.to_string(), links.clone())
+            .unwrap_or_default();
+        let mut changed = prev != links;
+        let mut seen = HashSet::new();
+        for other in prev.keys().chain(links.keys()) {
+            if other != qkc_id && seen.insert(other.clone()) {
+                changed |= self.recompute_edge(qkc_id, other, out);
+            }
+        }
+        changed
+    }
+
+    /// Deja la arista (`me`, `other`) como digan las declaraciones de sus dos
+    /// extremos. `me` es quien acaba de anunciarse: es su punto de vista el
+    /// que se reporta en `out`.
+    fn recompute_edge(&mut self, me: &str, other: &str, out: &mut QkcAnnounceOutcome) -> bool {
+        let from_me = self.declared.get(me).and_then(|m| m.get(other)).cloned();
+        let from_other = self.declared.get(other).and_then(|m| m.get(me)).cloned();
+        let key = edge_key(me, other);
+
+        let meta = match (from_me, from_other) {
+            // Ya no la declara ninguno de los dos: fuera del grafo. Es la
+            // única vía por la que una arista desaparece sin que caduque un
+            // nodo entero.
+            (None, None) => return self.drop_edge(me, other, out),
+            // Un solo declarante: manda él, también cuando cambia de idea.
+            // Sin esto no había manera de corregir el r0 o los km de una
+            // fibra en caliente: la diferencia con la arista existente se
+            // tomaba por un desacuerdo con el vecino, y el vecino no había
+            // abierto la boca.
+            (Some(m), None) | (None, Some(m)) => m,
+            (Some(mine), Some(theirs)) if mine == theirs => mine,
+            // Declaran los dos y no coinciden: se conserva lo que ya había y
+            // se avisa. Last-write-wins haría que dos extremos en desacuerdo
+            // se pisaran en cada latido, bumpeando la versión para siempre.
+            (Some(mine), Some(theirs)) => {
+                out.edges_conflict.push(other.to_string());
+                warn!(
+                    a = me, b = other, mine = ?mine, theirs = ?theirs,
+                    "link metadata disagrees between endpoints; keeping the existing value. \
+                     Make both node.yml agree — the SDN sizes this edge from it",
+                );
+                match self.edges.get(&key) {
+                    Some(_) => return false,
+                    None => mine,
+                }
+            }
+        };
+
+        // Una arista necesita sus dos extremos registrados. Que falte uno no
+        // es un error, es que todavía no ha arrancado: la declaración queda
+        // guardada y la cierra el anuncio del que falta.
+        if !self.qkcs.contains_key(me) || !self.qkcs.contains_key(other) {
+            out.edges_pending.push(other.to_string());
+            return false;
+        }
+
+        let was_there = self.graph.get(me).is_some_and(|adj| adj.contains(other));
+        self.graph
+            .entry(me.to_string())
+            .or_default()
+            .insert(other.to_string());
+        self.graph
+            .entry(other.to_string())
+            .or_default()
+            .insert(me.to_string());
+        if !was_there {
+            out.edges_added.push(other.to_string());
+        }
+        if self.edges.get(&key) == Some(&meta) {
+            return !was_there;
+        }
+        self.edges.insert(key, meta);
+        true
+    }
+
+    /// Saca la arista del grafo. Devuelve si había algo que sacar.
+    fn drop_edge(&mut self, me: &str, other: &str, out: &mut QkcAnnounceOutcome) -> bool {
+        let had_meta = self.edges.remove(&edge_key(me, other)).is_some();
+        let had_me = self.graph.get_mut(me).is_some_and(|adj| adj.remove(other));
+        let had_other = self.graph.get_mut(other).is_some_and(|adj| adj.remove(me));
+        if had_meta || had_me || had_other {
+            out.edges_removed.push(other.to_string());
+            return true;
+        }
+        false
+    }
+
+    /// Cierra las aristas que otros declararon contra `qkc_id` mientras no
+    /// existía.
+    ///
+    /// Antes una arista pendiente solo se cerraba cuando **re-anunciaba quien
+    /// la declaró**, o sea hasta `sdn_announce_secs` después de que el vecino
+    /// apareciera. Guardadas las declaraciones se cierra en cuanto entra el
+    /// que faltaba, desde cualquiera de los dos lados.
+    fn close_declarations_pointing_at(
+        &mut self,
+        qkc_id: &str,
+        out: &mut QkcAnnounceOutcome,
+    ) -> bool {
+        let mine = self.declared.get(qkc_id).cloned().unwrap_or_default();
+        let others: Vec<String> = self
+            .declared
+            .iter()
+            // Las que este QKC declara también ya las miró `apply_declared_links`.
+            .filter(|(d, links)| {
+                d.as_str() != qkc_id && links.contains_key(qkc_id) && !mine.contains_key(*d)
+            })
+            .map(|(d, _)| d.clone())
+            .collect();
+        let mut changed = false;
+        for other in others {
+            changed |= self.recompute_edge(qkc_id, &other, out);
+        }
+        changed
+    }
+
     pub fn add_edge(&mut self, a: &str, b: &str, meta: EdgeMeta) -> bool {
         if a == b {
             return false;
@@ -771,20 +929,30 @@ impl TopologyStore {
 
     /// Fold a QKC's self-announcement into the graph.
     ///
+    /// El anuncio es **autoritativo sobre lo que este QKC declara**: sustituye
+    /// en bloque sus enlaces anteriores, así que dejar de nombrar a un vecino
+    /// retira la arista si el otro extremo tampoco la declara. Antes esto era
+    /// puramente aditivo y una arista solo caía al caducar un nodo entero: no
+    /// se podía recablear un enlace ni corregir su modelo físico, y la SDN
+    /// llegaba a devolverle al QKC el enlace que el operador acababa de
+    /// quitarle. Ver [`Topology::declared`].
+    ///
     /// Idempotent on purpose: QKCs re-announce periodically as a heartbeat, so
     /// an unchanged announcement must **not** bump the version — every bump
     /// re-pushes forwarding tables and re-runs the LP.
     ///
-    /// Edges need both endpoints registered ([`Topology::add_edge`] enforces
-    /// it), so a QKC that starts before its neighbour gets `edges_pending`;
-    /// the neighbour's own announcement closes the edge, since both ends
-    /// declare the link. Nothing is retried here — the QKC's announce loop is
-    /// what makes it converge.
+    /// Edges need both endpoints registered, so a QKC that starts before its
+    /// neighbour gets `edges_pending`; su declaración queda guardada y la
+    /// cierra el anuncio del que faltaba, venga de un lado o del otro.
+    /// Nothing is retried here — the QKC's announce loop is what makes it
+    /// converge.
     ///
     /// On conflicting metadata the **existing** value wins and the clash is
     /// logged. Last-write-wins would be worse than useless here: two endpoints
     /// disagreeing would overwrite each other on every heartbeat, bumping the
-    /// version forever and thrashing the solver.
+    /// version forever and thrashing the solver. Un único declarante no entra
+    /// en esa regla: no hay con quién discrepar, así que sus cambios se
+    /// aplican.
     pub fn announce_qkc(&self, reg: &QkcAnnounce) -> QkcAnnounceOutcome {
         let mut out = QkcAnnounceOutcome {
             qkc_id: reg.id.clone(),
@@ -800,33 +968,16 @@ impl TopologyStore {
                 peer_addr: reg.peer_addr.clone(),
                 kme_host,
             });
-            for link in &reg.links {
-                if link.neighbor_id == reg.id {
-                    continue;
-                }
-                if !t.qkcs.contains_key(&link.neighbor_id) {
-                    out.edges_pending.push(link.neighbor_id.clone());
-                    continue;
-                }
-                match t.edge(&reg.id, &link.neighbor_id).cloned() {
-                    Some(existing) if existing != link.meta => {
-                        warn!(
-                            a = %reg.id, b = %link.neighbor_id,
-                            existing = ?existing, announced = ?link.meta,
-                            "link metadata disagrees between endpoints; keeping the existing \
-                             value. Make both node.yml agree — the SDN sizes this edge from it",
-                        );
-                        out.edges_conflict.push(link.neighbor_id.clone());
-                    }
-                    Some(_) => {}
-                    None => {
-                        if t.add_edge(&reg.id, &link.neighbor_id, link.meta.clone()) {
-                            out.edges_added.push(link.neighbor_id.clone());
-                            changed = true;
-                        }
-                    }
-                }
-            }
+            // Lo que declara AHORA sustituye a lo que dijera antes.
+            let links: BTreeMap<String, EdgeMeta> = reg
+                .links
+                .iter()
+                .filter(|l| l.neighbor_id != reg.id)
+                .map(|l| (l.neighbor_id.clone(), l.meta.clone()))
+                .collect();
+            changed |= t.apply_declared_links(&reg.id, links, &mut out);
+            // Y este QKC puede ser el vecino que otros llevaban esperando.
+            changed |= t.close_declarations_pointing_at(&reg.id, &mut out);
             changed
         });
         out.changed = changed;
@@ -1144,6 +1295,10 @@ impl TopologyStore {
                 adj.remove(qkc_id);
             }
             t.edges.retain(|(a, b), _| a != qkc_id && b != qkc_id);
+            // Deja de declarar: se ha ido. Lo que otros declaren HACIA él se
+            // conserva —sigue siendo verdad que tienen fibra hacia allí—, así
+            // que si vuelve, la arista se rehace sola con su anuncio.
+            t.declared.remove(qkc_id);
             t.orr_by_qkc.remove(qkc_id);
             t.dkms_by_qkc.remove(qkc_id);
             Ok(())
@@ -1734,6 +1889,109 @@ mod tests {
         assert_eq!(store.load().version, settled);
     }
 
+    /// Recablear: el QKC 3 deja de tener fibra con el 2 y pasa a tenerla con
+    /// el 1. Mientras el anuncio fue aditivo esto no se podía hacer — la
+    /// arista vieja se quedaba y la SDN acababa devolviéndole al 3 el enlace
+    /// al 2 en la lista de peers, rehaciendo lo que el operador quitó.
+    #[test]
+    fn dropping_a_link_from_the_announcement_retires_the_edge() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        store.announce_qkc(&announce("3", &["2"], 2000.0));
+        assert!(store.load().edge("2", "3").is_some());
+
+        let out = store.announce_qkc(&announce("3", &["1"], 2000.0));
+        assert!(out.changed);
+        assert_eq!(out.edges_removed, vec!["2".to_string()]);
+        assert_eq!(out.edges_added, vec!["1".to_string()]);
+
+        let t = store.load();
+        assert!(t.edge("2", "3").is_none(), "la arista vieja se retira");
+        assert!(t.edge("1", "3").is_some(), "y la nueva entra");
+        // Y el 2 deja de ver al 3 como vecino, que es lo que impedía que el
+        // recableado sobreviviera al siguiente latido.
+        assert!(t.qkc_peers("2").is_empty());
+        assert_eq!(t.qkc_peers("3").len(), 1);
+    }
+
+    /// Con un solo declarante no hay con quién discrepar, así que corregir el
+    /// modelo físico de la fibra tiene efecto. Antes se comparaba contra la
+    /// arista existente y se tomaba por un conflicto con el vecino — que no
+    /// había dicho nada.
+    #[test]
+    fn the_only_declarer_may_change_the_link_metadata() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        assert_eq!(
+            store.load().edge("1", "2").unwrap().r0_keys_per_second,
+            2000.0
+        );
+
+        let out = store.announce_qkc(&announce("1", &["2"], 5000.0));
+        assert!(out.changed);
+        assert!(out.edges_conflict.is_empty(), "nadie con quien discrepar");
+        assert_eq!(
+            store.load().edge("1", "2").unwrap().r0_keys_per_second,
+            5000.0,
+        );
+    }
+
+    /// Basta con que UNO de los dos extremos declare el enlace. Si el otro lo
+    /// declaraba y deja de hacerlo, la arista sigue: lo contrario haría que
+    /// arrancar un QKC que no declara nada borrase lo que su vecino sí
+    /// declara, que es la mitad de los arranques.
+    #[test]
+    fn an_edge_survives_while_either_end_still_declares_it() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0));
+        store.announce_qkc(&announce("2", &["1"], 2000.0));
+
+        let out = store.announce_qkc(&announce("1", &[], 2000.0));
+        assert!(out.edges_removed.is_empty(), "el 2 todavía la declara");
+        assert!(store.load().edge("1", "2").is_some());
+
+        // Cuando la suelta el segundo, ya sí.
+        let out = store.announce_qkc(&announce("2", &[], 2000.0));
+        assert_eq!(out.edges_removed, vec!["1".to_string()]);
+        assert!(store.load().edge("1", "2").is_none());
+    }
+
+    /// Una arista pendiente se cierra en cuanto aparece el vecino, sin
+    /// esperar a que re-anuncie quien la declaró. Antes costaba hasta un
+    /// `sdn_announce_secs` de más, y solo lo cerraba el declarante.
+    #[test]
+    fn a_pending_edge_closes_from_the_side_that_was_missing() {
+        let store = TopologyStore::new(Topology::default());
+        let out = store.announce_qkc(&announce("1", &["2"], 2000.0));
+        assert_eq!(out.edges_pending, vec!["2".to_string()]);
+        assert!(store.load().edge("1", "2").is_none());
+
+        // El 2 entra sin declarar nada: la declaración del 1 basta.
+        let out = store.announce_qkc(&announce("2", &[], 2000.0));
+        assert_eq!(out.edges_added, vec!["1".to_string()]);
+        assert!(store.load().edge("1", "2").is_some());
+    }
+
+    /// Un nodo que se cae no borra lo que sus vecinos declaran hacia él:
+    /// sigue siendo verdad que tienen fibra hacia allí. Cuando vuelve, la
+    /// arista se rehace con su propio anuncio.
+    #[test]
+    fn a_neighbours_declaration_outlives_the_node_it_points_at() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        assert!(store.load().edge("1", "2").is_some());
+
+        store.delete_qkc("2").expect("estaba");
+        assert!(store.load().edge("1", "2").is_none(), "cascada al borrar");
+
+        let out = store.announce_qkc(&announce("2", &[], 2000.0));
+        assert_eq!(out.edges_added, vec!["1".to_string()]);
+        assert!(store.load().edge("1", "2").is_some(), "vuelve sola");
+    }
+
     #[test]
     fn conflicting_link_metadata_keeps_the_existing_value() {
         let store = TopologyStore::new(Topology::default());
@@ -1741,15 +1999,25 @@ mod tests {
         store.announce_qkc(&announce("2", &["1"], 2000.0));
         let settled = store.load().version;
 
-        // "2" is misconfigured with a different r0. Last-write-wins would make
-        // the two endpoints overwrite each other on every heartbeat, bumping
-        // the version forever.
+        // "2" está mal configurado con otro r0. Cambiar lo que declara sí es
+        // un cambio de topología —queda registrado—, así que la primera vez
+        // bumpea una vez. Lo que no puede es bumpear en CADA latido: eso es
+        // lo que haría last-write-wins, con los dos extremos pisándose para
+        // siempre y el solver recalculando sin parar.
+        let first = store.announce_qkc(&announce("2", &["1"], 500.0));
+        assert!(first.changed, "la declaración nueva se registra");
+        assert_eq!(first.edges_conflict, vec!["1".to_string()]);
+        let after_first = store.load().version;
+        assert_eq!(after_first, settled + 1);
+
         for _ in 0..5 {
             let out = store.announce_qkc(&announce("2", &["1"], 500.0));
-            assert!(!out.changed);
+            assert!(!out.changed, "repetir lo mismo no cambia nada");
             assert_eq!(out.edges_conflict, vec!["1".to_string()]);
         }
-        assert_eq!(store.load().version, settled);
+        assert_eq!(store.load().version, after_first, "no bumpea por latido");
+
+        // Y la arista conserva el valor del que llegó primero.
         let meta = store.load().edge("1", "2").cloned().unwrap();
         assert_eq!(meta.r0_keys_per_second, 2000.0);
     }
