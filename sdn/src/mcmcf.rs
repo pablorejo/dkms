@@ -514,8 +514,23 @@ pub fn wcmp_from_edge_flows(
             .filter(|(_, flow)| *flow > FLOW_EPSILON)
             .filter_map(|(nh_id, flow)| {
                 let qkc_id: u32 = nh_id.parse().ok()?;
-                let weight =
-                    ((flow * WCMP_WEIGHT_SCALE).round() as i64).max(WCMP_MIN_WEIGHT as i64) as u32;
+                // Saturar en vez de `as u32`, que sobre un i64 mayor que 2³²
+                // **envuelve módulo 2³²** en silencio y convierte un reparto
+                // en un resto de división. No es hipotético: con las aristas
+                // PQC a capacidad centinela (1e9) λ se dispara y los flujos
+                // salen enormes — en el testbed se vieron pesos de
+                // 2 755 359 744, que aún caben, pero un flujo por encima de
+                // ~42,9 M claves/s ya no. Los pesos son proporciones
+                // relativas, así que topar en u32::MAX no cambia el sentido.
+                // `clamp` ya lleva ±∞ a los extremos correctos; solo el NaN
+                // necesita salida propia, porque `clamp` lo propaga y luego
+                // `as u32` lo volvería un 0 que el saneador del QKC descarta.
+                let scaled = (flow * WCMP_WEIGHT_SCALE).round();
+                let weight = if scaled.is_nan() {
+                    WCMP_MIN_WEIGHT
+                } else {
+                    scaled.clamp(f64::from(WCMP_MIN_WEIGHT), f64::from(u32::MAX)) as u32
+                };
                 Some(WcmpNextHop { qkc_id, weight })
             })
             .collect();
@@ -1793,6 +1808,35 @@ mod tests {
             "weight must not be 0, got {}",
             hops[0].weight
         );
+    }
+
+    /// El otro extremo del mismo cuantizador. Con las aristas PQC a capacidad
+    /// centinela los flujos del LP se disparan; por encima de ~42,9 M claves/s
+    /// el `flow × 100` ya no cabe en un u32 y el `as u32` daba la vuelta,
+    /// convirtiendo un reparto en un resto de división. Debe topar arriba.
+    #[test]
+    fn huge_flow_saturates_instead_of_wrapping() {
+        let t = diamond_topology();
+        let weight_for = |flow: f64| {
+            let flows = vec![EdgeFlow {
+                flow_id: flow_id("dA", "dB"),
+                src_qkc: "1".into(),
+                dst_qkc: "11".into(),
+                flow,
+                grade: KeyGrade::Qkd,
+            }];
+            wcmp_from_edge_flows(&flows, &t, None)["1"]["2"][0].weight
+        };
+
+        // Por debajo del límite el peso sigue siendo el reparto exacto: este
+        // es el valor real observado en el testbed el 2026-08-02.
+        assert_eq!(weight_for(2.755_359_744e7), 2_755_359_744);
+
+        // Por encima, satura en vez de envolver.
+        for flow in [1e9_f64, 1e12, f64::MAX] {
+            let w = weight_for(flow);
+            assert_eq!(w, u32::MAX, "un flujo de {flow} debe saturar (dio {w})");
+        }
     }
 
     /// `into_mcf_snapshot` exposes the WCMP table on the published
