@@ -161,9 +161,25 @@ cmd_up() {
     echo "mesh: generando $total nodos en $DIR"
     generate "$total"
     write_boot "$total"
-    echo "mesh: arrancando $(( 1 + total * 3 )) procesos con MemoryMax=$MEM_MAX"
-    systemd-run --user --scope --unit="$SCOPE" \
-        -p MemoryMax="$MEM_MAX" -p MemorySwapMax=2G "$DIR/boot.sh" >/dev/null 2>&1 &
+    # Se prueba a ejecutarlo, no sólo a que exista el binario: dentro de un
+    # trabajo de SLURM `systemd-run` está pero no hay bus de sesión de usuario,
+    # así que fallaría al arrancar y la malla se quedaría sin levantar.
+    if systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+        echo "mesh: arrancando $(( 1 + total * 3 )) procesos con MemoryMax=$MEM_MAX"
+        systemd-run --user --scope --unit="$SCOPE" \
+            -p MemoryMax="$MEM_MAX" -p MemorySwapMax=2G "$DIR/boot.sh" >/dev/null 2>&1 &
+    else
+        # Sin scope propio el tope lo pone quien nos haya lanzado. Bajo SLURM
+        # eso es el `--mem` del trabajo, que es un cgroup igual de real; en una
+        # sesión normal significa que NO hay tope, y eso hay que decirlo.
+        echo "mesh: systemd-run no utilizable aquí; arranco sin scope propio" >&2
+        if [ -n "${SLURM_JOB_ID:-}" ]; then
+            echo "mesh: el tope lo pone SLURM (job $SLURM_JOB_ID, --mem=${SLURM_MEM_PER_NODE:-?} MB)" >&2
+        else
+            echo "mesh: AVISO — sin límite de memoria; ver la sección de saturación de CLAUDE.md" >&2
+        fi
+        "$DIR/boot.sh" >/dev/null 2>&1 &
+    fi
     curl -s --retry 40 --retry-delay 1 --retry-connrefused \
         "http://127.0.0.1:$SDN_HTTP/healthz" >/dev/null || die "la SDN no arrancó"
     local want=$(( total * 3 ))

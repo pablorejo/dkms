@@ -59,7 +59,10 @@ resto se entera solo.
 ## Memoria
 
 Todo corre dentro de un scope de systemd con `MemoryMax=8G`
-(`DKMS_MESH_MEM_MAX` para cambiarlo). Un despliegue local se ha comido una
+(`DKMS_MESH_MEM_MAX` para cambiarlo). Donde no se puede crear el scope —dentro
+de un trabajo de SLURM no hay bus de sesión de usuario— se arranca sin él y se
+avisa: ahí el tope es el `--mem` del trabajo, que es un cgroup igual de real.
+Fuera de SLURM y sin scope no hay tope ninguno, y el script lo dice. Un despliegue local se ha comido una
 sesión de escritorio antes — ver la sección de saturación del `CLAUDE.md`. Con
 N=10 el pico medido son 0,46 GB, así que el tope es margen, no restricción.
 
