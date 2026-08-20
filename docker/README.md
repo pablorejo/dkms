@@ -43,8 +43,8 @@ Cada imagen contiene el binario Rust de su módulo + un entrypoint común:
 
 1. El contenedor arranca con `ROLE` fijado (qkc|orr|dkms|sdn).
 2. El entrypoint busca `/config/node.yml` (el que montas tú) y lo convierte
-   con `render_config.py` en la config nativa del binario — un TOML (y, para
-   la SDN, el árbol `topology/*.json`) — escrita en `/run/cfg/`.
+   con `render_config.py` en la config nativa del binario — un TOML — escrita
+   en `/run/cfg/`. La SDN no lleva topología: la infiere de los anuncios.
 3. Arranca el binario apuntando a esa config.
 
 Consecuencias prácticas:
@@ -55,8 +55,8 @@ Consecuencias prácticas:
   `docker compose -f <rol>.yml exec <rol> cat /run/cfg/qkc.toml` (qkc) o
   `.../run/cfg/default.toml` (resto).
 - **Escape hatch**: si montas un TOML crudo (`qkc.toml` para qkc,
-  `default.toml` — más `topology/` para sdn — en `/config`), el entrypoint lo
-  usa tal cual y no genera nada. Útil para configs que el node.yml no expone.
+  `default.toml` para el resto, en `/config`), el entrypoint lo usa tal cual y
+  no genera nada. Útil para configs que el node.yml no expone.
 
 Los compose de `compose/` son deliberadamente mínimos: `network_mode: host`
 (sin mapeo de puertos: el binario escucha directamente en la máquina),
@@ -291,8 +291,8 @@ links:
 | `advertise_ip` | IP con la que se anuncia. Hace falta porque el contenedor bindea `0.0.0.0`, que no le sirve a la SDN para llamarle de vuelta. |
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `key_size_bits` | tamaño de las claves OTP del keystore (default 256). **Debe coincidir en los dos extremos de cada enlace.** |
-| `links[].neighbor_id` / `neighbor_addr` | id e IP del QKC vecino (puerto peer 20000 si no se indica). El enlace se declara en **ambos** extremos. |
-| `links[].type` | `pqc` (sin hardware) o `qkd` (con `kme_url` del KME ETSI-014). |
+| `links[].neighbor_id` / `neighbor_addr` | id e IP del QKC vecino (puerto peer 20000 si no se indica). El enlace se declara en **ambos** extremos. Es una semilla: los enlaces `pqc` también los crea la SDN en caliente, y lo que declares aquí es un suelo que no puede quitar. |
+| `links[].type` | `pqc` (sin hardware) o `qkd` (con `kme_url` del KME ETSI-014). **Un enlace `qkd` hay que declararlo sí o sí**: la SDN no puede inventarse el `kme_url` de tu institución, así que si ofrece uno sin config local el QKC lo avisa por log y no lo crea. |
 | `links[].r0` / `alpha` / `distance_km` | modelo físico del enlace. El QKC no los usa: se los pasa a la SDN, que dimensiona la arista con `r0·10^(−alpha·d/10)`. Solo para enlaces `qkd` — los `pqc` van sin capacidad. |
 | `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
 
@@ -362,7 +362,7 @@ peer_grpc_addrs:
 | `sdn_url` | gRPC de la SDN central. |
 | `advertise_ip` | IP por la que la SDN alcanza a este ORR. Ponla y el ORR se da de alta solo en la topología; sin ella hay que darlo de alta a mano. |
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
-| `peers` / `peer_grpc_addrs` | un par de entradas por **cada otro ORR de la red con cuyo DKMS se intercambiarán claves** — no solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
+| `peers` / `peer_grpc_addrs` | **semilla, opcional**: los ORR con los que arrancar el bootstrap antes de que la SDN conteste. La lista viva la manda la SDN en la respuesta al anuncio, y un ORR nuevo aparece solo. Lo que pongas aquí es además un suelo que la SDN no puede borrar. Ojo a que no son solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
 | `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |
 
 **Paso 3 — arrancar y verificar:**
@@ -449,7 +449,7 @@ peers:
 | `sdn_endpoint` | gRPC de la SDN. En el boot se reintenta 30×1 s; si la SDN aparece más tarde, reinicia el DKMS. |
 | `orr_id` | id del ORR del que cuelga este DKMS. La SDN lo coloca en el grafo por él, y `orr_addr` no vale: es una dirección, no un id. |
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
-| `peers.<id>` | cada **otro DKMS** con el que se intercambiarán claves: `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Los `peers` de todos los DKMS deben ser coherentes con los `peers` de los ORR. |
+| `peers.<id>` | **semilla, opcional**: con qué DKMS trabajar mientras la SDN no conteste, y suelo que la SDN no puede borrar. `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Cuando la SDN responde manda ella el `endpoint` y el `orr_id`; `max_hops`, `security_level` y `sni` se quedan siempre en local. |
 | `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
 | `sae_bindings` | mapeo local `sae→dkms` de respaldo si la SDN no responde. Opcional. |
@@ -614,25 +614,50 @@ docker compose -f <rol>.yml restart
 docker compose -f <rol>.yml exec <rol> cat /run/cfg/default.toml   # (qkc: /run/cfg/qkc.toml)
 ```
 
-Añadir un peer/institución nueva toca, además de desplegar el nodo nuevo:
-la topología de la SDN (+restart), los `links` del QKC con quien enlace, y
-los `peers` de **todos** los ORR y DKMS que vayan a intercambiar claves con
-él (+restart de cada uno — mejor el conjunto de ORRs, por el gotcha del
-re-bootstrap).
+### Añadir una institución nueva
+
+**No hay que tocar los nodos que ya corren.** Despliegas el trío nuevo con su
+`node.yml`, se anuncia a la SDN, y los demás se enteran en su siguiente
+heartbeat (≤ `sdn_announce_secs`, 30 s por defecto): la respuesta al anuncio
+lleva la lista de peers que a cada módulo le tocan, derivada del grafo. El
+DKMS registra al nuevo par, el ORR arranca su bootstrap PQC, y el QKC crea el
+enlace en caliente.
+
+Dos cosas siguen siendo manuales:
+
+- **Los enlaces QKD.** Un enlace `qkd` necesita el `kme_url` del KME de esa
+  institución, que la SDN no puede conocer ni inventar, así que se declara en
+  el `node.yml` de los dos extremos. Si la SDN ofrece un enlace QKD para el
+  que no hay config local, el QKC lo avisa por log y no lo crea. Los enlaces
+  `pqc` sí se crean solos.
+- **Los certificados.** El DKMS nuevo necesita un cert firmado por la CA común,
+  y su `advertise_ip` en el SAN.
+
+**`node.yml` es un suelo, no una foto.** Los peers/enlaces declarados en local
+no los quita nadie: la SDN puede añadir peers y quitar los que ella añadió,
+pero un peer local se queda. Sin esa regla, cada arranque en el que la SDN va
+por detrás costaría enlaces y material de claves vivos — se vio en el
+laboratorio, un QKC destruyendo los dos enlaces de su propio `node.yml`
+segundos después de arrancar para reconstruirlos 30 s más tarde.
+
+Al revés, dar de baja una institución sí es automático: deja de anunciarse,
+`presence_ttl_secs` la expira del grafo (90 s por defecto = 3 anuncios
+perdidos) y los demás la sueltan en el siguiente heartbeat. Tirar un enlace
+libera su `SecretStore`, así que su material se borra.
 
 ## Troubleshooting
 
 | síntoma | causa probable |
 |---------|----------------|
-| `dec_keys` → `key not found` con `enc_keys` OK | cert del SAE sin SAN `urn:dkms:sae:<id>` (usa `gen-certs.sh --sae`), o el DKMS destino no tiene al emisor en `peers:` |
+| `dec_keys` → `key not found` con `enc_keys` OK | cert del SAE sin SAN `urn:dkms:sae:<id>` (usa `gen-certs.sh --sae`), o el DKMS destino todavía no conoce al emisor (mira si la SDN los tiene a los dos en el grafo) |
 | curl → `alert certificate required` | falta `--cert/--key` del SAE, o su cert no lo firmó la CA que el DKMS monta en `certs_dir` |
-| SDN `qkcs_err>0` permanente | IP/puerto del QKC mal en la topología, o 20002 filtrado desde la SDN |
+| SDN `qkcs_err>0` permanente | `advertise_ip` del QKC mal, o 20002 filtrado desde la SDN |
 | ORR "sin master_secret" en bucle | se reinició un solo ORR; reinicia el conjunto |
 | QKC sin `handshake.established` | vecino caído, enlace no declarado en el otro extremo, o 20000 filtrado |
-| enlace PQC vivo pero sin tráfico en un sentido, `keystore.levels … enc=0 dec=0 taken=0` | reiniciaste **sólo** el extremo de id mayor: el otro no re-negocia épocas que ya tiene. Baja `pqc_rekey_secs` (60) o reinicia también el otro extremo |
+| enlace PQC vivo pero sin claves, `keystore.levels … enc=0 dec=0 taken=0` + `timeout waiting pqc-secret` | reiniciaste un extremo y la re-negociación no disparó. El extremo de id **menor** debe loguear `qkc.pqc.relink` en cuanto el otro reconecta; si no aparece, el socket saliente no se cayó (¿NAT/proxy que lo mantiene abierto?). Reiniciar el extremo menor lo resuelve |
 | DKMS `ack_pending` crece sin parar | 20009 del peer filtrado o `advertise_ip` mal (los ACK van a esa IP). Lee `generator.diag` — dice cuál de los dos es |
 | DKMS `qkc unreachable … continuing without it` en el boot | **normal** con transporte ORR |
-| `enc_keys` lento o falla hacia un peer | ese peer no está en los `peers` del ORR local (el material no puede viajar) |
+| `enc_keys` lento o falla hacia un peer | el ORR local aún no tiene ese peer: o la SDN no se lo ha mandado (¿los dos anunciándose?), o su bootstrap PQC no ha terminado — busca `orr.peer_pubkey bootstrap ok` para él |
 | la config no coincide con lo que esperabas | mira lo renderizado: `exec <rol> cat /run/cfg/…` |
 
 ### Diagnosticar el ciclo de claves DKMS↔DKMS
@@ -669,8 +694,8 @@ esa comprobación falla, ningún peer podrá acusar recibo jamás.
 
 - **SDN central única**: es el modelo soportado hoy; federación por
   institución no existe todavía.
-- **Topología inmutable en runtime**: cambios de nodos/enlaces = editar el
-  `node.yml` de la SDN y reiniciarla.
+- **Enlaces QKD, sí manuales**: los `pqc` los crea la SDN en caliente, pero un
+  `qkd` necesita el `kme_url` local en el `node.yml` de los dos extremos.
 - **La tasa de un enlace es compartida** entre ambos sentidos (no hay modelo
   A→B / B→A separado).
 - **Sin límites de RAM/CPU** en los compose (default de Docker). En máquinas
