@@ -361,6 +361,11 @@ impl Generator {
                     0.0
                 };
                 prev.insert(peer.clone(), (emit_total, now));
+                // `max_tokens_per_peer_per_tick` tokens cada `tick_ms`: con los
+                // defaults (32 / 100 ms) son 320 claves/s por peer, pase lo que
+                // pase por encima.
+                let ceiling = f64::from(self.cfg.max_tokens_per_peer_per_tick)
+                    * (1000.0 / self.cfg.tick_ms.max(1) as f64);
                 let f = self.stats.peer(&peer);
                 let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
                 info!(
@@ -371,6 +376,13 @@ impl Generator {
                     emit_total,
                     observed_keys_per_s = format!("{observed_rate:.1}"),
                     sdn_rate_keys_per_s = format!("{rate_sdn:.1}"),
+                    // Techo real del token bucket. La rate del SDN por sí sola
+                    // engaña: en un despliegue solo-PQC las aristas llevan una
+                    // capacidad centinela de 1e9 (`PQC_EDGE_CAPACITY_KEYS_PER_SECOND`
+                    // en sdn/src/mcmcf.rs), λ se dispara y aquí llegan cifras
+                    // como 8e8 keys/s que este bucket jamás va a servir. Con
+                    // las dos al lado se ve de un vistazo cuál manda.
+                    rate_ceiling_keys_per_s = format!("{ceiling:.1}"),
                     // ── ida: yo genero para este peer ──────────────────
                     emitted = g(&f.emitted),
                     emit_failed = g(&f.emit_failed),
