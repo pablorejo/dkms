@@ -10,9 +10,16 @@ advertise_ip: "10.0.0.11"      # IP por la que la SDN puede alcanzar a ESTE QKC
 
 # key_size_bits: 256          # bits de clave OTP; DEBE coincidir en ambos extremos
 
+# Con quién tienes fibra. Es lo único de topología que declara un QKC: el
+# resto (dónde está cada uno, qué ORR cuelga de quién) lo monta la SDN.
 links:
   - neighbor_id: 2
-    neighbor_addr: "10.0.0.12"   # IP (o IP:puerto) del QKC vecino; puerto peer por defecto 20000
+    # OPCIONAL en un enlace pqc si hay sdn_url: la dirección no viaja en el
+    # anuncio —la SDN ya la sabe, cada QKC anuncia la suya— y vuelve en la
+    # lista de peers. Déjala fuera y el enlace se monta cuando la SDN conteste;
+    # ponla y se monta en el arranque, sin depender de ella. Un enlace qkd la
+    # exige: la SDN no crea enlaces qkd.
+    # neighbor_addr: "10.0.0.12"   # IP (o IP:puerto); puerto peer por defecto 20000
     type: pqc                    # pqc = ML-KEM entre vecinos | qkd = KME por ETSI-014
     # --- si type: qkd (KME: hardware real, o un quditto si no lo tienes) ---
     # kme_url: "https://mi-nodo-qkd:443"   # o "http://10.0.0.50:20010" para un quditto

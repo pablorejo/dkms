@@ -109,10 +109,23 @@ def render_qkc(n, out):
             lines.append("sdn_announce_secs = " + str(int(n["sdn_announce_secs"])))
     for lk in n.get("links", []):
         nid = int(req(lk, "neighbor_id", "qkc.link"))
-        naddr = with_port(req(lk, "neighbor_addr", "qkc.link"), PORTS["qkc"]["peer"])
         typ = str(lk.get("type", "pqc")).lower()
         lines += ["", "[[links]]", "neighbor_id = " + str(nid),
-                  "neighbor_peer_addr = " + q(naddr), "key_size_bits = " + str(key_bits)]
+                  "key_size_bits = " + str(key_bits)]
+        # neighbor_addr is optional on a pqc link: the address never travels in
+        # the announcement (only the id does), the SDN already knows it because
+        # every QKC announces its own, and it comes back in the peer list. So a
+        # link may be declared by id alone and the SDN says where it is. A qkd
+        # link still needs it -- the SDN does not create those, see below.
+        if lk.get("neighbor_addr") is not None:
+            lines.append("neighbor_peer_addr = "
+                         + q(with_port(lk["neighbor_addr"], PORTS["qkc"]["peer"])))
+        elif typ == "qkd":
+            die("[qkc.link] a qkd link to " + str(nid) + " needs neighbor_addr: the SDN only "
+                "creates pqc links, so nothing would fill it in")
+        elif not n.get("sdn_url"):
+            die("[qkc.link] link to " + str(nid) + " has no neighbor_addr and this node has no "
+                "sdn_url to learn it from: declare one of the two")
         # Physical model of the link. The QKC does not use these — it forwards
         # them to the SDN, which sizes the edge with r0*10^(-alpha*d/10).
         # Only the institution knows them: its own fibre, or what it configured
