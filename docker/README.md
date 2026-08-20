@@ -361,7 +361,7 @@ peer_grpc_addrs:
 | `qkc_id` | el nodo al que pertenece. |
 | `qkc_addr` | dónde está **su** QKC (puerto local 20001). `127.0.0.1` si co-locados; la IP del QKC si va en otra máquina. |
 | `sdn_url` | gRPC de la SDN central. |
-| `advertise_ip` | IP por la que la SDN alcanza a este ORR. Ponla y el ORR se da de alta solo en la topología; sin ella hay que darlo de alta a mano. |
+| `advertise_ip` | IP por la que la SDN alcanza a este ORR. Ponla y el ORR se da de alta solo en la topología; sin ella hay que darlo de alta a mano, y el ORR lo dice por log al arrancar (`no sé con qué IP anunciarme`). |
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `peers` / `peer_grpc_addrs` | **semilla, opcional**: los ORR con los que arrancar el bootstrap antes de que la SDN conteste. La lista viva la manda la SDN en la respuesta al anuncio, y un ORR nuevo aparece solo. Lo que pongas aquí es además un suelo que la SDN no puede borrar. Ojo a que no son solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
 | `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |

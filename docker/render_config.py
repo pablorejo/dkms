@@ -170,11 +170,17 @@ def render_orr(n, out):
     # Self-registration. sdn_url is the SDN's gRPC; the registration endpoint
     # lives on its HTTP admin, so derive that port rather than asking for a
     # second URL in node.yml.
-    if n.get("sdn_url") and n.get("advertise_ip"):
-        lines += [
-            "sdn_http_url = " + q(sdn_http_from(n["sdn_url"])),
-            "advertise_ip = " + q(n["advertise_ip"]),
-        ]
+    #
+    # sdn_http_url goes in whenever sdn_url does, even with no advertise_ip.
+    # Gating both on advertise_ip made the ORR bail out on the missing
+    # sdn_http_url -- before reaching the branch that explains what is wrong --
+    # so the module booted, logged "orr->sdn client connected" and never
+    # registered, while its DKMS waited on it forever. Emitting it lets the
+    # binary print its own error, like the QKC already does.
+    if n.get("sdn_url"):
+        lines.append("sdn_http_url = " + q(sdn_http_from(n["sdn_url"])))
+        if n.get("advertise_ip"):
+            lines.append("advertise_ip = " + q(n["advertise_ip"]))
         if n.get("sdn_announce_secs") is not None:
             lines.append("sdn_announce_secs = " + str(int(n["sdn_announce_secs"])))
     peers = n.get("peers") or {}           # orr_id -> qkc_id
