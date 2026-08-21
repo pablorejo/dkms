@@ -59,8 +59,11 @@ if (( DURATION <= SUSTAIN_FROM )); then
 fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="$REPO/tests/results/stress-$ARM-$STAMP"
-MESH_DIR="$REPO/tests/results/local-mesh"
+# Mismo directorio que use mesh.sh, o los logs se buscarían donde no están.
+# Importa en un clúster: ahí la malla va al scratch local del nodo y no al home
+# por NFS, y sin esto stress.sh miraría en el home.
+MESH_DIR="${DKMS_MESH_DIR:-$REPO/tests/results/local-mesh}"
+OUT="${DKMS_STRESS_OUT:-$REPO/tests/results}/stress-$ARM-$STAMP"
 SDN=http://127.0.0.1:19002
 mkdir -p "$OUT"
 

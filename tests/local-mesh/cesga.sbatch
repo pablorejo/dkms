@@ -45,6 +45,8 @@ cd "$HOME/dkms_rust" || exit 1
 # procesos escribiendo logs más los CSV de la carga, que a 16 hilos por par son
 # millones de filas.
 export DKMS_MESH_DIR="${TMPDIR:-/tmp}/dkms-mesh-$SLURM_JOB_ID"
+export DKMS_STRESS_OUT="${TMPDIR:-/tmp}/dkms-stress-$SLURM_JOB_ID"
+mkdir -p "$DKMS_STRESS_OUT"
 
 echo "########## $(hostname) · $(nproc) cpus · rama $ARM · $(date '+%F %T') ##########"
 gcc --version | head -1
@@ -64,7 +66,7 @@ ARGS=(--arm "$ARM" --nodes "$NODES" --threads "$THREADS" --duration "$DURATION")
 # trabajo.
 DEST="$HOME/dkms_rust/results-$ARM-$SLURM_JOB_ID"
 mkdir -p "$DEST"
-for d in tests/results/stress-"$ARM"-*; do
+for d in "$DKMS_STRESS_OUT"/stress-"$ARM"-*; do
     [ -d "$d" ] || continue
     cp "$d/report.txt" "$DEST/" 2>/dev/null || true
     tar czf "$DEST/$(basename "$d").tar.gz" -C "$(dirname "$d")" "$(basename "$d")" 2>/dev/null || true
