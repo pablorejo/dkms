@@ -7,7 +7,7 @@
 # inventada para el test. No sustituye a `tests/testbed/`, que corre contra el
 # despliegue real por SSH: esto es lo que se puede repetir sin hardware.
 #
-#   mesh.sh up [N]              levanta N nodos (default 3)
+#   mesh.sh up [N] [topo]       levanta N nodos (default 3, ring)
 #   mesh.sh down               para todo
 #   mesh.sh topology           lo que ve la SDN
 #   mesh.sh edges              aristas + comprobación de conectividad
@@ -15,8 +15,20 @@
 #   mesh.sh keys [nodos...]    intercambio ETSI-014 por par ordenado
 #   mesh.sh logs <modulo>      p.ej. `mesh.sh logs dkms3`
 #
-# Topología: anillo + cuerdas. Conexa por construcción, con grado ≥2 para que
-# quitar un nodo no la parta y con caminos alternativos para el multipath.
+# Tres topologías, y la elección cambia lo que se mide:
+#
+#   ring    anillo + cuerdas. Conexa por construcción, grado >=2 para que
+#           quitar un nodo no la parta, y con caminos alternativos para que el
+#           multipath tenga algo que repartir. Es el caso amable.
+#   star    todos colgando del nodo 1. El hub queda con grado N-1 y todo el
+#           tráfico que no sea suyo le pasa por encima: es el caso que carga
+#           un solo QKC. Ojo, quitar el hub parte la red entera, así que las
+#           pruebas de baja de nodo hay que hacerlas sobre una hoja.
+#   random  grafo aleatorio CONEXO con semilla (DKMS_MESH_SEED, default 42):
+#           árbol de expansión aleatorio + aristas extra hasta grado medio ~3.
+#           Reproducible, y es lo que se parece a un despliegue real, donde
+#           nadie cablea un anillo perfecto.
+#
 # Cada enlace lo declara UN solo extremo a propósito: es lo que comprueba que
 # la SDN se lo comunica al otro (ver "Peers ride back on the announcement" en
 # CLAUDE.md).
@@ -51,6 +63,8 @@ TOKENS_PER_TICK="${DKMS_MESH_TOKENS_PER_TICK:-}"
 SAE_MIN_TOKENS="${DKMS_MESH_SAE_MIN_TOKENS:-}"
 SDN_HTTP=19002
 SDN_GRPC=19000
+TOPO="${DKMS_MESH_TOPO:-ring}"
+SEED="${DKMS_MESH_SEED:-42}"
 
 # Puertos: el nodo n ocupa el rango 20000+(n-1)*100 … +9. Con N≤10 no toca los
 # 19xxx de la SDN.
@@ -63,18 +77,61 @@ sae_port()   { port "$1" 20005; }
 
 die() { echo "mesh: $*" >&2; exit 1; }
 
-# ── vecinos declarados por el qkc n ────────────────────────────────────────
-# Anillo n→n+1 (y N→1) más una cuerda cada tres nodos hacia el opuesto. Sólo
-# lo declara el extremo menor de cada par, para que el otro tenga que
-# enterarse por la SDN.
-neighbours_of() {
-    local n=$1 total=$2 out=()
-    (( total >= 2 )) && out+=( $(( n % total + 1 )) )
-    if (( total >= 6 && n % 3 == 1 )); then
-        local opposite=$(( (n - 1 + total / 2) % total + 1 ))
-        (( opposite != n )) && out+=( "$opposite" )
-    fi
-    echo "${out[@]}"
+# ── vecinos declarados por cada qkc, según la topología ────────────────────
+#
+# Se calcula una sola vez y se cachea en $DIR/topology.tsv: la aleatoria tiene
+# que salir igual para todos los nodos, así que no puede recalcularse por
+# separado en cada llamada.
+#
+# En las tres, cada arista la declara SOLO el extremo de id menor. Es
+# deliberado: obliga a que el otro extremo se entere por la SDN, que es la
+# propiedad que sostiene todo el diseño de auto-configuración.
+build_topology() {  # build_topology <N>
+    python3 - "$1" "$TOPO" "$SEED" <<'TOPO_PY' > "$DIR/topology.tsv"
+import random, sys
+n, topo, seed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+edges = set()
+
+if topo == "star":
+    edges = {(1, k) for k in range(2, n + 1)}
+elif topo == "random":
+    rnd = random.Random(seed)
+    # Primero un árbol de expansión: garantiza que sale conexa. Un G(n,p) a
+    # secas puede salir partido, y una malla partida no mide lo que se quiere
+    # medir, mide otra cosa.
+    order = list(range(1, n + 1))
+    rnd.shuffle(order)
+    for i in range(1, len(order)):
+        a, b = order[i], order[rnd.randrange(i)]
+        edges.add((min(a, b), max(a, b)))
+    # Y aristas extra hasta un grado medio de ~3, que es el orden de los
+    # despliegues que se han medido en este proyecto.
+    target = max(n - 1, (3 * n) // 2)
+    todos = [(a, b) for a in range(1, n + 1) for b in range(a + 1, n + 1)]
+    rnd.shuffle(todos)
+    for e in todos:
+        if len(edges) >= target:
+            break
+        edges.add(e)
+else:  # ring
+    if n >= 2:
+        edges = {(min(k, k % n + 1), max(k, k % n + 1)) for k in range(1, n + 1)}
+    for k in range(1, n + 1, 3):
+        opposite = (k - 1 + n // 2) % n + 1
+        if n >= 6 and opposite != k:
+            edges.add((min(k, opposite), max(k, opposite)))
+
+# Una línea por nodo: el declarante y sus vecinos declarados.
+declared = {k: [] for k in range(1, n + 1)}
+for a, b in sorted(edges):
+    declared[a].append(b)
+for k in range(1, n + 1):
+    print("%d\t%s" % (k, " ".join(str(x) for x in declared[k])))
+TOPO_PY
+}
+
+neighbours_of() {   # neighbours_of <n>
+    awk -F'\t' -v n="$1" '$1 == n { print $2 }' "$DIR/topology.tsv"
 }
 
 write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
@@ -112,13 +169,14 @@ patch_dkms_toml() {
 generate() {        # generate <N>
     local total=$1
     rm -rf "$DIR"; mkdir -p "$DIR"/{yml,cfg/sdn,logs,certs}
+    build_topology "$total"
     printf 'listen_ip: "0.0.0.0"\npresence_ttl_secs: 90\n' > "$DIR/yml/node.sdn.yml"
     python3 "$RENDER" sdn "$DIR/yml/node.sdn.yml" "$DIR/cfg/sdn" >/dev/null
 
     for n in $(seq 1 "$total"); do
         mkdir -p "$DIR/cfg/qkc$n" "$DIR/cfg/orr$n" "$DIR/cfg/dkms$n"
         # shellcheck disable=SC2046
-        write_qkc_yml "$n" $(neighbours_of "$n" "$total")
+        write_qkc_yml "$n" $(neighbours_of "$n")
 
         cat > "$DIR/yml/node$n.orr.yml" <<EOF
 orr_id: "orr_$n"
@@ -197,9 +255,11 @@ topology_json() { curl -s --max-time 5 "http://127.0.0.1:$SDN_HTTP/topology"; }
 
 cmd_up() {
     local total=${1:-3}
+    [ -n "${2:-}" ] && TOPO="$2"
+    case "$TOPO" in ring|star|random) ;; *) die "topología desconocida: $TOPO (ring|star|random)" ;; esac
     [ -x "$BIN/sdn" ] || die "faltan los binarios: cargo build --release"
     (( total >= 2 && total <= 10 )) || die "N entre 2 y 10 (los puertos son 20000+100n)"
-    echo "mesh: generando $total nodos en $DIR"
+    echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"))"
     generate "$total"
     write_boot "$total"
     # Se prueba a ejecutarlo, no sólo a que exista el binario: dentro de un

@@ -31,13 +31,24 @@ Con N=10 son 90 intercambios; tarda unos 15 s.
 
 ## Topología
 
-Anillo más cuerdas: conexa por construcción, grado ≥2 para que quitar un nodo
-no la parta, y con caminos alternativos para que el multipath tenga algo que
-repartir. Cada enlace lo declara **un solo extremo** a propósito: es lo que
+`mesh.sh up N [ring|star|random]`, y la elección cambia lo que se mide:
+
+| | Qué monta | Para qué |
+|---|---|---|
+| `ring` (default) | anillo + cuerdas; con N=10, 14 aristas y grados 2-3 | el caso amable: conexa, sin puntos únicos de fallo y con caminos alternativos para el multipath |
+| `star` | todos colgando del nodo 1; grados 9 y 1 | carga un solo QKC con todo lo que no sea suyo. **Quitar el hub parte la red**, así que las bajas de nodo hay que hacerlas sobre una hoja |
+| `random` | grafo conexo con semilla (`DKMS_MESH_SEED`, default 42); con N=10, 15 aristas y grados 2-6 | lo que se parece a un despliegue real, donde nadie cablea un anillo perfecto |
+
+La aleatoria se construye como árbol de expansión aleatorio más aristas extra
+hasta grado medio ~3: un `G(n,p)` a secas puede salir partido, y una malla
+partida no mide lo que se quiere medir, mide otra cosa.
+
+En las tres, cada arista la declara **un solo extremo** a propósito: es lo que
 comprueba que la SDN se lo comunica al otro (ver "Peers ride back on the
 announcement" en `CLAUDE.md`).
 
-Con N=10 salen 12 aristas y diámetro 3.
+Medido en local con N=10, los 90 pares ordenados dan bytes idénticos en las
+tres, y la malla queda operativa —todos los buffers llenos— en unos 75 s.
 
 ## Medir
 
