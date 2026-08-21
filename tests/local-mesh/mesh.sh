@@ -24,6 +24,19 @@
 # **Memoria**: todo va dentro de un scope de systemd con `MemoryMax`. Un
 # despliegue local se ha comido una sesión de escritorio antes; ver la sección
 # de saturación del CLAUDE.md. No lo quites.
+#
+# Para medir hace falta poder levantar los dos techos que, con los defaults,
+# son constantes nuestras y no límites del sistema:
+#
+#   DKMS_MESH_TOKENS_PER_TICK   max_tokens_per_peer_per_tick (default 32, que
+#                               con tick_ms=100 son 320 claves/s por peer)
+#   DKMS_MESH_SAE_MIN_TOKENS    min_capacity_tokens del bucket por SAE, cuyo
+#                               refill sale de la rate del SDN — inútil en un
+#                               despliegue PQC-only, donde puede valer 0
+#
+# Se parchea el TOML renderizado y NO se usan variables de entorno del binario:
+# config-rs sustituye la sección entera al fijar un campo anidado por env (ver
+# CLAUDE.md), así que habría que repetir todos los campos de [generator].
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -34,6 +47,8 @@ GENCERTS="$REPO/docker/gen-certs.sh"
 DIR="${DKMS_MESH_DIR:-$REPO/tests/results/local-mesh}"
 SCOPE="dkms-local-mesh"
 MEM_MAX="${DKMS_MESH_MEM_MAX:-8G}"
+TOKENS_PER_TICK="${DKMS_MESH_TOKENS_PER_TICK:-}"
+SAE_MIN_TOKENS="${DKMS_MESH_SAE_MIN_TOKENS:-}"
 SDN_HTTP=19002
 SDN_GRPC=19000
 
@@ -78,6 +93,22 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
     python3 "$RENDER" qkc "$DIR/yml/node$n.qkc.yml" "$DIR/cfg/qkc$n" >/dev/null
 }
 
+# Levanta los topes de medida sobre el TOML ya renderizado.
+#
+# `max_tokens_per_peer_per_tick` se INSERTA tras la cabecera [generator], no se
+# anexa al final: el fichero termina en [sae_bindings], y una línea suelta al
+# final caería dentro de esa sección. [sae] no lo escribe el render, así que
+# ahí sí se puede añadir la sección entera.
+patch_dkms_toml() {
+    local toml=$1
+    if [ -n "$TOKENS_PER_TICK" ]; then
+        sed -i "/^\[generator\]/a max_tokens_per_peer_per_tick = $TOKENS_PER_TICK" "$toml"
+    fi
+    if [ -n "$SAE_MIN_TOKENS" ]; then
+        printf '\n[sae]\nmin_capacity_tokens = %s\n' "$SAE_MIN_TOKENS" >> "$toml"
+    fi
+}
+
 generate() {        # generate <N>
     local total=$1
     rm -rf "$DIR"; mkdir -p "$DIR"/{yml,cfg/sdn,logs,certs}
@@ -113,6 +144,7 @@ sae_bindings:
   sae_$n: dkms-$n
 EOF
         python3 "$RENDER" dkms "$DIR/yml/node$n.dkms.yml" "$DIR/cfg/dkms$n" >/dev/null
+        patch_dkms_toml "$DIR/cfg/dkms$n/default.toml"
 
         # Una sola CA para toda la malla: el mTLS entre DKMS exige raíz común.
         bash "$GENCERTS" "dkms-$n" 127.0.0.1 "$DIR/certs" >/dev/null 2>&1
@@ -122,18 +154,27 @@ EOF
 }
 
 write_boot() {      # el proceso principal del scope: mientras viva, vive el cgroup
+    # `starts.tsv` guarda el instante en que se lanza cada proceso. Es el t0 de
+    # los tiempos de convergencia: el primer log del módulo ya llega tarde por
+    # lo que tarde en inicializarse, así que medir desde ahí escondería
+    # justamente parte de lo que se quiere medir.
     cat > "$DIR/boot.sh" <<EOF
 #!/usr/bin/env bash
 export RUST_LOG=\${RUST_LOG:-info}
+: > "$DIR/logs/starts.tsv"
+mark() { printf '%s\\t%s\\n' "\$1" "\$(date +%s.%N)" >> "$DIR/logs/starts.tsv"; }
+mark sdn
 CONFIG_DIR="$DIR/cfg/sdn" nohup "$BIN/sdn" > "$DIR/logs/sdn.log" 2>&1 &
 echo \$! > "$DIR/logs/sdn.pid"
 for n in \$(seq 1 $1); do
+  mark "qkc\$n"
   CONFIG_DIR="$DIR/cfg/qkc\$n" nohup "$BIN/qkc" --config "$DIR/cfg/qkc\$n/qkc.toml" \\
       > "$DIR/logs/qkc\$n.log" 2>&1 &
   echo \$! > "$DIR/logs/qkc\$n.pid"
 done
 for r in orr dkms; do
   for n in \$(seq 1 $1); do
+    mark "\$r\$n"
     CONFIG_DIR="$DIR/cfg/\$r\$n" nohup "$BIN/\$r" > "$DIR/logs/\$r\$n.log" 2>&1 &
     echo \$! > "$DIR/logs/\$r\$n.pid"
   done

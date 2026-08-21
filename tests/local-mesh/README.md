@@ -39,6 +39,42 @@ announcement" en `CLAUDE.md`).
 
 Con N=10 salen 12 aristas y diámetro 3.
 
+## Medir
+
+```bash
+./stress.sh --arm A                 # defaults de fábrica
+./stress.sh --arm B --tokens 3200   # con el techo levantado
+./bootstrap_times.py                # tiempos de convergencia de la malla viva
+```
+
+`stress.sh` carga **todos los pares ordenados a la vez** (90 con N=10) y saca
+tres tramos por punto del barrido: ráfaga con los buffers llenos —que mide la
+ruta de servicio, mTLS + OTP + ETSI-020, sin el generador de por medio—,
+sostenido una vez drenado el buffer —que mide la cadena DKMS→ORR→QKC— y
+recuperación. Reutiliza `../testbed/sae_load.py` como cliente de carga.
+
+**Las dos ramas existen porque con los defaults el techo no es del sistema, es
+nuestro**: `tick_ms=100` × `max_tokens_per_peer_per_tick=32` son 320 claves/s
+por peer. La rama A caracteriza lo que se lleva un operador; la B levanta ese
+techo y desactiva el bucket por SAE para que aparezca el límite real. Medido
+en local con N=4 y 2 hilos por par: 243,8 claves/s por par sostenidas contra
+las 320 del techo, con p50 = 2,9 ms y p99 = 9,3 ms.
+
+El informe atribuye los rechazos él solo, que es lo que evita sacar
+conclusiones falsas: un `429` con el buffer ENC vacío es contrapresión
+legítima —la demanda supera al refill—, no un límite de capacidad. Por eso el
+muestreo recoge también la rate que la SDN asigna, que en un despliegue
+PQC-only no significa nada y puede caer a cero.
+
+Y muestrea la integridad bajo carga: recupera con `dec_keys` una muestra de
+las claves servidas y compara el sha256. Una sola discrepancia importaría más
+que toda la curva de throughput.
+
+`bootstrap_times.py` no instrumenta nada: se apoya en las líneas periódicas de
+cada módulo y en `starts.tsv`, que `mesh.sh` escribe con el instante exacto en
+que lanza cada proceso — el t0 es el lanzamiento y no el primer log, porque
+entre uno y otro está la inicialización, que es parte de lo que se mide.
+
 ## Cambiar la topología en caliente
 
 `mesh.sh link <n> [vecinos...]` reescribe los vecinos que declara un QKC y lo
