@@ -347,6 +347,26 @@ pub struct GeneratorCfg {
     /// Cap de tokens consumibles por un peer por tick. Evita que un peer
     /// hot monopolice el dispatch.
     pub max_tokens_per_peer_per_tick: u32,
+
+    /// Emisiones simultáneas de TODO el tick, sumando todos los peers.
+    ///
+    /// El tick recorría los peers de uno en uno esperando a que terminara el
+    /// lote de cada uno, así que una vuelta duraba la suma de las latencias en
+    /// vez de `tick_ms`: con 9 peers eso son ~2,6 vueltas/s en lugar de 10, y
+    /// la tasa por peer cae como O(1/N) — peor cuanto más grande es la malla.
+    /// Medido el 2026-08-24 en CESGA: 83,7 claves/s por peer contra las 320
+    /// que el bucket permitía y las 139 que la SDN asignaba.
+    ///
+    /// Ahora las emisiones de todos los peers van a la vez, pero **acotadas**:
+    /// soltarlas sin límite multiplicaría por el número de peers la presión
+    /// sobre el ORR, y este camino no tiene contrapresión — con el techo de
+    /// tokens subido ×10 el proceso murió por OOM (16,6 GB). Este número es
+    /// esa contrapresión, explícita y ajustable.
+    ///
+    /// Default 128: 4× lo que había en la práctica (un solo lote de 32) y muy
+    /// por debajo de lo que reventó.
+    pub max_emits_in_flight: usize,
+
     /// Cap superior del bucket (cuántos segundos de rate pueden acumularse
     /// si el peer no ha consumido). Default 2s.
     pub bucket_cap_seconds: f64,
@@ -381,6 +401,7 @@ impl Default for GeneratorCfg {
             ack_socket_addr: None,
             ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
+            max_emits_in_flight: 128,
             bucket_cap_seconds: 2.0,
             default_fill_rate_keys_per_s: 0.0,
             max_fill_rate_keys_per_s: 0.0,

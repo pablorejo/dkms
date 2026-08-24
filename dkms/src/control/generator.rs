@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures::StreamExt;
 use parking_lot::Mutex;
 use rand::RngCore;
 use tracing::{debug, info, warn};
@@ -642,6 +643,9 @@ impl Generator {
                 (p.clone(), r)
             })
             .collect();
+        // Primero se decide QUÉ emitir (rate de la SDN, token bucket y hueco
+        // de buffer, todo por peer); después se emite todo junto.
+        let mut plan: Vec<(String, u32)> = Vec::with_capacity(work.len());
         for (peer, rate) in work {
             if rate <= 0.0 {
                 continue;
@@ -685,26 +689,61 @@ impl Generator {
             // con tokens=400 y peer ORR sin master_secret aún, el código
             // anterior generaba 4000 warn/seg/pod = 752 MB de logs en
             // ~10 min, saturando disk I/O del pod.
-            let futs = (0..tokens).map(|_| {
+            plan.push((peer, tokens));
+        }
+
+        // Todas las emisiones del tick a la vez, con un tope global.
+        //
+        // Antes se hacía un `join_all` por peer DENTRO del bucle, esperando a
+        // terminar con uno antes de empezar con el siguiente. Las emisiones a
+        // un mismo peer iban concurrentes, sí, pero los peers no: una vuelta
+        // duraba la suma de las latencias en vez de `tick_ms`. Medido en CESGA
+        // el 2026-08-24 con 9 peers: 2,6 vueltas/s en lugar de 10, y 83,7
+        // claves/s por peer contra las 139 que la SDN asignaba y las 320 del
+        // bucket. Y empeora al crecer la malla: la tasa por peer cae como
+        // O(1/N), justo cuando más peers hay.
+        //
+        // El tope es deliberado y no un `join_all` sobre todo: sin él la
+        // presión sobre el ORR se multiplica por el número de peers, y este
+        // camino NO tiene contrapresión — subir el techo de tokens ×10 mató el
+        // proceso por OOM. Ver `max_emits_in_flight`.
+        if plan.is_empty() {
+            return;
+        }
+        let items: Vec<String> = plan
+            .iter()
+            .flat_map(|(peer, n)| std::iter::repeat_n(peer.clone(), *n as usize))
+            .collect();
+        let results: Vec<(String, bool, Option<String>)> = futures::stream::iter(items)
+            .map(|peer| {
                 let me = self.clone();
-                let peer = peer.clone();
-                async move { me.emit_key(&peer).await }
-            });
-            let results = futures::future::join_all(futs).await;
-            let total = results.len();
-            let mut ok = 0usize;
-            let mut sample_err: Option<String> = None;
-            for r in results {
-                match r {
-                    Ok(_) => ok += 1,
-                    Err(e) => {
-                        if sample_err.is_none() {
-                            sample_err = Some(e.to_string());
-                        }
+                async move {
+                    match me.emit_key(&peer).await {
+                        Ok(_) => (peer, true, None),
+                        Err(e) => (peer, false, Some(e.to_string())),
                     }
                 }
+            })
+            .buffer_unordered(self.cfg.max_emits_in_flight.max(1))
+            .collect()
+            .await;
+
+        // Los fallos se agregan por peer y sale UNA línea por peer y tick. Con
+        // una por emisión, un peer cuyo ORR aún no tiene master_secret generaba
+        // miles de warn/s: 752 MB de logs en 10 minutos, medido en 2026-05-25.
+        let mut failures: HashMap<String, (usize, usize, Option<String>)> = HashMap::new();
+        for (peer, ok, err) in results {
+            let e = failures.entry(peer).or_insert((0, 0, None));
+            if ok {
+                e.0 += 1;
+            } else {
+                e.1 += 1;
+                if e.2.is_none() {
+                    e.2 = err;
+                }
             }
-            let failed = total - ok;
+        }
+        for (peer, (ok, failed, sample_err)) in failures {
             if failed > 0 {
                 warn!(
                     peer = %peer,
