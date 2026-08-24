@@ -88,6 +88,13 @@ sampler() {
                 strip < "$MESH_DIR/logs/dkms$n.log" | grep -a generator.state | tail -"$NODES"
                 printf -- '-- orr%s\n' "$n"
                 strip < "$MESH_DIR/logs/orr$n.log" | grep -a 'orr.state' | tail -1
+                # El keystore del QKC: `misses` y `wenc_to` son lo que dice si
+                # el enlace se queda sin material. Con enlaces QKD es la
+                # evidencia directa de que el límite es la fibra y no el
+                # generador del DKMS — sin esto hay que deducirlo de los
+                # agregados.
+                printf -- '-- qkc%s\n' "$n"
+                strip < "$MESH_DIR/logs/qkc$n.log" | grep -a 'keystore.levels' | tail -3
                 printf -- '-- rate dkms-%s: %s\n' "$n" \
                     "$(curl -s --max-time 3 "$SDN/rate/dkms-$n" || echo '{}')"
             done

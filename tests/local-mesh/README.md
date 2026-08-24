@@ -99,6 +99,31 @@ techo y desactiva el bucket por SAE para que aparezca el límite real. Medido
 en local con N=4 y 2 hilos por par: 243,8 claves/s por par sostenidas contra
 las 320 del techo, con p50 = 2,9 ms y p99 = 9,3 ms.
 
+### QKD vs PQC: la topología sólo se nota cuando la capacidad significa algo
+
+Las mismas tres topologías, 10 nodos, con `LINK_TYPE=qkd` (CESGA, 2026-08-24),
+a 1 hilo por par:
+
+| Topología | PQC | QKD | Techo de fibra | ¿Lo alcanza? |
+|---|---|---|---|---|
+| anillo (14 aristas) | 7 773 | 7 594 | 11 121 | no — manda el generador |
+| aleatoria (15) | 7 759 | 7 714 | 11 915 | no — manda el generador |
+| **estrella (9)** | 7 855 | **6 706** | **7 943** | **sí, al 84 %** |
+
+El techo de fibra sale de `9 aristas × 1588,7 claves/s ÷ 1,8 saltos por clave`
+(en la estrella, 18 de los 90 pares ordenados cruzan una arista y 72 cruzan
+dos, pasando por el hub).
+
+**Con PQC la estrella rendía igual que el anillo; con QKD es un 14 % peor a 1
+hilo y un 33 % peor a 4.** El centinela de 1e9 de las aristas PQC estaba
+ocultando por completo el coste de la topología: sin capacidad finita, daba
+igual concentrar todo el tráfico en un hub. Anillo y aleatoria no llegan a
+tocar su techo de fibra, así que ahí el cuello sigue siendo el bucle de
+emisión del DKMS.
+
+Y la señal del SDN pasa a tener sentido: **1 100-1 150 claves/s** de máximo
+frente a los ~9·10⁷ que reportaba en PQC.
+
 ### Lo que salió en CESGA (10 nodos, 2026-08-21)
 
 Cuatro campañas en nodos de cómputo del FT3, ~25 min cada una:
