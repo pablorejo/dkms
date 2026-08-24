@@ -287,6 +287,25 @@ const T_REPLAN_SECONDS: f64 = 5.0;
 /// "fill at λ" required by paper §6's relaxation.
 const LAMBDA_SLACK_PENALTY: f64 = 1e3;
 
+/// Carga de una arista tras la fase 1: `((qkc_a, qkc_b), flujo, capacidad)`.
+/// Vacío salvo con [`lp_diag_enabled`].
+type EdgeLoads = Vec<((String, String), f64, f64)>;
+
+/// Diagnóstico del LP: `SDN_LOG_LP_DIAG=1`.
+///
+/// Saca por recompute la utilización de cada arista, que es lo único que
+/// distingue "no hay capacidad" de "la hay pero concentrada en unas pocas
+/// aristas". Cuesta recuperar 2·|K| variables por arista del solver, así que
+/// va bajo interruptor: en marcha normal basta con `slack_*`, que es gratis.
+fn lp_diag_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SDN_LOG_LP_DIAG")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// LP backend, selected once per process via the `SDN_SOLVER` env var:
 /// `microlp` (default — the historical pure-Rust simplex, exact basic
 /// solutions but dense and single-core: stalls at N≥40 / ≥1560
@@ -635,6 +654,24 @@ impl McmcfSolver {
                 *rates.entry(fid.clone()).or_insert(0.0) += c.drain_rate;
                 rates_grade.insert((fid, c.grade), c.drain_rate);
             }
+            // Esta rama sale ANTES de las dos fases del LP, así que devuelve
+            // `edge_flows` vacío — y sin flujos por arista no hay tabla WCMP,
+            // con lo que el QKC encamina por camino más corto y el multipath
+            // del MCMCF no llega a existir. Medido el 2026-08-24: es la rama
+            // que se toma casi siempre, porque el generador rebasa
+            // `capacity_per_peer` (4096 → 4107) al emitir un tick entero sin
+            // mirar a mitad, el DKMS reporta `level > capacity`, `remaining()`
+            // satura a 0 para TODAS las commodities y el cortocircuito se
+            // dispara. Un rebasamiento del 0,3 % deja sin multipath a la red
+            // entera. De ahí el log: era invisible.
+            let overfull = active.iter().filter(|c| c.level > c.capacity).count();
+            warn!(
+                n_commodities = active.len(),
+                overfull,
+                drain_positive = active.iter().filter(|c| c.drain_rate > 0.0).count(),
+                "mcmcf.diag: todas las commodities sin hueco de buffer; λ=0 y SIN flujos por \
+                 arista, así que el forwarding cae a camino más corto y no hay multipath",
+            );
             return McmcfSolution {
                 lambda: 0.0,
                 edge_flows: Vec::new(),
@@ -678,11 +715,49 @@ impl McmcfSolver {
         // variable set and objective change.
 
         // ----- Phase 1: solve max λ − M·Σ σ_k ---------------------------
-        let (lambda_star, sigmas) =
+        let (lambda_star, sigmas, edge_loads) =
             match self.solve_lambda(&active, &arcs, &arc_idx, &node_set, &undirected, inputs) {
                 Some(v) => v,
                 None => return zero_rate_fallback(&active),
             };
+
+        // Por qué λ sale lo que sale.
+        //
+        // `max λ − 1000·Σσ_k` minimiza la holgura ANTES de tocar λ, así que
+        // una sola commodity que no se pueda servir aplasta λ a cero para
+        // TODA la red — y con λ=0 no hay llenado proactivo en ningún par,
+        // sólo se compensa el drenaje medido. Distinguir eso de "no hay
+        // capacidad" exige ver las dos cosas juntas: cuánta holgura queda sin
+        // servir y cómo de llenas están las aristas. Medido el 2026-08-24:
+        // λ=0 sostenido con la demanda total (5 143 claves/s a 1,93 saltos)
+        // cabiendo de sobra en la fibra (22 241), lo que apunta a saturación
+        // LOCAL de unas pocas aristas y no a falta de capacidad global.
+        let n_slack = sigmas.iter().filter(|s| **s > FLOW_EPSILON).count();
+        let slack_total: f64 = sigmas.iter().sum();
+        if n_slack > 0 || lambda_star <= FLOW_EPSILON {
+            let mut top: Vec<String> = Vec::new();
+            if !edge_loads.is_empty() {
+                let mut by_util: Vec<(f64, &(String, String), f64)> = edge_loads
+                    .iter()
+                    .map(|(k, load, cap)| (load / cap.max(f64::EPSILON), k, *load))
+                    .collect();
+                by_util.sort_by(|a, b| b.0.total_cmp(&a.0));
+                top = by_util
+                    .iter()
+                    .take(4)
+                    .map(|(u, k, load)| format!("{}-{}:{:.0}%({:.0})", k.0, k.1, u * 100.0, load))
+                    .collect();
+            }
+            warn!(
+                lambda = lambda_star,
+                n_commodities = active.len(),
+                slack_commodities = n_slack,
+                slack_total = format!("{slack_total:.1}"),
+                edges_most_loaded = ?top,
+                "mcmcf.diag: λ colapsado o con holgura sin servir \
+                 (SDN_LOG_LP_DIAG=1 para la utilización por arista)",
+            );
+        }
 
         // ----- Phase 2: solve max Σ η_k subject to λ ≥ λ* − slack ---------
         // Lex refinement is opt-in via env var because microlp's
@@ -800,7 +875,7 @@ impl McmcfSolver {
         node_set: &HashSet<String>,
         undirected: &[((String, String), f64)],
         inputs: &McmcfInputs,
-    ) -> Option<(f64, Vec<f64>)> {
+    ) -> Option<(f64, Vec<f64>, EdgeLoads)> {
         let mut vars = ProblemVariables::new();
         let lambda = vars.add(variable().min(0.0));
         let x: Vec<Vec<Variable>> = build_flow_vars(&mut vars, active, arcs, &inputs.pqc_edges);
@@ -875,14 +950,43 @@ impl McmcfSolver {
             }
             constraints.push(expr.leq(*cap));
         }
+        // Carga por arista: sólo bajo `SDN_LOG_LP_DIAG=1`. Recuperarla exige
+        // pedir las 2·|K| variables de flujo de cada arista —con 90
+        // commodities y 14 aristas son 2520 valores— y esto corre cada
+        // `mcf_period_ms`. Barato comparado con el LP, pero no gratis, y sólo
+        // hace falta cuando se está diagnosticando.
+        let diag = lp_diag_enabled();
         let mut wanted = Vec::with_capacity(1 + sigma.len());
         wanted.push(lambda);
         wanted.extend_from_slice(&sigma);
+        let mut edge_order: Vec<((String, String), f64)> = Vec::new();
+        if diag {
+            for ((a, b), cap) in undirected {
+                let ij = arc_idx[&(a.clone(), b.clone())];
+                let ji = arc_idx[&(b.clone(), a.clone())];
+                for row in x.iter().take(active.len()) {
+                    wanted.push(row[ij]);
+                    wanted.push(row[ji]);
+                }
+                edge_order.push(((a.clone(), b.clone()), *cap));
+            }
+        }
         match solve_lp_backend(vars, obj, constraints, &wanted) {
             Ok(vals) => {
                 let lambda_v = vals[0].max(0.0);
-                let sigmas: Vec<f64> = vals[1..].iter().map(|v| v.max(0.0)).collect();
-                Some((lambda_v, sigmas))
+                let n_sigma = sigma.len();
+                let sigmas: Vec<f64> = vals[1..=n_sigma].iter().map(|v| v.max(0.0)).collect();
+                let mut loads: EdgeLoads = Vec::new();
+                if diag {
+                    let per_edge = 2 * active.len();
+                    let base = 1 + n_sigma;
+                    for (i, (key, cap)) in edge_order.into_iter().enumerate() {
+                        let from = base + i * per_edge;
+                        let sum: f64 = vals[from..from + per_edge].iter().map(|v| v.max(0.0)).sum();
+                        loads.push((key, sum, cap));
+                    }
+                }
+                Some((lambda_v, sigmas, loads))
             }
             Err(e) => {
                 warn!(error = %e, "MCMCF-λ phase-1 LP failed");
