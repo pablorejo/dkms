@@ -71,6 +71,35 @@ techo y desactiva el bucket por SAE para que aparezca el límite real. Medido
 en local con N=4 y 2 hilos por par: 243,8 claves/s por par sostenidas contra
 las 320 del techo, con p50 = 2,9 ms y p99 = 9,3 ms.
 
+### Lo que salió en CESGA (10 nodos, 2026-08-21)
+
+Cuatro campañas en nodos de cómputo del FT3, ~25 min cada una:
+
+| Topología | 1 hilo/par | 4 hilos/par | 16 hilos/par |
+|---|---|---|---|
+| anillo | 7 773 claves/s | **8 077** | 5 702 |
+| estrella | 7 855 claves/s | **8 146** | 5 512 |
+| aleatoria | 7 759 claves/s | **8 059** | 6 048 |
+
+Las tres se comportan igual, y que la estrella no sea peor es un resultado:
+el hub queda con grado 9 pero el transporte DKMS↔DKMS es PQC extremo a
+extremo y no se apoya en el grafo. El óptimo está en 4 hilos por par; a 16 la
+tasa **cae** y la latencia p50 pasa de 7,5 a 39 ms — sobresaturación, no
+rotura: sigue sirviendo con la integridad intacta.
+
+7 800 claves muestreadas con `dec_keys` bajo carga, todas con bytes
+idénticos. `recv_corrupt = 0` en las tres mallas y los 30 ORR con
+`dropped_no_secret = 0` y `peel_failed = 0`. La malla queda operativa en 70 s.
+
+**La rama B enseñó que el techo por defecto es lo que mantiene el sistema
+estable.** A 1 hilo por par dio 21 714 claves/s agregadas (241 por par) y
+**cero rechazos**, casi el triple. Pero a 4 hilos se derrumbó a 2 749, a 16 se
+quedó en 32 y el trabajo murió por OOM con 16,6 GB, frente a los ~6 GB
+estables de la rama A. Sin ese tope el generador produce más rápido de lo que
+la cadena ORR→QKC transporta y las colas crecen sin freno: **falta
+contrapresión entre el generador y el transporte**, y el tope la estaba
+supliendo.
+
 El informe atribuye los rechazos él solo, que es lo que evita sacar
 conclusiones falsas: un `429` con el buffer ENC vacío es contrapresión
 legítima —la demanda supera al refill—, no un límite de capacidad. Por eso el

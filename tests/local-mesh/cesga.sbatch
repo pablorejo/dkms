@@ -2,8 +2,8 @@
 #SBATCH -J dkms-stress
 #SBATCH -p short
 #SBATCH -N 1
-#SBATCH --exclusive
-#SBATCH --mem=32G
+#SBATCH -c 32
+#SBATCH --mem=16G
 #SBATCH -t 01:30:00
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.out
@@ -12,11 +12,26 @@
 #
 #   sbatch --export=ARM=A tests/local-mesh/cesga.sbatch
 #   sbatch --export=ARM=B,TOKENS=3200 tests/local-mesh/cesga.sbatch
+#   sbatch --export=ARM=A,TOPO=star tests/local-mesh/cesga.sbatch
 #
-# `--exclusive`: con 90 pares ordenados bajo carga, si el nodo va compartido lo
-# que se mide es el vecino. El tope de memoria lo pone SLURM, así que `mesh.sh`
-# detecta que no puede crear su scope de systemd —dentro de un trabajo no hay
-# bus de sesión de usuario— y se apoya en el cgroup del trabajo.
+# 32 cores y 16 GB, y NO `--exclusive`: pedir el nodo entero en el FT3 lo manda
+# a una cola de días —medido, un inicio estimado a >20 h— y con 31 módulos más
+# unos 60 procesos de carga sobran de largo. El riesgo de compartir nodo es que
+# se mida al vecino, así que el muestreo de `stress.sh` recoge `%CPU` cada 5 s:
+# si la CPU no está saturada por nosotros, la contención se ve.
+#
+# 16 GB le bastan de sobra a la rama A: las tres campañas medidas el 2026-08-21
+# (anillo, estrella y aleatoria, 10 nodos) picaron sobre 6 GB. A la rama B NO:
+# con el techo ×10 el generador produce más rápido de lo que la cadena ORR→QKC
+# transporta, las colas crecen sin freno y el trabajo murió por OOM a los 16,6
+# GB. Subir la memoria sólo retrasa el final — lo que falta es contrapresión
+# entre el generador y el transporte. Si repites la rama B, pide 64 GB Y
+# quédate en 1 hilo por par, que es donde sí se sostiene (21 714 claves/s
+# agregadas, cero rechazos).
+#
+# El tope de memoria lo pone SLURM, así que `mesh.sh` detecta que no puede
+# crear su scope de systemd —dentro de un trabajo no hay bus de sesión de
+# usuario— y se apoya en el cgroup del trabajo.
 #
 # Dos cosas del FT3 que no son obvias y cuestan una tarde si no se saben:
 #
@@ -32,6 +47,7 @@ set -e
 ARM="${ARM:-A}"
 TOKENS="${TOKENS:-3200}"
 NODES="${NODES:-10}"
+TOPO="${TOPO:-ring}"
 THREADS="${THREADS:-1 4 16}"
 DURATION="${DURATION:-300}"
 
@@ -48,7 +64,8 @@ export DKMS_MESH_DIR="${TMPDIR:-/tmp}/dkms-mesh-$SLURM_JOB_ID"
 export DKMS_STRESS_OUT="${TMPDIR:-/tmp}/dkms-stress-$SLURM_JOB_ID"
 mkdir -p "$DKMS_STRESS_OUT"
 
-echo "########## $(hostname) · $(nproc) cpus · rama $ARM · $(date '+%F %T') ##########"
+export DKMS_MESH_TOPO="$TOPO"
+echo "########## $(hostname) · $(nproc) cpus · rama $ARM · topología $TOPO · $(date '+%F %T') ##########"
 gcc --version | head -1
 rustc --version
 "$PROTOC" --version
@@ -64,7 +81,7 @@ ARGS=(--arm "$ARM" --nodes "$NODES" --threads "$THREADS" --duration "$DURATION")
 
 # El informe y los CSV comprimidos al home; el scratch del nodo se va con el
 # trabajo.
-DEST="$HOME/dkms_rust/results-$ARM-$SLURM_JOB_ID"
+DEST="$HOME/dkms_rust/results-$ARM-$TOPO-$SLURM_JOB_ID"
 mkdir -p "$DEST"
 for d in "$DKMS_STRESS_OUT"/stress-"$ARM"-*; do
     [ -d "$d" ] || continue
