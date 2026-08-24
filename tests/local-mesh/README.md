@@ -124,6 +124,30 @@ emisión del DKMS.
 Y la señal del SDN pasa a tener sentido: **1 100-1 150 claves/s** de máximo
 frente a los ~9·10⁷ que reportaba en PQC.
 
+### El multipath activado: antes y después (anillo QKD, 10 nodos)
+
+Tercera corrida de la misma receta (`9245927`), con el encaminamiento ya
+derivado de topología+capacidad en vez de los edge-flows del LP, y el
+generador sin rebasar el buffer:
+
+| | Camino más corto (`9238237`) | Multipath (`9245927`) |
+|---|---|---|
+| sostenido, 1 hilo/par | 13 666 claves/s | **14 752** (+8 %) |
+| sostenido, 4 y 16 hilos | 11 973 / 10 222 | 11 927 / 10 192 (igual) |
+| **buffer ENC vacío** bajo carga | **36 %** de las muestras | **1 %** |
+| enlaces ociosos bajo carga | sí (secos junto a parados) | **0** — `taken` en banda 1,5× |
+| commodities con `level>capacity` | 90/90 | **0** |
+| integridad | 2 600 idénticas | 2 600 idénticas |
+
+La lectura honesta: el throughput agregado apenas sube (+8 % en el óptimo,
+igual a más concurrencia, donde ata la ruta de servicio) porque la fibra
+agregada ya estaba cerca de su límite. Lo que cambia es **cómo** se sirve:
+los 28 extremos de enlace muestreados trabajan todos (mediana de `taken`
+262 860, mínimo 209 814), el buffer casi nunca se vacía, y la recuperación
+tras la carga baja de 26-36 s a 25-30 s. El sistema pasa de "unas aristas al
+límite y otras paradas" a "toda la fibra en juego" — que es la propiedad que
+importa cuando la demanda no es uniforme.
+
 ### El bucle de emisión: antes y después (anillo QKD, 10 nodos)
 
 Misma receta, `9229899` contra `9238237`, cambiando sólo que el generador
