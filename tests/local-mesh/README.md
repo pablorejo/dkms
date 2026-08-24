@@ -50,6 +50,34 @@ announcement" en `CLAUDE.md`).
 Medido en local con N=10, los 90 pares ordenados dan bytes idénticos en las
 tres, y la malla queda operativa —todos los buffers llenos— en unos 75 s.
 
+## Enlaces QKD simulados
+
+Por defecto los enlaces son PQC: los QKC derivan las claves entre sí con
+ML-KEM. Con `DKMS_MESH_LINK_TYPE=qkd` se levanta **un `quditto` por arista** y
+los QKC sacan el material de él por ETSI-014.
+
+```bash
+DKMS_MESH_LINK_TYPE=qkd ./mesh.sh up 10 ring
+```
+
+Dos diferencias que no son de detalle:
+
+- **Los dos extremos declaran el enlace.** La SDN no puede suministrar el
+  `kme_url` —no sabe dónde está el KME de esa institución—, así que un enlace
+  declarado por un solo lado quedaría a medias. En PQC se sigue declarando por
+  un solo extremo a propósito.
+- **La capacidad de la arista pasa a significar algo.** En PQC lleva un
+  centinela de 1e9 y λ no tiene nada que la acote; en QKD la SDN la dimensiona
+  con `cap = R0·10^(−α·d/10)`. Con los defaults (`R0=2000`, `α=0.2`, `d=5km`)
+  salen **1588,7 claves/s por arista**, y `mesh.sh up` lo imprime al arrancar.
+  Ojo: **la capacidad NO es R0**, y confundirlos ha costado más de un "déficit
+  contra el teórico" que no lo era.
+
+Los dos QKC de un enlace apuntan al mismo quditto: uno pide `enc_keys` y el
+otro recupera esas mismas con `dec_keys`, así que **compiten por la misma FIFO**
+— `R0` es por enlace, no por sentido. Se ajusta con `DKMS_MESH_R0`,
+`DKMS_MESH_ALPHA` y `DKMS_MESH_DIST_KM`.
+
 ## Medir
 
 ```bash

@@ -40,6 +40,19 @@
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
 #
+#   DKMS_MESH_LINK_TYPE         pqc (default) o qkd. En modo qkd se levanta un
+#                               quditto POR ARISTA —los dos QKC del enlace
+#                               apuntan al mismo, uno pide enc_keys y el otro
+#                               dec_keys con esos ID— y los enlaces se declaran
+#                               en AMBOS extremos, porque la SDN no puede
+#                               inventarse el kme_url. Con esto la capacidad de
+#                               la arista pasa a significar algo:
+#                               cap = R0 · 10^(-alpha·d/10), en vez del
+#                               centinela de 1e9 de las aristas pqc.
+#   DKMS_MESH_R0                R0 del quditto en claves/s (default 2000)
+#   DKMS_MESH_ALPHA             atenuación dB/km (default 0.2)
+#   DKMS_MESH_DIST_KM           distancia del enlace (default 5)
+#
 #   DKMS_MESH_TOKENS_PER_TICK   max_tokens_per_peer_per_tick (default 32, que
 #                               con tick_ms=100 son 320 claves/s por peer)
 #   DKMS_MESH_SAE_MIN_TOKENS    min_capacity_tokens del bucket por SAE, cuyo
@@ -65,6 +78,13 @@ SDN_HTTP=19002
 SDN_GRPC=19000
 TOPO="${DKMS_MESH_TOPO:-ring}"
 SEED="${DKMS_MESH_SEED:-42}"
+LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
+R0="${DKMS_MESH_R0:-2000}"
+ALPHA="${DKMS_MESH_ALPHA:-0.2}"
+DIST_KM="${DKMS_MESH_DIST_KM:-5}"
+# Un quditto por arista. 21xxx no choca con los 20000+100n de los módulos ni
+# con los 19xxx de la SDN.
+qd_port() { echo $(( 21000 + $1 )); }
 
 # Puertos: el nodo n ocupa el rango 20000+(n-1)*100 … +9. Con N≤10 no toca los
 # 19xxx de la SDN.
@@ -128,10 +148,31 @@ for a, b in sorted(edges):
 for k in range(1, n + 1):
     print("%d\t%s" % (k, " ".join(str(x) for x in declared[k])))
 TOPO_PY
+    # Lista plana de aristas con un índice estable: es lo que da su puerto a
+    # cada quditto y lo que permite que los dos extremos apunten al mismo.
+    awk -F'\t' '{ n = split($2, v, " "); for (i = 1; i <= n; i++) print $1, v[i] }' \
+        "$DIR/topology.tsv" | awk '{ print NR-1, $1, $2 }' > "$DIR/edges.tsv"
+}
+
+# Aristas que tocan al nodo n, en las dos direcciones -> "idx vecino".
+#
+# En qkd las declaran los DOS extremos: el `kme_url` no lo puede suministrar la
+# SDN, así que un enlace declarado por un solo lado quedaría a medias — el otro
+# QKC lo vería ofrecido por la SDN, no tendría con qué levantarlo, y lo avisaría
+# por log. En pqc se sigue declarando por un solo extremo a propósito.
+incident_of() {
+    awk -v n="$1" '$2 == n { print $1, $3 } $3 == n { print $1, $2 }' "$DIR/edges.tsv"
 }
 
 neighbours_of() {   # neighbours_of <n>
     awk -F'\t' -v n="$1" '$1 == n { print $2 }' "$DIR/topology.tsv"
+}
+
+# Índice de la arista {a,b} en edges.tsv, que es lo que le da su puerto al
+# quditto compartido por los dos extremos.
+edge_idx() {
+    awk -v a="$1" -v b="$2" \
+        '($2 == a && $3 == b) || ($2 == b && $3 == a) { print $1; exit }' "$DIR/edges.tsv"
 }
 
 write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
@@ -144,7 +185,20 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
         echo "ports: {peer: $(peer_port "$n"), local: $(local_port "$n"), admin: $(admin_port "$n")}"
         if (( $# > 0 )); then
             echo "links:"
-            for nb in "$@"; do echo "  - {neighbor_id: $nb, type: pqc}"; done
+            for nb in "$@"; do
+                if [ "$LINK_TYPE" = qkd ]; then
+                    # Los dos extremos apuntan al MISMO quditto: uno pedirá
+                    # enc_keys y el otro recuperará esas mismas por dec_keys.
+                    # r0/alpha/distance no los usa el QKC — se los pasa a la
+                    # SDN, que dimensiona la arista con r0·10^(-alpha·d/10).
+                    printf '  - {neighbor_id: %s, neighbor_addr: "127.0.0.1:%s", type: qkd, ' \
+                        "$nb" "$(peer_port "$nb")"
+                    printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s}\n' \
+                        "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$DIST_KM"
+                else
+                    echo "  - {neighbor_id: $nb, type: pqc}"
+                fi
+            done
         fi
     } > "$DIR/yml/node$n.qkc.yml"
     python3 "$RENDER" qkc "$DIR/yml/node$n.qkc.yml" "$DIR/cfg/qkc$n" >/dev/null
@@ -176,7 +230,11 @@ generate() {        # generate <N>
     for n in $(seq 1 "$total"); do
         mkdir -p "$DIR/cfg/qkc$n" "$DIR/cfg/orr$n" "$DIR/cfg/dkms$n"
         # shellcheck disable=SC2046
-        write_qkc_yml "$n" $(neighbours_of "$n")
+        if [ "$LINK_TYPE" = qkd ]; then
+            write_qkc_yml "$n" $(incident_of "$n" | awk '{print $2}')
+        else
+            write_qkc_yml "$n" $(neighbours_of "$n")
+        fi
 
         cat > "$DIR/yml/node$n.orr.yml" <<EOF
 orr_id: "orr_$n"
@@ -224,6 +282,21 @@ mark() { printf '%s\\t%s\\n' "\$1" "\$(date +%s.%N)" >> "$DIR/logs/starts.tsv"; 
 mark sdn
 CONFIG_DIR="$DIR/cfg/sdn" nohup "$BIN/sdn" > "$DIR/logs/sdn.log" 2>&1 &
 echo \$! > "$DIR/logs/sdn.pid"
+# Un quditto por arista, y antes que los QKC: si el KME no está escuchando
+# cuando el QKC intenta su primer refill, el enlace arranca con errores que
+# luego hay que distinguir de los de verdad.
+QD_LINES='__QD_LINES__'
+if [ -n "\$QD_LINES" ]; then
+  while read -r idx a b; do
+    [ -n "\$idx" ] || continue
+    mark "quditto\$idx"
+    nohup "$BIN/quditto" --listen "127.0.0.1:\$((21000 + idx))" \
+        --r0 __R0__ --alpha __ALPHA__ --distance __DIST__ \
+        > "$DIR/logs/quditto\$idx.log" 2>&1 &
+    echo \$! > "$DIR/logs/quditto\$idx.pid"
+  done <<< "\$QD_LINES"
+  sleep 2
+fi
 for n in \$(seq 1 $1); do
   mark "qkc\$n"
   CONFIG_DIR="$DIR/cfg/qkc\$n" nohup "$BIN/qkc" --config "$DIR/cfg/qkc\$n/qkc.toml" \\
@@ -239,6 +312,19 @@ for r in orr dkms; do
 done
 wait
 EOF
+    if [ "$LINK_TYPE" = qkd ]; then
+        python3 - "$DIR/boot.sh" "$DIR/edges.tsv" "$R0" "$ALPHA" "$DIST_KM" <<'PATCH_PY'
+import io, sys
+boot, edges, r0, alpha, dist = sys.argv[1:6]
+lines = io.open(edges).read().strip()
+s = io.open(boot).read()
+s = s.replace("__QD_LINES__", lines).replace("__R0__", r0)
+s = s.replace("__ALPHA__", alpha).replace("__DIST__", dist)
+io.open(boot, "w").write(s)
+PATCH_PY
+    else
+        sed -i "s/QD_LINES='__QD_LINES__'/QD_LINES=''/" "$DIR/boot.sh"
+    fi
     chmod +x "$DIR/boot.sh"
 }
 
@@ -257,9 +343,19 @@ cmd_up() {
     local total=${1:-3}
     [ -n "${2:-}" ] && TOPO="$2"
     case "$TOPO" in ring|star|random) ;; *) die "topología desconocida: $TOPO (ring|star|random)" ;; esac
+    case "$LINK_TYPE" in pqc|qkd) ;; *) die "DKMS_MESH_LINK_TYPE debe ser pqc o qkd" ;; esac
+    [ "$LINK_TYPE" = qkd ] && [ ! -x "$BIN/quditto" ] && die "falta target/release/quditto"
     [ -x "$BIN/sdn" ] || die "faltan los binarios: cargo build --release"
     (( total >= 2 && total <= 10 )) || die "N entre 2 y 10 (los puertos son 20000+100n)"
-    echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"))"
+    echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"), enlaces $LINK_TYPE)"
+    if [ "$LINK_TYPE" = qkd ]; then
+        # cap = R0·10^(-alpha·d/10) es lo que la SDN usará como capacidad de
+        # arista. Conviene tenerlo delante: NO es R0, y confundirlos ha costado
+        # más de un "déficit contra el teórico" que no lo era.
+        local cap
+        cap=$(python3 -c "print(f'{$R0 * 10 ** (-$ALPHA * $DIST_KM / 10):.1f}')")
+        echo "mesh: R0=$R0 alpha=$ALPHA d=${DIST_KM}km  ->  capacidad por arista $cap claves/s"
+    fi
     generate "$total"
     write_boot "$total"
     # Se prueba a ejecutarlo, no sólo a que exista el binario: dentro de un
@@ -294,6 +390,7 @@ cmd_up() {
 
 cmd_down() {
     systemctl --user stop "$SCOPE.scope" >/dev/null 2>&1
+    pkill -f "$BIN/quditto --listen 127.0.0.1:21" 2>/dev/null
     for p in "$DIR"/logs/*.pid; do
         [ -f "$p" ] || continue
         kill "$(cat "$p")" 2>/dev/null

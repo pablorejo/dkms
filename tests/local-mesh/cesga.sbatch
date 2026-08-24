@@ -13,6 +13,7 @@
 #   sbatch --export=ARM=A tests/local-mesh/cesga.sbatch
 #   sbatch --export=ARM=B,TOKENS=3200 tests/local-mesh/cesga.sbatch
 #   sbatch --export=ARM=A,TOPO=star tests/local-mesh/cesga.sbatch
+#   sbatch --export=ARM=A,LINK_TYPE=qkd tests/local-mesh/cesga.sbatch
 #
 # 32 cores y 16 GB, y NO `--exclusive`: pedir el nodo entero en el FT3 lo manda
 # a una cola de días —medido, un inicio estimado a >20 h— y con 31 módulos más
@@ -48,6 +49,7 @@ ARM="${ARM:-A}"
 TOKENS="${TOKENS:-3200}"
 NODES="${NODES:-10}"
 TOPO="${TOPO:-ring}"
+LINK_TYPE="${LINK_TYPE:-pqc}"
 THREADS="${THREADS:-1 4 16}"
 DURATION="${DURATION:-300}"
 
@@ -64,7 +66,7 @@ export DKMS_MESH_DIR="${TMPDIR:-/tmp}/dkms-mesh-$SLURM_JOB_ID"
 export DKMS_STRESS_OUT="${TMPDIR:-/tmp}/dkms-stress-$SLURM_JOB_ID"
 mkdir -p "$DKMS_STRESS_OUT"
 
-export DKMS_MESH_TOPO="$TOPO"
+export DKMS_MESH_TOPO="$TOPO" DKMS_MESH_LINK_TYPE="$LINK_TYPE"
 echo "########## $(hostname) · $(nproc) cpus · rama $ARM · topología $TOPO · $(date '+%F %T') ##########"
 gcc --version | head -1
 rustc --version
@@ -81,7 +83,7 @@ ARGS=(--arm "$ARM" --nodes "$NODES" --threads "$THREADS" --duration "$DURATION")
 
 # El informe y los CSV comprimidos al home; el scratch del nodo se va con el
 # trabajo.
-DEST="$HOME/dkms_rust/results-$ARM-$TOPO-$SLURM_JOB_ID"
+DEST="$HOME/dkms_rust/results-$ARM-$TOPO-$LINK_TYPE-$SLURM_JOB_ID"
 mkdir -p "$DEST"
 for d in "$DKMS_STRESS_OUT"/stress-"$ARM"-*; do
     [ -d "$d" ] || continue
