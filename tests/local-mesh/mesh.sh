@@ -344,8 +344,13 @@ cmd_up() {
     [ -n "${2:-}" ] && TOPO="$2"
     case "$TOPO" in ring|star|random) ;; *) die "topología desconocida: $TOPO (ring|star|random)" ;; esac
     case "$LINK_TYPE" in pqc|qkd) ;; *) die "DKMS_MESH_LINK_TYPE debe ser pqc o qkd" ;; esac
-    [ "$LINK_TYPE" = qkd ] && [ ! -x "$BIN/quditto" ] && die "falta target/release/quditto"
-    [ -x "$BIN/sdn" ] || die "faltan los binarios: cargo build --release"
+    # Los cinco, no sólo la SDN: faltando uno la malla arranca igual y lo que
+    # se mide son once millones de ConnectionRefused.
+    local needed=(sdn qkc orr dkms)
+    [ "$LINK_TYPE" = qkd ] && needed+=(quditto)
+    for b in "${needed[@]}"; do
+        [ -x "$BIN/$b" ] || die "falta target/release/$b — cargo build --release"
+    done
     (( total >= 2 && total <= 10 )) || die "N entre 2 y 10 (los puertos son 20000+100n)"
     echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"), enlaces $LINK_TYPE)"
     if [ "$LINK_TYPE" = qkd ]; then

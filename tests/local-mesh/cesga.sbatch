@@ -72,10 +72,14 @@ gcc --version | head -1
 rustc --version
 "$PROTOC" --version
 
-if [ ! -x target/release/sdn ]; then
-    echo "=== compilando ==="
-    time cargo build --release -j "$(nproc)"
-fi
+# Compilar SIEMPRE. El guardia anterior miraba si existía `target/release/sdn`
+# y se saltaba el build si estaba — así que borrar SÓLO el binario del módulo
+# que habías cambiado no recompilaba nada, y la campaña corría con un binario
+# ausente: medido el 2026-08-24, 51 minutos de trabajo con cero DKMS
+# escuchando y 11 millones de ConnectionRefused. Un build sin cambios le
+# cuesta a cargo un segundo; el guardia no ahorraba nada y costaba campañas.
+echo "=== compilando (incremental) ==="
+time cargo build --release -j "$(nproc)"
 
 ARGS=(--arm "$ARM" --nodes "$NODES" --threads "$THREADS" --duration "$DURATION")
 [ "$ARM" = B ] && ARGS+=(--tokens "$TOKENS")
