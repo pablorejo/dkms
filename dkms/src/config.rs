@@ -365,6 +365,13 @@ pub struct GeneratorCfg {
     ///
     /// Default 128: 4× lo que había en la práctica (un solo lote de 32) y muy
     /// por debajo de lo que reventó.
+    ///
+    /// Medido después, misma receta en CESGA: 151,8 claves/s por par ordenado
+    /// frente a 84,4, y 13 666 agregadas frente a 7 594 — un +80 %. El DKMS
+    /// pasa a consumir todo lo que la SDN le asigna, y el cuello se traslada a
+    /// la fibra: el keystore del QKC llega a `enc=0 dec=0` con cientos de
+    /// miles de `misses` en los enlaces cargados. La integridad aguanta el
+    /// nuevo ritmo (2 600 claves muestreadas idénticas, `recv_corrupt = 0`).
     pub max_emits_in_flight: usize,
 
     /// Cap superior del bucket (cuántos segundos de rate pueden acumularse

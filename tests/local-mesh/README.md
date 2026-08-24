@@ -124,6 +124,40 @@ emisión del DKMS.
 Y la señal del SDN pasa a tener sentido: **1 100-1 150 claves/s** de máximo
 frente a los ~9·10⁷ que reportaba en PQC.
 
+### El bucle de emisión: antes y después (anillo QKD, 10 nodos)
+
+Misma receta, `9229899` contra `9238237`, cambiando sólo que el generador
+emite a todos los peers a la vez con un tope global en vez de uno detrás de
+otro:
+
+| Concurrencia | Antes | Después | |
+|---|---|---|---|
+| 1 hilo/par | 7 594 claves/s | **13 666** | +80 % |
+| 4 hilos/par | 7 477 | **11 973** | +60 % |
+| 16 hilos/par | 5 595 | **10 222** | +83 % |
+
+Por par ordenado, de **84,4 a 151,8 claves/s**, contra las 139 que la SDN
+asignaba de media: el DKMS pasa de consumir el 60 % de lo que se le da a
+consumirlo entero. La malla converge además en 57 s en vez de 72, porque los
+buffers se llenan antes. Integridad intacta al nuevo ritmo.
+
+**Y el cuello se traslada a la fibra**, que es donde debe estar en un sistema
+QKD. El keystore del QKC bajo carga:
+
+```
+peer=8  enc=362  dec=368  misses=0        wenc_to=0
+peer=9  enc=311  dec=370  misses=0        wenc_to=0
+peer=1  enc=0    dec=63   misses=248974   wenc_to=28
+peer=5  enc=0    dec=0    misses=355813   wenc_to=0
+```
+
+Ojo al detalle: **no está repartido**. Los enlaces a 8 y 9 conservan stock
+mientras los de 1 y 5 están secos. Eso explica que el agregado supere el techo
+que sale de calcular con saltos medios uniformes (11 504 claves/s con 1,93
+saltos de media): el tráfico no se reparte por igual entre las aristas, unas
+se saturan y otras quedan ociosas. Es asunto del reparto del MCMCF y es el
+siguiente hilo del que tirar.
+
 ### Lo que salió en CESGA (10 nodos, 2026-08-21)
 
 Cuatro campañas en nodos de cómputo del FT3, ~25 min cada una:
