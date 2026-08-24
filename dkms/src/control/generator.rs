@@ -650,25 +650,37 @@ impl Generator {
             if rate <= 0.0 {
                 continue;
             }
+            // El hueco de buffer se mira ANTES de sacar tokens, y el lote se
+            // capa a él. Emitir el lote entero con solo comprobar `>= cap`
+            // rebasaba `capacity_per_peer` en hasta un tick (4096 → 4107), y
+            // ese 0,3 % no era cosmético: el DKMS reportaba
+            // `level > capacity`, `remaining()` saturaba a 0 en TODAS las
+            // commodities y el solver vivía en su cortocircuito de "buffers
+            // llenos" — λ=0 permanente, y hasta 2026-08-24 también la pérdida
+            // de la tabla WCMP. Capar aquí mantiene el invariante
+            // `enc + pending ≤ capacity`, que es lo que `/status` anuncia y
+            // lo que el solver asume.
+            let buf = self.pool.for_peer(&peer);
+            let used = buf.enc_len() + self.ack_pending.pending_count(&peer);
+            let headroom = self.buffer_capacity_per_peer.saturating_sub(used);
+            if headroom == 0 {
+                // Lleno: no quemamos tokens generando material que se
+                // zeroizaría al expirar el ack_pending sin uso.
+                continue;
+            }
+            let per_tick = self
+                .cfg
+                .max_tokens_per_peer_per_tick
+                .min(u32::try_from(headroom).unwrap_or(u32::MAX));
             let cap = (self.cfg.bucket_cap_seconds * rate).max(2.0);
             let tokens = {
                 let mut b = self.buckets.lock();
                 let st = b
                     .entry(peer.clone())
                     .or_insert_with(|| BucketState::new(now));
-                st.refill_and_take(now, rate, cap, self.cfg.max_tokens_per_peer_per_tick)
+                st.refill_and_take(now, rate, cap, per_tick)
             };
             if tokens == 0 {
-                continue;
-            }
-            // Si el buffer_enc destino está lleno, no quemamos tokens
-            // generando: ya tenemos material reservado pero pendiente
-            // de consumo. Esto evita acumular keys que se zeroizan al
-            // expirar el ack_pending sin uso.
-            let buf = self.pool.for_peer(&peer);
-            if buf.enc_len() + self.ack_pending.pending_count(&peer)
-                >= self.buffer_capacity_per_peer
-            {
                 continue;
             }
             // Concurrent fan-out de los `tokens` emits hacia este peer.

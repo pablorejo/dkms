@@ -102,10 +102,11 @@ pub struct McfSnapshot {
     /// rate" from "unknown".
     pub rates: HashMap<String, f64>,
 
-    /// `qkc_id → dst_qkc → Vec<WcmpNextHop>` — Ford-Fulkerson
-    /// decomposition of the LP's edge-flow assignment, expressed as
-    /// per-destination WCMP entries. The forwarding push loop POSTs
-    /// this map to each QKC's `/forwarding-table` endpoint.
+    /// `qkc_id → dst_qkc → Vec<WcmpNextHop>` — derivada de la topología y
+    /// las capacidades ([`crate::mcmcf::wcmp_from_topology`]), **no** de los
+    /// flujos del LP: la ruta debe existir siempre y cambiar al ritmo de la
+    /// topología, no heredar los casos degenerados del reparto de tasas. El
+    /// push la POSTea a `/forwarding-table` de cada QKC.
     ///
     /// Empty `(qkc, dst)` pairs fall back to topology
     /// `shortest_path_qkc` in the push loop.

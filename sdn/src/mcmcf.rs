@@ -461,11 +461,15 @@ impl McmcfSolution {
                 .insert((src.to_string(), BufferRole::DecKeys, *grade), *rate);
         }
 
-        // WCMP: full table from ALL edge-flows (any grade — used by PQC-grade
-        // frames), plus a QKD-only table from the QKD-grade flows alone (used
-        // by QKD-grade frames so they never touch a PQC link).
-        snap.wcmp = wcmp_from_edge_flows(&self.edge_flows, topology, None);
-        snap.wcmp_qkd = wcmp_from_edge_flows(&self.edge_flows, topology, Some(KeyGrade::Qkd));
+        // WCMP: derivada de topología+capacidades, NUNCA de los edge_flows
+        // del LP. La ruta debe existir siempre y cambiar al ritmo de la
+        // topología; las degeneraciones del solver (cortocircuito de buffers
+        // llenos, falsa infeasibilidad de microlp, clarabel sin fase 2)
+        // quedan así confinadas a las tasas, donde son recuperables. La tabla
+        // QKD-only usa el subgrafo QKD para que un frame de ese grado jamás
+        // pise un enlace PQC.
+        snap.wcmp = wcmp_from_topology(topology, None);
+        snap.wcmp_qkd = wcmp_from_topology(topology, Some(KeyGrade::Qkd));
         snap
     }
 }
@@ -496,6 +500,34 @@ const WCMP_MIN_WEIGHT: u32 = 1;
 /// shortest-path entries.
 /// `grade_filter`: when `Some(g)`, only edge-flows of grade `g` contribute
 /// (used to build the QKD-only table); `None` aggregates all grades.
+/// keys/s → peso WCMP entero.
+///
+/// Saturar en vez de `as u32`, que sobre un valor mayor que 2³² **envuelve
+/// módulo 2³²** en silencio y convierte un reparto en un resto de división.
+/// No es hipotético: con las aristas PQC a capacidad centinela (1e9) los
+/// valores escalados salen enormes — en el testbed se vieron pesos de
+/// 2 755 359 744, que aún caben, pero por encima de ~42,9 M claves/s ya no.
+/// Los pesos son proporciones relativas, así que topar en `u32::MAX` no
+/// cambia el sentido. `clamp` ya lleva ±∞ a los extremos correctos; solo el
+/// NaN necesita salida propia, porque `clamp` lo propaga y luego `as u32` lo
+/// volvería un 0 que el saneador del QKC descarta.
+fn quantise_weight(keys_per_second: f64) -> u32 {
+    let scaled = (keys_per_second * WCMP_WEIGHT_SCALE).round();
+    if scaled.is_nan() {
+        WCMP_MIN_WEIGHT
+    } else {
+        scaled.clamp(f64::from(WCMP_MIN_WEIGHT), f64::from(u32::MAX)) as u32
+    }
+}
+
+/// WCMP derivada de los flujos del LP — **no cableada al snapshot**.
+///
+/// Queda como gancho para el refinamiento por demanda: si algún día se quiere
+/// sesgar la ruta con la solución del LP, debe aplicarse *encima* de
+/// [`wcmp_from_topology`] y solo cuando el solver traiga una solución sana,
+/// nunca como fuente única — encaminar con la salida del LP heredaba sus
+/// casos degenerados y dejó el multipath inactivo en todo lo medido hasta
+/// 2026-08-24.
 pub fn wcmp_from_edge_flows(
     edge_flows: &[EdgeFlow],
     topology: &Topology,
@@ -533,24 +565,10 @@ pub fn wcmp_from_edge_flows(
             .filter(|(_, flow)| *flow > FLOW_EPSILON)
             .filter_map(|(nh_id, flow)| {
                 let qkc_id: u32 = nh_id.parse().ok()?;
-                // Saturar en vez de `as u32`, que sobre un i64 mayor que 2³²
-                // **envuelve módulo 2³²** en silencio y convierte un reparto
-                // en un resto de división. No es hipotético: con las aristas
-                // PQC a capacidad centinela (1e9) λ se dispara y los flujos
-                // salen enormes — en el testbed se vieron pesos de
-                // 2 755 359 744, que aún caben, pero un flujo por encima de
-                // ~42,9 M claves/s ya no. Los pesos son proporciones
-                // relativas, así que topar en u32::MAX no cambia el sentido.
-                // `clamp` ya lleva ±∞ a los extremos correctos; solo el NaN
-                // necesita salida propia, porque `clamp` lo propaga y luego
-                // `as u32` lo volvería un 0 que el saneador del QKC descarta.
-                let scaled = (flow * WCMP_WEIGHT_SCALE).round();
-                let weight = if scaled.is_nan() {
-                    WCMP_MIN_WEIGHT
-                } else {
-                    scaled.clamp(f64::from(WCMP_MIN_WEIGHT), f64::from(u32::MAX)) as u32
-                };
-                Some(WcmpNextHop { qkc_id, weight })
+                Some(WcmpNextHop {
+                    qkc_id,
+                    weight: quantise_weight(flow),
+                })
             })
             .collect();
         if hops.is_empty() {
@@ -561,6 +579,111 @@ pub fn wcmp_from_edge_flows(
         // logs).
         hops.sort_by_key(|h| h.qkc_id);
         out.entry(transit).or_default().insert(dst, hops);
+    }
+    out
+}
+
+/// Tablas WCMP derivadas **solo de la topología y las capacidades** — la
+/// fuente de encaminamiento del sistema.
+///
+/// Existe porque encaminar con la salida del LP acoplaba el *por dónde* al
+/// *cuánto*, y el encaminamiento heredaba todos los casos degenerados del
+/// reparto. Tres caminos independientes acababan en `edge_flows` vacío — el
+/// cortocircuito de buffers llenos (que con el rebasamiento del generador era
+/// el estado permanente), la falsa infeasibilidad de microlp en fase 2 a
+/// N≥20, y el backend clarabel, que apaga la fase 2 por diseño — así que el
+/// multipath del diseño no llegó a estar activo en ningún despliegue medido
+/// (2026-08-24): el QKC caía a camino más corto, unas aristas se secaban y
+/// otras quedaban ociosas. Y aunque el LP funcionara, recalcular la ruta cada
+/// 5 s desde el nivel instantáneo de los buffers haría oscilar las tablas: una
+/// ruta debe cambiar al ritmo de la topología, no al de los buffers.
+///
+/// Reparto: para cada destino se hace BFS por saltos y cada nodo reparte
+/// entre sus vecinos **estrictamente más cercanos** al destino — la distancia
+/// decrece en cada salto, así que no hay bucles por construcción, aunque cada
+/// QKC decida por su cuenta. El peso de cada next-hop es el cuello de botella
+/// (capacidad mínima) del mejor camino descendente que pasa por él, con el
+/// modelo de siempre: `r0·10^(−α·d/10)` en QKD y el centinela en PQC — en una
+/// malla mixta los enlaces PQC (sin coste en clave) absorben el tráfico, y en
+/// una malla homogénea el reparto es proporcional a la fibra.
+///
+/// Determinista: mismo snapshot ⇒ misma tabla, byte a byte. El refinamiento
+/// por demanda ([`wcmp_from_edge_flows`]) queda como sesgo futuro **encima**
+/// de esta base, nunca como sustituto.
+pub fn wcmp_from_topology(
+    topology: &Topology,
+    grade_filter: Option<KeyGrade>,
+) -> HashMap<String, HashMap<String, Vec<WcmpNextHop>>> {
+    // Adyacencia con capacidad, filtrada por grado. Se parte de `edges` y no
+    // de `graph`: es donde está la metadata, y así el filtro QKD sale gratis.
+    let mut adj: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+    for ((a, b), meta) in &topology.edges {
+        if grade_filter == Some(KeyGrade::Qkd) && meta.is_pqc() {
+            continue;
+        }
+        let cap = if meta.is_pqc() {
+            PQC_EDGE_CAPACITY_KEYS_PER_SECOND
+        } else {
+            meta.quditto_capacity_keys_per_second()
+        };
+        adj.entry(a.as_str()).or_default().push((b.as_str(), cap));
+        adj.entry(b.as_str()).or_default().push((a.as_str(), cap));
+    }
+    // Orden estable en la adyacencia para que el resultado sea determinista.
+    for nbrs in adj.values_mut() {
+        nbrs.sort_by(|x, y| x.0.cmp(y.0));
+    }
+
+    let mut dests: Vec<&str> = topology.qkcs.keys().map(String::as_str).collect();
+    dests.sort_unstable();
+
+    let mut out: HashMap<String, HashMap<String, Vec<WcmpNextHop>>> = HashMap::new();
+    for dst in dests {
+        // BFS de saltos desde el destino.
+        let mut dist: HashMap<&str, u32> = HashMap::new();
+        dist.insert(dst, 0);
+        let mut queue = std::collections::VecDeque::from([dst]);
+        let mut order: Vec<&str> = vec![dst]; // por distancia creciente
+        while let Some(v) = queue.pop_front() {
+            let dv = dist[v];
+            for (n, _) in adj.get(v).map(Vec::as_slice).unwrap_or(&[]) {
+                if !dist.contains_key(n) {
+                    dist.insert(n, dv + 1);
+                    order.push(n);
+                    queue.push_back(n);
+                }
+            }
+        }
+        // Camino más ancho descendente: `width(v)` = mejor cuello de botella
+        // hasta `dst` usando solo vecinos a distancia dv−1. `order` va por
+        // distancia creciente, así que los width de dv−1 ya están.
+        let mut width: HashMap<&str, f64> = HashMap::new();
+        width.insert(dst, f64::INFINITY);
+        for v in order.iter().skip(1) {
+            let dv = dist[v];
+            let mut best = 0.0f64;
+            let mut hops: Vec<WcmpNextHop> = Vec::new();
+            for (n, cap) in adj.get(v).map(Vec::as_slice).unwrap_or(&[]) {
+                if dist.get(n) != Some(&(dv - 1)) {
+                    continue; // solo estrictamente más cerca: sin bucles
+                }
+                let through = cap.min(width[n]);
+                best = best.max(through);
+                if let Ok(qkc_id) = n.parse::<u32>() {
+                    hops.push(WcmpNextHop {
+                        qkc_id,
+                        weight: quantise_weight(through),
+                    });
+                }
+            }
+            width.insert(v, best);
+            if !hops.is_empty() {
+                hops.sort_by_key(|h| h.qkc_id);
+                out.entry((*v).to_string())
+                    .or_default()
+                    .insert(dst.to_string(), hops);
+            }
+        }
     }
     out
 }
@@ -654,24 +777,27 @@ impl McmcfSolver {
                 *rates.entry(fid.clone()).or_insert(0.0) += c.drain_rate;
                 rates_grade.insert((fid, c.grade), c.drain_rate);
             }
-            // Esta rama sale ANTES de las dos fases del LP, así que devuelve
-            // `edge_flows` vacío — y sin flujos por arista no hay tabla WCMP,
-            // con lo que el QKC encamina por camino más corto y el multipath
-            // del MCMCF no llega a existir. Medido el 2026-08-24: es la rama
-            // que se toma casi siempre, porque el generador rebasa
-            // `capacity_per_peer` (4096 → 4107) al emitir un tick entero sin
-            // mirar a mitad, el DKMS reporta `level > capacity`, `remaining()`
-            // satura a 0 para TODAS las commodities y el cortocircuito se
-            // dispara. Un rebasamiento del 0,3 % deja sin multipath a la red
-            // entera. De ahí el log: era invisible.
+            // Esta rama sale ANTES de las dos fases del LP. Desde 2026-08-24
+            // eso ya solo afecta a las TASAS (λ=0 ⇒ compensar drenaje y nada
+            // más, que con los buffers llenos es la respuesta correcta): la
+            // ruta WCMP se deriva de la topología en `into_mcf_snapshot`, así
+            // que esta rama ya no puede dejar a la red sin multipath, que es
+            // lo que hacía — el generador rebasaba `capacity_per_peer`
+            // (4096 → 4107), `remaining()` saturaba a 0 en las 90 commodities
+            // y el forwarding caía a camino más corto permanentemente.
+            // `overfull` debe ser 0 desde que el generador capa el lote al
+            // hueco; si reaparece, algo vuelve a rebasar el buffer.
             let overfull = active.iter().filter(|c| c.level > c.capacity).count();
-            warn!(
-                n_commodities = active.len(),
-                overfull,
-                drain_positive = active.iter().filter(|c| c.drain_rate > 0.0).count(),
-                "mcmcf.diag: todas las commodities sin hueco de buffer; λ=0 y SIN flujos por \
-                 arista, así que el forwarding cae a camino más corto y no hay multipath",
-            );
+            let drain_positive = active.iter().filter(|c| c.drain_rate > 0.0).count();
+            if overfull > 0 || drain_positive > 0 {
+                warn!(
+                    n_commodities = active.len(),
+                    overfull,
+                    drain_positive,
+                    "mcmcf.diag: todas las commodities sin hueco de buffer; λ=0 (solo se \
+                     compensa el drenaje; la ruta WCMP no depende de esta rama)",
+                );
+            }
             return McmcfSolution {
                 lambda: 0.0,
                 edge_flows: Vec::new(),
@@ -1947,20 +2073,162 @@ mod tests {
     /// snapshot so the forwarding push loop can read it.
     #[test]
     fn into_mcf_snapshot_includes_wcmp_table() {
-        if phase2_unavailable() {
-            return;
-        }
+        // La tabla sale de la topología, así que existe aunque el solver haya
+        // devuelto la solución degenerada (cortocircuito de buffers llenos,
+        // LP infeasible…). Esa independencia es el punto: era exactamente el
+        // caso en que la red entera se quedaba sin multipath.
         let t = diamond_topology();
-        let reg = DemandRegistry::new();
-        // Same asymmetric setup as the multipath WCMP test above so
-        // the LP is forced to split.
-        report(&reg, "dA", "dB", 0.0, 4096.0, 0.0);
-        report(&reg, "dB", "dA", 4096.0, 4096.0, 0.0);
-        let sol = McmcfSolver::new().solve(&McmcfInputs::build(&t, &reg));
+        let sol = McmcfSolution {
+            lambda: 0.0,
+            edge_flows: vec![], // lo que devuelven cortocircuito y fallback
+            rates: HashMap::new(),
+            rates_grade: HashMap::new(),
+        };
         let snap = sol.into_mcf_snapshot(&t);
-        assert!(!snap.wcmp.is_empty(), "wcmp must be populated");
+        assert!(!snap.wcmp.is_empty(), "wcmp must exist without the LP");
         let hops = &snap.wcmp["1"]["2"];
-        assert_eq!(hops.len(), 2);
+        assert_eq!(hops.len(), 2, "diamond: two downhill next hops");
+    }
+
+    /// El rombo: de 1 a 2 hay dos caminos de dos saltos (vía 11 y vía 22).
+    /// Ambos vecinos están estrictamente más cerca del destino, así que el
+    /// reparto usa los dos, y con capacidades iguales pesa igual.
+    #[test]
+    fn topology_wcmp_splits_across_strictly_closer_neighbours() {
+        let t = diamond_topology();
+        let w = wcmp_from_topology(&t, None);
+
+        let hops = &w["1"]["2"];
+        assert_eq!(
+            hops.iter().map(|h| h.qkc_id).collect::<Vec<_>>(),
+            vec![11, 22],
+            "los dos caminos del rombo, en orden determinista",
+        );
+        assert_eq!(hops[0].weight, hops[1].weight, "capacidades iguales");
+
+        // Destino adyacente: un único next hop, el propio destino.
+        assert_eq!(w["1"]["11"].len(), 1);
+        assert_eq!(w["1"]["11"][0].qkc_id, 11);
+
+        // Y desde un lateral hacia el otro: sus dos vecinos (1 y 2) están a
+        // distancia 1 del destino 22, así que también reparte.
+        assert_eq!(
+            w["11"]["22"].iter().map(|h| h.qkc_id).collect::<Vec<_>>(),
+            vec![1, 2],
+        );
+    }
+
+    /// Solo se encamina hacia vecinos ESTRICTAMENTE más cercanos al destino:
+    /// la distancia decrece en cada salto, así que no puede haber bucles
+    /// aunque cada QKC decida por su cuenta. Se verifica contra un BFS
+    /// independiente del de producción.
+    #[test]
+    fn topology_wcmp_next_hops_are_strictly_closer_to_the_destination() {
+        let t = diamond_topology();
+        let w = wcmp_from_topology(&t, None);
+
+        let dist = |from: &str, to: &str| -> u32 {
+            let mut d = HashMap::from([(from.to_string(), 0u32)]);
+            let mut q = std::collections::VecDeque::from([from.to_string()]);
+            while let Some(v) = q.pop_front() {
+                for n in t.graph.get(&v).into_iter().flatten() {
+                    if !d.contains_key(n) {
+                        d.insert(n.clone(), d[&v] + 1);
+                        q.push_back(n.clone());
+                    }
+                }
+            }
+            d[to]
+        };
+
+        for (src, by_dst) in &w {
+            for (dst, hops) in by_dst {
+                for h in hops {
+                    let nh = h.qkc_id.to_string();
+                    assert!(
+                        dist(&nh, dst) < dist(src, dst),
+                        "{src}→{dst} vía {nh}: el next hop no acerca",
+                    );
+                }
+            }
+        }
+    }
+
+    /// El peso de cada next hop es el cuello de botella del mejor camino
+    /// descendente que pasa por él — no la capacidad del primer salto.
+    #[test]
+    fn topology_wcmp_weights_follow_the_path_bottleneck() {
+        let mut t = Topology::default();
+        add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+        for q in ["11", "22"] {
+            t.upsert_qkc(Qkc {
+                id: q.into(),
+                host: host(q.parse().unwrap()),
+                peer_addr: None,
+                kme_host: None,
+            });
+        }
+        // Vía 11: primer salto ancho (100) pero cuello 10 después.
+        link(&mut t, "1", "11", 100.0);
+        link(&mut t, "11", "2", 10.0);
+        // Vía 22: 50 sostenido.
+        link(&mut t, "1", "22", 50.0);
+        link(&mut t, "22", "2", 50.0);
+
+        let w = wcmp_from_topology(&t, None);
+        let hops = &w["1"]["2"];
+        let weight_of = |id: u32| hops.iter().find(|h| h.qkc_id == id).unwrap().weight;
+        // α=0.2, d=0 ⇒ capacidad = r0. Cuantización ×100.
+        assert_eq!(weight_of(11), 10 * 100, "min(100, 10), no 100");
+        assert_eq!(weight_of(22), 50 * 100);
+    }
+
+    /// La tabla QKD-only encamina por el subgrafo QKD: un frame de ese grado
+    /// jamás debe pisar un enlace PQC, aunque el camino PQC sea más corto.
+    #[test]
+    fn topology_wcmp_qkd_table_ignores_pqc_edges() {
+        let mut t = Topology::default();
+        add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+        t.upsert_qkc(Qkc {
+            id: "3".into(),
+            host: host(3),
+            peer_addr: None,
+            kme_host: None,
+        });
+        // Directo 1–2 por PQC; rodeo 1–3–2 por QKD.
+        t.add_edge(
+            "1",
+            "2",
+            EdgeMeta {
+                link_type: LinkType::Pqc,
+                ..Default::default()
+            },
+        );
+        link(&mut t, "1", "3", 100.0);
+        link(&mut t, "3", "2", 100.0);
+
+        let full = wcmp_from_topology(&t, None);
+        let qkd = wcmp_from_topology(&t, Some(KeyGrade::Qkd));
+
+        // La tabla completa va por el directo PQC (un salto).
+        assert_eq!(
+            full["1"]["2"].iter().map(|h| h.qkc_id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        // La QKD-only lo ignora y rodea por 3.
+        assert_eq!(
+            qkd["1"]["2"].iter().map(|h| h.qkc_id).collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+
+    /// Mismo snapshot ⇒ misma tabla, byte a byte: las tablas se re-POSTean a
+    /// los QKC y una ordenación inestable parecería un cambio de ruta en cada
+    /// push.
+    #[test]
+    fn topology_wcmp_is_deterministic() {
+        let t = diamond_topology();
+        assert_eq!(wcmp_from_topology(&t, None), wcmp_from_topology(&t, None));
     }
 
     /// Reproducer of the smoke-test failure: 4 DKMSs anchored on
