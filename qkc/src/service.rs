@@ -413,6 +413,7 @@ mod tests {
             r0: None,
             alpha: None,
             distance_km: None,
+            capacity_keys_per_s: None,
         }
     }
 

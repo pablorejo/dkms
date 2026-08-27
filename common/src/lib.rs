@@ -4,6 +4,13 @@
 //! gRPC clients/servers, TLS) lives here. Each module's own business logic
 //! does NOT belong here.
 
+// `CommonError` (y los Status de tonic en el código GENERADO por prost)
+// superan el umbral de `result_large_err` del clippy moderno. Boxear el
+// error cruzaría todas las firmas públicas del workspace y el código
+// generado ni siquiera es nuestro, así que el lint se permite a nivel de
+// crate — práctica habitual en ecosistemas tonic.
+#![allow(clippy::result_large_err)]
+
 pub mod config;
 pub mod crypto;
 pub mod error;

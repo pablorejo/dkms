@@ -233,13 +233,7 @@ async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
                 "alpha":              meta.alpha,
                 "max_buffer_size":    meta.max_buffer_size,
                 "link_type":          if meta.is_pqc() { "pqc" } else { "qkd" },
-                // PQC edges are uncapacitated → report null instead of a
-                // misleading finite QKD-rate.
-                "capacity_keys_per_second": if meta.is_pqc() {
-                    serde_json::Value::Null
-                } else {
-                    json!(meta.quditto_capacity_keys_per_second())
-                },
+                "capacity_keys_per_second": meta.capacity_keys_per_second(),
             })
         })
         .collect();

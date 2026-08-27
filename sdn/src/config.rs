@@ -33,6 +33,28 @@ pub struct SdnConfig {
     /// `0` disables expiry entirely.
     #[serde(default = "default_presence_ttl")]
     pub presence_ttl_secs: u64,
+
+    /// Qué mecanismo produce las rates de `/rate`: `num` (precios α-fair,
+    /// default), `maxmin` (waterfilling exacto) o `lp` (el MCMCF-λ clásico,
+    /// como oráculo/estudio). La env `SDN_RATE_ALLOCATOR` lo pisa, igual que
+    /// `SDN_SOLVER` pisa el backend del LP.
+    #[serde(default = "default_rate_allocator")]
+    pub rate_allocator: String,
+
+    /// α de la utilidad α-fair del asignador `num`. 1.0 = proportional
+    /// fairness (nadie puede quedar a cero); subirla acerca al max-min a
+    /// costa de rigidez numérica — para el max-min exacto está `maxmin`.
+    #[serde(default = "default_num_alpha")]
+    pub num_alpha: f64,
+
+    /// Paso del gradiente de precios del asignador `num`.
+    #[serde(default = "default_num_gamma")]
+    pub num_gamma: f64,
+
+    /// Peso del llenado proactivo frente al drenaje en la demanda del
+    /// asignador `num` (`w = δ + peso·R/T`).
+    #[serde(default = "default_num_fill_weight")]
+    pub num_fill_weight: f64,
 }
 
 fn default_metrics() -> String {
@@ -52,4 +74,16 @@ fn default_debounce() -> u64 {
 /// anuncios perdidos antes de dar a un nodo por muerto.
 fn default_presence_ttl() -> u64 {
     90
+}
+fn default_rate_allocator() -> String {
+    "num".into()
+}
+fn default_num_alpha() -> f64 {
+    1.0
+}
+fn default_num_gamma() -> f64 {
+    0.2
+}
+fn default_num_fill_weight() -> f64 {
+    0.1
 }

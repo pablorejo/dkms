@@ -23,6 +23,7 @@ pub mod mcmcf;
 pub mod metrics;
 pub mod presence;
 pub mod push;
+pub mod rates_num;
 pub mod routing;
 pub mod service;
 pub mod topology;

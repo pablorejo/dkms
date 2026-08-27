@@ -11,7 +11,7 @@ ARG MODULE=qkc
 # Compila los 5 binarios de una pasada y SIN usar ARG MODULE: así la etapa es
 # idéntica para los 5 targets del bake y buildx la construye una sola vez.
 FROM rust:1.88-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler cmake \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

@@ -49,11 +49,12 @@
 //! override these defaults entry-by-entry.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use good_lp::{
     variable, Constraint, Expression, ProblemVariables, Solution, Solver, SolverModel, Variable,
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use common::security::KeyGrade;
 
@@ -81,8 +82,8 @@ pub struct McmcfInputs {
 
     /// `(qkc_a, qkc_b) -> u_ij`, lexicographically ordered (a < b) so
     /// undirected edges aren't double-counted. QKD edges carry their
-    /// distance-attenuated rate; PQC edges carry [`PQC_EDGE_CAPACITY_KEYS_PER_SECOND`]
-    /// (effectively unbounded — see the note there).
+    /// distance-attenuated rate; PQC edges the capacity declared on the link
+    /// (`EdgeMeta::pqc_capacity_keys_per_s`, default 10 000).
     pub edge_capacity: HashMap<(String, String), f64>,
 
     /// `dkms_id -> qkc_id` for every DKMS in the topology that has
@@ -120,11 +121,7 @@ impl McmcfInputs {
         let mut edge_capacity: HashMap<(String, String), f64> = HashMap::new();
         let mut pqc_edges: HashSet<(String, String)> = HashSet::new();
         for ((a, b), meta) in &topology.edges {
-            let cap = if meta.is_pqc() {
-                PQC_EDGE_CAPACITY_KEYS_PER_SECOND
-            } else {
-                meta.quditto_capacity_keys_per_second()
-            };
+            let cap = meta.capacity_keys_per_second();
             if cap > 0.0 {
                 edge_capacity.insert((a.clone(), b.clone()), cap);
                 if meta.is_pqc() {
@@ -259,26 +256,14 @@ pub struct McmcfSolution {
 /// solver numerical noise without losing real allocations — the
 /// smallest meaningful rate in practice is `δ_k > 0`, which is at
 /// least 1 key/s for any active SAE.
-const FLOW_EPSILON: f64 = 1e-6;
-
-/// Capacity assigned to PQC edges in the MCF. PQC links are not
-/// QKD-rate-limited, so conceptually they're "unbounded" — but a literal
-/// ∞ (omitting the capacity constraint) makes the `max λ` LP unbounded for
-/// any commodity whose path is all-PQC, which microlp/clarabel report as
-/// Unbounded → the solve falls back to zero rates. A large finite sentinel
-/// keeps the LP well-posed while never binding: it's ~50× above any
-/// realistic aggregate per-edge flow (≤ N²·DEFAULT_BUFFER_CAPACITY ≈ 4e7 at
-/// N=100), so a PQC edge never lowers λ — exactly "PQC removes the
-/// bottleneck". λ then stays bounded by the real QKD edges (or, in an
-/// all-PQC topology, by this sentinel — rates the DKMS generator caps anyway).
-const PQC_EDGE_CAPACITY_KEYS_PER_SECOND: f64 = 1e9;
+pub(crate) const FLOW_EPSILON: f64 = 1e-6;
 
 /// Horizon (seconds) over which a single LP solve is considered
 /// authoritative. The LP delivers `r_k = δ_k + λ·R_k + η_k` for the
 /// commodity; capping `η_k ≤ R_k / T_REPLAN` ensures the buffer
 /// can't overflow before the next solve replaces these rates with
 /// fresh ones. Matches the SDN's default `mcf_period_ms = 5000`.
-const T_REPLAN_SECONDS: f64 = 5.0;
+pub(crate) const T_REPLAN_SECONDS: f64 = 5.0;
 
 /// Penalty multiplier on `Σ σ_k` in phase-1 LP. With `λ` in the
 /// range `[0, 10]` and `σ_k` in the range `[0, max_drain]` (≈ 1e3),
@@ -315,19 +300,29 @@ fn lp_diag_enabled() -> bool {
 enum LpBackend {
     Microlp,
     Clarabel,
+    Highs,
 }
 
 fn lp_backend() -> LpBackend {
     static BACKEND: std::sync::OnceLock<LpBackend> = std::sync::OnceLock::new();
     *BACKEND.get_or_init(|| {
+        // Default `highs` desde 2026-08-25: microlp falseaba la fase 2 en
+        // el 97 % de los solves ya a N=10/90 commodities bajo carga (CESGA
+        // job 9266817) y a N=20 era ~total. microlp y clarabel siguen
+        // seleccionables para comparar y como salida de emergencia si un
+        // entorno no puede compilar HiGHS (C++, necesita cmake).
         let backend = match std::env::var("SDN_SOLVER") {
             Ok(v) if v.eq_ignore_ascii_case("clarabel") => LpBackend::Clarabel,
-            Ok(v) if v.is_empty() || v.eq_ignore_ascii_case("microlp") => LpBackend::Microlp,
+            Ok(v) if v.eq_ignore_ascii_case("microlp") => LpBackend::Microlp,
+            Ok(v) if v.is_empty() || v.eq_ignore_ascii_case("highs") => LpBackend::Highs,
             Ok(v) => {
-                warn!(value = %v, "unknown SDN_SOLVER (expected microlp|clarabel); using microlp");
-                LpBackend::Microlp
+                warn!(
+                    value = %v,
+                    "unknown SDN_SOLVER (expected microlp|clarabel|highs); using highs"
+                );
+                LpBackend::Highs
             }
-            Err(_) => LpBackend::Microlp,
+            Err(_) => LpBackend::Highs,
         };
         // info-level so deployed logs (RUST_LOG=info) positively confirm
         // which backend is engaged — a lost env var silently falling back
@@ -413,6 +408,7 @@ fn solve_lp_backend(
     match lp_backend() {
         LpBackend::Microlp => solve_lp(good_lp::microlp, vars, objective, constraints, wanted),
         LpBackend::Clarabel => solve_lp_clarabel(vars, objective, constraints, wanted),
+        LpBackend::Highs => solve_lp(good_lp::highs, vars, objective, constraints, wanted),
     }
 }
 
@@ -621,11 +617,7 @@ pub fn wcmp_from_topology(
         if grade_filter == Some(KeyGrade::Qkd) && meta.is_pqc() {
             continue;
         }
-        let cap = if meta.is_pqc() {
-            PQC_EDGE_CAPACITY_KEYS_PER_SECOND
-        } else {
-            meta.quditto_capacity_keys_per_second()
-        };
+        let cap = meta.capacity_keys_per_second();
         adj.entry(a.as_str()).or_default().push((b.as_str(), cap));
         adj.entry(b.as_str()).or_default().push((a.as_str(), cap));
     }
@@ -789,13 +781,33 @@ impl McmcfSolver {
             // hueco; si reaparece, algo vuelve a rebasar el buffer.
             let overfull = active.iter().filter(|c| c.level > c.capacity).count();
             let drain_positive = active.iter().filter(|c| c.drain_rate > 0.0).count();
-            if overfull > 0 || drain_positive > 0 {
+            let drain_total: f64 = active.iter().map(|c| c.drain_rate).sum();
+            // `drain_positive` cuenta `> 0.0` estricto, y la EWMA del DKMS
+            // nunca vuelve a 0.0 exacto tras el primer request — por sí solo
+            // dice "hubo tráfico SAE alguna vez", no "hay demanda ahora". La
+            // que discrimina es `drain_total`: Σδ≈0 con buffers llenos es el
+            // reposo sano de la malla y se imprime a info con throttle;
+            // Σδ real (≥ 1 clave/s) o un overfull sí ameritan el warn. Antes
+            // el estado "todo lleno y sin drain jamás registrado" no
+            // imprimía NADA, y el `drain_positive=0` de CESGA hubo que
+            // inferirlo del silencio del diag.
+            static ALL_FULL_TICKS: AtomicU64 = AtomicU64::new(0);
+            let ticks = ALL_FULL_TICKS.fetch_add(1, Ordering::Relaxed);
+            if overfull > 0 || drain_total >= 1.0 {
                 warn!(
                     n_commodities = active.len(),
                     overfull,
                     drain_positive,
+                    drain_total = format!("{drain_total:.1}"),
                     "mcmcf.diag: todas las commodities sin hueco de buffer; λ=0 (solo se \
                      compensa el drenaje; la ruta WCMP no depende de esta rama)",
+                );
+            } else if ticks.is_multiple_of(12) {
+                info!(
+                    n_commodities = active.len(),
+                    drain_positive,
+                    drain_total = format!("{drain_total:.3}"),
+                    "mcmcf.diag: buffers llenos y sin demanda SAE apreciable; λ=0 en reposo",
                 );
             }
             return McmcfSolution {
@@ -840,12 +852,68 @@ impl McmcfSolver {
         // Both phases share the same arc/node setup; only the
         // variable set and objective change.
 
+        // ----- Phase 0: max t — el suelo max-min de la escasez ----------
+        //
+        // `max λ − M·Σσ` minimiza la SUMA de drenaje desatendido, y a la
+        // suma le da igual repartir que concentrar: el símplex devuelve
+        // vértices que dejan commodities enteras con σ_k = δ_k (cero
+        // servicio) mientras otras reciben el 100 % — medido en CESGA
+        // 2026-08-25 (jobs 9265640/9266817): pares fijos al 100 % de ceros
+        // durante los 300 s de carga. La pre-fase calcula la fracción común
+        // t* servible a TODOS (max-min de primer nivel) y la fase 1 corre
+        // después con σ_k acotado a (1−t*)·δ_k: ninguna commodity puede ya
+        // quedar por debajo del suelo común. Con `SDN_DISABLE_SLACK_VARS=1`
+        // no hay σ que acotar y la pre-fase se omite.
+        let slack_disabled = std::env::var("SDN_DISABLE_SLACK_VARS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false);
+        let t_floor = if slack_disabled {
+            0.0
+        } else {
+            self.solve_common_fraction(&active, &arcs, &arc_idx, &node_set, &undirected, inputs)
+                // Un pelo por debajo del óptimo para que el redondeo del
+                // backend no convierta el suelo en infeasibilidad.
+                .map(|t| (t - 1e-6).clamp(0.0, 1.0))
+                .unwrap_or(0.0)
+        };
+
         // ----- Phase 1: solve max λ − M·Σ σ_k ---------------------------
-        let (lambda_star, sigmas, edge_loads) =
-            match self.solve_lambda(&active, &arcs, &arc_idx, &node_set, &undirected, inputs) {
-                Some(v) => v,
-                None => return zero_rate_fallback(&active),
-            };
+        let phase1 = self
+            .solve_lambda(
+                &active,
+                &arcs,
+                &arc_idx,
+                &node_set,
+                &undirected,
+                inputs,
+                t_floor,
+            )
+            .or_else(|| {
+                if t_floor > 0.0 {
+                    // El suelo viene de otro solve del mismo backend: si el
+                    // ruido numérico lo dejó una pizca alto, mejor perder el
+                    // suelo en este recompute que perder todas las rates.
+                    warn!(
+                        t_floor = format!("{t_floor:.6}"),
+                        "fase 1 infeasible con el suelo max-min; reintento sin suelo",
+                    );
+                    self.solve_lambda(
+                        &active,
+                        &arcs,
+                        &arc_idx,
+                        &node_set,
+                        &undirected,
+                        inputs,
+                        0.0,
+                    )
+                } else {
+                    None
+                }
+            });
+        let (lambda_star, sigmas, edge_loads) = match phase1 {
+            Some(v) => v,
+            None => return zero_rate_fallback(&active),
+        };
 
         // Por qué λ sale lo que sale.
         //
@@ -917,6 +985,7 @@ impl McmcfSolver {
             Phase2Output {
                 eta_values: vec![0.0; active.len()],
                 edge_flows: Vec::new(),
+                fallback: false,
             }
         } else {
             self.solve_eta(
@@ -936,6 +1005,10 @@ impl McmcfSolver {
             HashMap::with_capacity(active.len());
         let mut total_eta = 0.0;
         let mut total_sigma = 0.0;
+        let mut drain_in = 0.0;
+        let mut drain_delivered_total = 0.0;
+        let mut fill_total = 0.0;
+        let mut rates_zero = 0usize;
         for (k_idx, c) in active.iter().enumerate() {
             let eta_k = phase2.eta_values.get(k_idx).copied().unwrap_or(0.0);
             let sigma_k = sigmas.get(k_idx).copied().unwrap_or(0.0);
@@ -948,21 +1021,58 @@ impl McmcfSolver {
             // SaeBufferBuckets uses as `link_capacity` for refill.
             let delivered_drain = (c.drain_rate - sigma_k).max(0.0);
             let r_k = delivered_drain + lambda_star * c.remaining() + eta_k;
+            drain_in += c.drain_rate;
+            drain_delivered_total += delivered_drain;
+            fill_total += lambda_star * c.remaining();
             let fid = flow_id(&c.src_dkms, &c.dst_dkms);
             let r_k_clean = if r_k.abs() < FLOW_EPSILON { 0.0 } else { r_k };
+            if r_k_clean == 0.0 {
+                rates_zero += 1;
+            }
             *rates.entry(fid.clone()).or_insert(0.0) += r_k_clean;
             rates_grade.insert((fid, c.grade), r_k_clean);
         }
 
-        debug!(
+        // Un par (src,dst) repetido entre las commodities activas es una
+        // entrada fantasma: el registro de demanda nunca expira
+        // (`evict_older_than` sin cablear), así que si un DKMS cambia el
+        // grade con el que reporta a un peer (flip de qkd_available), la
+        // entrada del grade antiguo se queda y el par cuenta doble.
+        let mut pair_counts: HashMap<(&str, &str), usize> = HashMap::new();
+        for c in &active {
+            *pair_counts
+                .entry((c.src_dkms.as_str(), c.dst_dkms.as_str()))
+                .or_insert(0) += 1;
+        }
+        let dup_pairs = pair_counts.values().filter(|&&n| n > 1).count();
+
+        // La descomposición de r_k por solve, a info: es la única línea con
+        // la que las muestras de `/rate` a cero se pueden atribuir a su
+        // causa — reposo (drain_in≈0), σ comiéndose el drain (sigma alto con
+        // λ=0), o la fase 2 caída (eta_fallback) — sin correlacionar a mano
+        // tres logs. A la cadencia del recompute (5 s) cuesta lo mismo que
+        // un `generator.state` y es lo que el muestreador de las campañas
+        // recoge. El 68 % de muestras a cero de CESGA quedó sin atribuir
+        // exactamente por no tener esto.
+        info!(
             n_commodities = active.len(),
             n_arcs = arcs.len(),
-            lambda = lambda_star,
-            total_eta,
-            total_sigma,
+            lambda = format!("{lambda_star:.6}"),
+            // El suelo max-min de la fase 0: fracción del drenaje que TODA
+            // commodity tiene garantizada. 0.0 = sin suelo (sin drenaje, o
+            // fase 0 caída).
+            t_floor = format!("{t_floor:.4}"),
+            drain_in = format!("{drain_in:.1}"),
+            drain_delivered = format!("{drain_delivered_total:.1}"),
+            sigma_total = format!("{total_sigma:.1}"),
+            fill_total = format!("{fill_total:.1}"),
+            eta_total = format!("{total_eta:.1}"),
+            rates_zero,
+            eta_fallback = phase2.fallback,
+            dup_pairs,
             n_edge_flows = phase2.edge_flows.len(),
             backend = ?lp_backend(),
-            "MCMCF-λ solved (two-phase)"
+            "mcmcf.solve: r_k = (δ−σ) + λ·R + η",
         );
 
         McmcfSolution {
@@ -970,6 +1080,79 @@ impl McmcfSolver {
             edge_flows: phase2.edge_flows,
             rates,
             rates_grade,
+        }
+    }
+
+    /// Phase 0: `max t` — la fracción común del drenaje servible a TODAS las
+    /// commodities a la vez (max-min de primer nivel). Solo participan las
+    /// commodities con δ_k > 0: cada una debe encaminar exactamente `t·δ_k`
+    /// bajo las mismas restricciones de capacidad compartida que el resto de
+    /// fases. `None` si no hay drenaje que repartir o si el backend falla
+    /// (el caller trata ambos como "sin suelo", nunca como error fatal).
+    fn solve_common_fraction(
+        &self,
+        active: &[&CommodityDemand],
+        arcs: &[(String, String)],
+        arc_idx: &HashMap<(String, String), usize>,
+        node_set: &HashSet<String>,
+        undirected: &[((String, String), f64)],
+        inputs: &McmcfInputs,
+    ) -> Option<f64> {
+        let drainers: Vec<&CommodityDemand> = active
+            .iter()
+            .filter(|c| c.drain_rate > FLOW_EPSILON)
+            .copied()
+            .collect();
+        if drainers.is_empty() {
+            return None;
+        }
+        let mut vars = ProblemVariables::new();
+        let t = vars.add(variable().min(0.0).max(1.0));
+        let x: Vec<Vec<Variable>> = build_flow_vars(&mut vars, &drainers, arcs, &inputs.pqc_edges);
+        let mut constraints: Vec<Constraint> =
+            Vec::with_capacity(drainers.len() * node_set.len() + undirected.len());
+        for (k_idx, c) in drainers.iter().enumerate() {
+            let src = inputs.dkms_to_qkc.get(c.src_dkms.as_str()).unwrap();
+            let dst = inputs.dkms_to_qkc.get(c.dst_dkms.as_str()).unwrap();
+            let delta_k = c.drain_rate;
+            for node in node_set {
+                let mut expr = Expression::with_capacity(arcs.len());
+                for (a_idx, (a, b)) in arcs.iter().enumerate() {
+                    if a == node {
+                        expr += x[k_idx][a_idx];
+                    }
+                    if b == node {
+                        expr -= x[k_idx][a_idx];
+                    }
+                }
+                // Conservación con la fuente escalada por t:
+                //   src: out − in = t·δ_k      dst: out − in = −t·δ_k
+                let c_node = if node == src {
+                    (expr - t * delta_k).eq(0.0)
+                } else if node == dst {
+                    (expr + t * delta_k).eq(0.0)
+                } else {
+                    expr.eq(0.0)
+                };
+                constraints.push(c_node);
+            }
+        }
+        for ((a, b), cap) in undirected {
+            let ij = arc_idx[&(a.clone(), b.clone())];
+            let ji = arc_idx[&(b.clone(), a.clone())];
+            let mut expr = Expression::with_capacity(2 * drainers.len());
+            for row in x.iter().take(drainers.len()) {
+                expr += row[ij];
+                expr += row[ji];
+            }
+            constraints.push(expr.leq(*cap));
+        }
+        match solve_lp_backend(vars, t.into(), constraints, &[t]) {
+            Ok(vals) => Some(vals[0].clamp(0.0, 1.0)),
+            Err(e) => {
+                warn!(error = %e, "fase 0 (max t) falló; fase 1 corre sin suelo max-min");
+                None
+            }
         }
     }
 
@@ -1001,6 +1184,7 @@ impl McmcfSolver {
         node_set: &HashSet<String>,
         undirected: &[((String, String), f64)],
         inputs: &McmcfInputs,
+        t_floor: f64,
     ) -> Option<(f64, Vec<f64>, EdgeLoads)> {
         let mut vars = ProblemVariables::new();
         let lambda = vars.add(variable().min(0.0));
@@ -1018,13 +1202,16 @@ impl McmcfSolver {
         let slack_disabled = std::env::var("SDN_DISABLE_SLACK_VARS")
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false);
+        // Con el suelo max-min de la fase 0, σ_k ≤ (1−t*)·δ_k: la fase 1
+        // sigue minimizando Σσ, pero ya no puede concentrar la denegación en
+        // una commodity por debajo de la fracción común.
         let sigma: Vec<Variable> = active
             .iter()
             .map(|c| {
                 let upper = if slack_disabled {
                     0.0
                 } else {
-                    c.drain_rate.max(0.0)
+                    c.drain_rate.max(0.0) * (1.0 - t_floor).max(0.0)
                 };
                 vars.add(variable().min(0.0).max(upper))
             })
@@ -1241,6 +1428,7 @@ impl McmcfSolver {
                 Phase2Output {
                     eta_values,
                     edge_flows,
+                    fallback: false,
                 }
             }
             Err(e) => {
@@ -1253,6 +1441,7 @@ impl McmcfSolver {
                 Phase2Output {
                     eta_values: vec![0.0; active.len()],
                     edge_flows: Vec::new(),
+                    fallback: true,
                 }
             }
         }
@@ -1266,6 +1455,11 @@ impl McmcfSolver {
 struct Phase2Output {
     eta_values: Vec<f64>,
     edge_flows: Vec<EdgeFlow>,
+    /// `true` sólo cuando la fase 2 se INTENTÓ y el LP falló (la falsa
+    /// infeasibilidad de microlp): distingue "η=0 porque el backend lo
+    /// decidió" de "η=0 porque el solve se cayó", que en las muestras de
+    /// `/rate` se ven idénticos y en CESGA hubo que separarlos a mano.
+    fallback: bool,
 }
 
 /// Build the safe fallback solution: `λ = 0`, `r_k = 0` per
@@ -1376,7 +1570,7 @@ mod tests {
 
     /// A PQC edge enters the MCF with the unbounded sentinel capacity.
     #[test]
-    fn pqc_edge_gets_sentinel_capacity() {
+    fn pqc_edge_gets_declared_capacity() {
         let mut t = Topology::default();
         add_dkms_pair(&mut t, "dA", "dB", "1", "2");
         pqc_link(&mut t, "1", "2");
@@ -1386,14 +1580,17 @@ mod tests {
             .get(&("1".to_string(), "2".to_string()))
             .copied()
             .expect("PQC edge present in edge_capacity");
-        assert_eq!(cap, PQC_EDGE_CAPACITY_KEYS_PER_SECOND);
+        // El default del campo declarado, no un centinela: 10 000 claves/s.
+        assert_eq!(cap, 10_000.0);
     }
 
-    /// A PQC link does not bound λ: with the same demand it yields a far
-    /// higher rate than a finite-capacity QKD link, and well above the QKD
-    /// edge's per-direction share (~50). This is "PQC removes the bottleneck".
+    /// A PQC link outperforms a slow QKD link but is BOUNDED by its declared
+    /// capacity (default 10 000). This replaces the old "PQC removes the
+    /// bottleneck" semantics: the 1e9 sentinel made λ and every /rate value
+    /// meaningless in PQC-only deployments (measured 2026-08-02); a declared
+    /// finite capacity is what gives the rate signal meaning there.
     #[test]
-    fn pqc_edge_does_not_bound_lambda() {
+    fn pqc_edge_bounded_by_declared_capacity() {
         let solve = |pqc: bool| {
             let mut t = Topology::default();
             add_dkms_pair(&mut t, "dA", "dB", "1", "2");
@@ -1411,9 +1608,12 @@ mod tests {
             r_pqc > 100.0,
             "PQC rate {r_pqc} must exceed the QKD edge's finite bound (~50/dir)"
         );
+        // Dos commodities (ida y vuelta) comparten los 10 000 del enlace: la
+        // rate por sentido queda en torno a 5 000 y NUNCA por encima de la
+        // capacidad declarada — antes, con el centinela, salía ~5e8.
         assert!(
-            r_pqc > r_qkd * 100.0,
-            "PQC rate {r_pqc} should vastly exceed QKD rate {r_qkd}"
+            r_pqc <= 10_000.0 + 1.0,
+            "PQC rate {r_pqc} must be bounded by the declared capacity"
         );
     }
 
@@ -1602,6 +1802,30 @@ mod tests {
         // as 30 + (70/4096)·0 = 30 ✓)
         assert!((r_ab - 30.0).abs() < 0.5, "r_ab should = δ_k, got {r_ab}");
         assert!((r_ba - 70.0).abs() < 0.5, "r_ba should ≈70, got {r_ba}");
+    }
+
+    /// El suelo max-min de la fase 0: bajo sobrecarga (Σδ=400 sobre una
+    /// arista de 100), NINGUNA commodity queda por debajo de su fracción
+    /// común t* = 100/400 = 0.25. Sin la fase 0, `max λ − M·Σσ` es
+    /// indiferente entre repartir y concentrar, y el vértice del símplex
+    /// podía dejar una de las dos a cero (medido en CESGA 2026-08-25:
+    /// pares fijos al 100 % de ceros durante toda la carga).
+    #[test]
+    fn lp_floor_prevents_vertex_starvation() {
+        let mut t = Topology::default();
+        add_dkms_pair(&mut t, "dA", "dB", "1", "2");
+        link(&mut t, "1", "2", 100.0);
+        let reg = DemandRegistry::new();
+        report(&reg, "dA", "dB", 2000.0, 4096.0, 300.0);
+        report(&reg, "dB", "dA", 2000.0, 4096.0, 100.0);
+        let sol = McmcfSolver::new().solve(&McmcfInputs::build(&t, &reg));
+        let r_ab = sol.rates[&flow_id("dA", "dB")];
+        let r_ba = sol.rates[&flow_id("dB", "dA")];
+        // Suelos: 0.25·300 = 75 y 0.25·100 = 25 (menos tolerancia numérica).
+        assert!(r_ab >= 74.0, "dA→dB por debajo de su suelo max-min: {r_ab}");
+        assert!(r_ba >= 24.0, "dB→dA por debajo de su suelo max-min: {r_ba}");
+        // Y la capacidad compartida se respeta.
+        assert!(r_ab + r_ba <= 100.5, "capacidad violada: {r_ab}+{r_ba}");
     }
 
     /// Synchronisation invariant (Prop. 4.1): every buffer reaches B_k
@@ -2485,6 +2709,24 @@ mod tests {
             .with(constraint!(x <= 1.0))
             .solve()
             .expect("trivial LP must solve on clarabel");
+        let xv = solution.value(x);
+        assert!((xv - 1.0).abs() < 1e-4, "expected x ≈ 1.0, got {xv}");
+    }
+
+    /// El backend por defecto desde 2026-08-25. Prueba que HiGHS está
+    /// compilado y resuelve — si este test no linka, falta `cmake` en el
+    /// entorno de build (Dockerfiles y cesga.sbatch ya lo llevan).
+    #[test]
+    fn highs_smoke_solves_trivial_problem() {
+        use good_lp::constraint;
+        let mut vars = good_lp::ProblemVariables::new();
+        let x = vars.add(variable().min(0.0).max(1.0));
+        let solution = vars
+            .maximise(x)
+            .using(good_lp::highs)
+            .with(constraint!(x <= 1.0))
+            .solve()
+            .expect("trivial LP must solve on highs");
         let xv = solution.value(x);
         assert!((xv - 1.0).abs() < 1e-4, "expected x ≈ 1.0, got {xv}");
     }

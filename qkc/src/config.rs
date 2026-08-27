@@ -160,8 +160,9 @@ pub struct LinkConfig {
     //
     // La SDN dimensiona la arista con `cap = r0 · 10^(−alpha·d/10)`, y quien
     // conoce esos valores es la institución: con hardware QKD son su fibra, y
-    // con un quditto son los que le configuró. En enlaces PQC no se aplican
-    // (la SDN los trata como incapacitados) y se pueden omitir.
+    // con un quditto son los que le configuró. En enlaces PQC el modelo es
+    // `capacity_keys_per_s` (default de la SDN: 10 000) y r0/alpha/distance
+    // no se aplican.
     /// `R₀` del enlace en claves/s a distancia 0.
     #[serde(default)]
     pub r0: Option<f64>,
@@ -173,6 +174,13 @@ pub struct LinkConfig {
     /// Longitud del enlace en km.
     #[serde(default)]
     pub distance_km: Option<u32>,
+
+    /// Capacidad declarada de un enlace PQC en claves/s (ignorada en QKD).
+    /// Como r0/alpha/distance, el QKC no la usa: viaja a la SDN, que
+    /// dimensiona la arista con ella. Sin declarar, aplica el default de la
+    /// SDN.
+    #[serde(default)]
+    pub capacity_keys_per_s: Option<f64>,
 }
 
 fn default_key_size() -> u32 {

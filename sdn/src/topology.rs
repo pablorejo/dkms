@@ -238,8 +238,12 @@ pub struct AnnounceOutcome {
 /// * `Qkd` (default) — keys come from the shared quditto; capacity is the
 ///   distance-attenuated QKD rate (see [`EdgeMeta::quditto_capacity_keys_per_second`]).
 /// * `Pqc` — keys are derived from an ML-KEM secret in the QKC; the link is
-///   not QKD-rate-limited, so the MCMCF-λ solver treats it as **uncapacitated**
-///   (routable, no capacity constraint).
+///   not QKD-rate-limited. Its capacity is `pqc_capacity_keys_per_s`
+///   (configured per link, default 10 000): what bounds it is compute and
+///   transport, not fibre, but a finite number is what lets the rate signal
+///   mean something in PQC-only deployments — the old uncapacitated model
+///   (a 1e9 sentinel in the solver) made λ and every `/rate` value garbage
+///   there, measured 2026-08-02.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkType {
@@ -262,7 +266,7 @@ pub struct EdgeMeta {
     pub alpha: f64,
     #[serde(default = "default_buf_size")]
     pub max_buffer_size: u32,
-    /// QKD (default) or PQC. PQC edges are uncapacitated in the MCF.
+    /// QKD (default) or PQC.
     #[serde(default)]
     pub link_type: LinkType,
     /// Tamaño de la clave OTP del enlace. **Debe coincidir en ambos extremos**,
@@ -270,6 +274,14 @@ pub struct EdgeMeta {
     /// vecino, le va este valor y no el suyo por defecto.
     #[serde(default = "default_key_size_bits")]
     pub key_size_bits: u32,
+    /// Capacidad de un enlace PQC en claves/s (ignorada en QKD, donde manda
+    /// la fórmula de quditto). Nadie la mide: es lo que el operador declara
+    /// que su enlace puede sostener. El default (10 000) queda muy por encima
+    /// del uso real por par (el techo del token bucket del DKMS es 320) y muy
+    /// por debajo del viejo centinela de 1e9 que hacía la señal de rates
+    /// insignificante en despliegues PQC-only.
+    #[serde(default = "default_pqc_capacity")]
+    pub pqc_capacity_keys_per_s: f64,
 }
 
 /// Respaldo cuando un QKC anuncia un enlace QKD sin declarar `r0`. Antes eran
@@ -289,6 +301,9 @@ fn default_key_size_bits() -> u32 {
 fn default_buf_size() -> u32 {
     100
 }
+fn default_pqc_capacity() -> f64 {
+    10_000.0
+}
 
 impl Default for EdgeMeta {
     fn default() -> Self {
@@ -299,6 +314,7 @@ impl Default for EdgeMeta {
             max_buffer_size: default_buf_size(),
             link_type: LinkType::default(),
             key_size_bits: default_key_size_bits(),
+            pqc_capacity_keys_per_s: default_pqc_capacity(),
         }
     }
 }
@@ -310,7 +326,19 @@ impl EdgeMeta {
         (self.r0_keys_per_second * 10f64.powf(exp)).max(0.0)
     }
 
-    /// `true` for PQC links (uncapacitated in the MCF).
+    /// Capacidad efectiva de la arista para el modelo de rates, del tipo que
+    /// sea el enlace: la fórmula de quditto en QKD, la capacidad declarada en
+    /// PQC. Único punto de decisión — quien necesite la capacidad de una
+    /// arista pasa por aquí, no por `is_pqc()` más un caso especial.
+    pub fn capacity_keys_per_second(&self) -> f64 {
+        if self.is_pqc() {
+            self.pqc_capacity_keys_per_s.max(0.0)
+        } else {
+            self.quditto_capacity_keys_per_second()
+        }
+    }
+
+    /// `true` for PQC links.
     pub fn is_pqc(&self) -> bool {
         self.link_type == LinkType::Pqc
     }
@@ -892,17 +920,19 @@ impl Topology {
         }
         let key = edge_key(a, b);
         let edge = self.edges.get_mut(&key)?;
-        // PQC edges are uncapacitated: capacity edits are a no-op.
-        if edge.is_pqc() {
-            return Some(false);
-        }
-        let current = edge.quditto_capacity_keys_per_second();
+        let current = edge.capacity_keys_per_second();
         let threshold = (current * 0.05).max(0.5);
         if (current - capacity_kps).abs() < threshold {
             return Some(false);
         }
-        let exp = edge.alpha * edge.distance_km as f64 / 10.0;
-        edge.r0_keys_per_second = capacity_kps * 10f64.powf(exp);
+        if edge.is_pqc() {
+            // En PQC la capacidad ES el campo declarado; no hay fórmula que
+            // invertir.
+            edge.pqc_capacity_keys_per_s = capacity_kps;
+        } else {
+            let exp = edge.alpha * edge.distance_km as f64 / 10.0;
+            edge.r0_keys_per_second = capacity_kps * 10f64.powf(exp);
+        }
         Some(true)
     }
 }
@@ -1897,6 +1927,7 @@ mod tests {
                         max_buffer_size: 65536,
                         link_type: LinkType::Pqc,
                         key_size_bits: 256,
+                        ..EdgeMeta::default()
                     },
                 })
                 .collect(),

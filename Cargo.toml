@@ -107,7 +107,7 @@ petgraph = "0.6"
 # stay dependency-free: microlp (default_solver, exact simplex) and
 # clarabel (interior-point, runtime opt-in via SDN_SOLVER=clarabel —
 # microlp stalls at N≥40 / ≥1560 commodities).
-good_lp = { version = "1", default-features = false, features = ["microlp", "clarabel"] }
+good_lp = { version = "1", default-features = false, features = ["microlp", "clarabel", "highs"] }
 # Direct dep only for naming clarabel::solver::SolverStatus in the SDN's
 # post-solve status check (good_lp's backend maps unbounded exits to Ok).
 # Same version req as good_lp's so cargo unifies on one copy and the

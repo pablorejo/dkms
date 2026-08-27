@@ -86,6 +86,10 @@ struct LinkAnnounce {
     alpha: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distance_km: Option<u32>,
+    // El nombre del wire es el del campo de `EdgeMeta` en la SDN (que va
+    // `#[serde(flatten)]` en su parser de announce), no el de nuestro TOML.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pqc_capacity_keys_per_s: Option<f64>,
 }
 
 pub struct SdnAnnouncer {
@@ -164,6 +168,7 @@ impl SdnAnnouncer {
                     r0_keys_per_second: l.r0,
                     alpha: l.alpha,
                     distance_km: l.distance_km,
+                    pqc_capacity_keys_per_s: l.capacity_keys_per_s,
                 }
             })
             .collect();
@@ -203,6 +208,7 @@ impl SdnAnnouncer {
                 r0: None,
                 alpha: None,
                 distance_km: None,
+                capacity_keys_per_s: None,
             }),
         })
     }

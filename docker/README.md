@@ -294,7 +294,8 @@ links:
 | `links[].neighbor_id` | id del QKC vecino. Es lo único de topología que un QKC declara, y basta con que lo haga **uno** de los dos extremos: la SDN monta la arista y se lo cuenta al otro. Lo declarado aquí es además un suelo que la SDN no puede quitar. |
 | `links[].neighbor_addr` | **opcional** en enlaces `pqc` si hay `sdn_url`: la dirección no viaja en el anuncio —la SDN ya la conoce, porque cada QKC anuncia la suya— y vuelve en la lista de peers. Omítela y el enlace se monta cuando la SDN conteste; declárala y se monta en el arranque, sin depender de ella. En un enlace `qkd` es obligatoria (la SDN no los crea). Puerto peer 20000 si no se indica. |
 | `links[].type` | `pqc` (sin hardware) o `qkd` (con `kme_url` del KME ETSI-014). **Un enlace `qkd` hay que declararlo sí o sí**: la SDN no puede inventarse el `kme_url` de tu institución, así que si ofrece uno sin config local el QKC lo avisa por log y no lo crea. |
-| `links[].r0` / `alpha` / `distance_km` | modelo físico del enlace. El QKC no los usa: se los pasa a la SDN, que dimensiona la arista con `r0·10^(−alpha·d/10)`. Solo para enlaces `qkd` — los `pqc` van sin capacidad. |
+| `links[].r0` / `alpha` / `distance_km` | modelo físico del enlace `qkd`. El QKC no los usa: se los pasa a la SDN, que dimensiona la arista con `r0·10^(−alpha·d/10)`. |
+| `links[].capacity_keys_per_s` | capacidad declarada de un enlace `pqc` en claves/s (ignorada en `qkd`). Sin declarar, la SDN aplica 10 000 — un default finito con el que la señal de rates significa algo también en despliegues solo-PQC (antes llevaban un centinela de 1e9 y `/rate` era ruido). |
 | `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
 
 **Sobre el auto-registro.** Una arista necesita a sus dos extremos dados de
@@ -582,8 +583,8 @@ API en `https://<dkms>:20005` (ETSI GS QKD 014):
 | endpoint | qué hace |
 |----------|----------|
 | `GET /api/v1/keys/<slave>/status` | stock y límites del par: `stored_key_count`, `max_key_per_request` (64), `max_key_size` (4096), `min_key_size` (64)… |
-| `POST /api/v1/keys/<slave>/enc_keys` | body `{"number":N,"size":bits}` → `{"keys":[{"key_ID","key"}]}`. El DKMS entrega la clave al DKMS del slave por ETSI-020 en la misma llamada. |
-| `POST /api/v1/keys/<master>/dec_keys` | body `{"key_IDs":[{"key_ID":"…"}]}` → la **misma** clave, en el otro extremo. |
+| `POST /api/v1/keys/<slave>/enc_keys` | body `{"number":N,"size":bits}` → `{"keys":[{"key_ID","key"}]}`. El DKMS entrega la clave al DKMS del slave por ETSI-020 en la misma llamada. También `GET …/enc_keys?number=N&size=bits` (§6.2 de la spec; defaults 1/256) — es lo que usa strongSwan. |
+| `POST /api/v1/keys/<master>/dec_keys` | body `{"key_IDs":[{"key_ID":"…"}]}` → la **misma** clave, en el otro extremo. También `GET …/dec_keys?key_ID=<uuid>` (§6.4: una sola key por GET). |
 
 Intercambio completo entre dos nodos (la prueba de que la red funciona):
 

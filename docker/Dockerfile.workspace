@@ -24,7 +24,7 @@ FROM rust:1.88-bookworm AS chef
 ENV RUSTUP_TOOLCHAIN=stable
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        protobuf-compiler \
+        protobuf-compiler cmake \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install --locked cargo-chef@0.1.72
 

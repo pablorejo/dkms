@@ -16,10 +16,11 @@ use crate::{
     demand::{DemandRegistry, SharedDemandRegistry},
     error::Result,
     mcf::{BufferRole, McfSnapshot},
-    mcmcf::{McmcfInputs, McmcfSolver},
+    mcmcf::{wcmp_from_topology, McmcfInputs, McmcfSolver},
     metrics::SdnMetrics,
     presence::{Kind, Presence},
     push::Pushers,
+    rates_num::{maxmin_allocate, Allocator, NumParams, RateAlloc},
     topology::TopologyStore,
 };
 
@@ -42,6 +43,8 @@ pub struct SdnService {
     /// expiry sweep; see [`crate::presence`] for why it lives outside the
     /// topology snapshot.
     pub presence: Arc<Presence>,
+    /// Qué asignador produce las rates y, para `num`, su estado de precios.
+    pub alloc: RateAlloc,
 }
 
 impl SdnService {
@@ -49,6 +52,16 @@ impl SdnService {
         // La SDN arranca sin topología, siempre. La construye con lo que los
         // módulos le cuentan al registrarse (`POST /register/{qkc,orr,dkms}`).
         let sdn_metrics = SdnMetrics::register(&metrics);
+        let allocator = Allocator::resolve(&cfg.rate_allocator);
+        let alloc = RateAlloc::new(
+            allocator,
+            NumParams {
+                alpha: cfg.num_alpha,
+                gamma: cfg.num_gamma,
+                fill_weight: cfg.num_fill_weight,
+            },
+        );
+        info!(allocator = ?allocator, "asignador de rates seleccionado");
         let svc = Self {
             cfg: Arc::new(cfg),
             topology: TopologyStore::default(),
@@ -59,6 +72,7 @@ impl SdnService {
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
             presence: Arc::new(Presence::new()),
+            alloc,
         };
         // 2026-05-20: previously called svc.recompute_mcf() synchronously
         // here. With N=40 (~1560 commodities, ~110 edges) microlp takes
@@ -95,6 +109,7 @@ impl SdnService {
             &self.demand_registry,
             &self.mcf_snapshot,
             Some(&self.sdn_metrics.lp_solve_duration_seconds),
+            &self.alloc,
         )
     }
 
@@ -124,8 +139,9 @@ impl SdnService {
         let demand = self.demand_registry.clone();
         let snap = self.mcf_snapshot.clone();
         let lp_hist = self.sdn_metrics.lp_solve_duration_seconds.clone();
+        let alloc = self.alloc.clone();
         let new_deb = Debouncer::new(window, max_wait, move || {
-            recompute_mcf_inner(&topo, &demand, &snap, Some(&lp_hist));
+            recompute_mcf_inner(&topo, &demand, &snap, Some(&lp_hist), &alloc);
         });
         info!(
             n_dkms = n,
@@ -162,6 +178,13 @@ impl SdnService {
     /// otherwise falls back to a synchronous recompute (useful for
     /// tests and CLI tooling).
     pub fn request_recompute(&self) {
+        // num/maxmin son aritmética de microsegundos: el debouncer existe
+        // porque el LP es caro, y aquí solo retrasaría la convergencia de
+        // los precios (que quieren cadencia constante, no coalescencia).
+        if self.alloc.allocator != Allocator::Lp {
+            self.recompute_mcf();
+            return;
+        }
         match self.debouncer.read().as_ref() {
             Some(d) => d.request(),
             None => {
@@ -492,13 +515,31 @@ fn recompute_mcf_inner(
     demand_registry: &Arc<DemandRegistry>,
     snap_cell: &Arc<ArcSwap<McfSnapshot>>,
     lp_solve_histogram: Option<&prometheus::Histogram>,
+    alloc: &RateAlloc,
 ) -> Arc<McfSnapshot> {
     let t_start = std::time::Instant::now();
     let topo = topo_store.load();
     let inputs = McmcfInputs::build(&topo, demand_registry);
     let n_commodities = inputs.commodities.len();
     let n_edges = inputs.edge_capacity.len();
-    let solution = McmcfSolver::new().solve(&inputs);
+    let solution = match alloc.allocator {
+        Allocator::Lp => McmcfSolver::new().solve(&inputs),
+        // Los dos asignadores nuevos deciden CUÁNTO sobre el mismo routing
+        // que los QKCs ejecutan: las tablas WCMP de topología+capacidad.
+        // `into_mcf_snapshot` las reconstruye igual para publicarlas — el
+        // coste doble es microsegundos y mantiene un único camino de
+        // publicación.
+        Allocator::Num => {
+            let wf = wcmp_from_topology(&topo, None);
+            let wq = wcmp_from_topology(&topo, Some(common::security::KeyGrade::Qkd));
+            alloc.state.lock().step(&inputs, &wf, &wq, &alloc.params)
+        }
+        Allocator::Maxmin => {
+            let wf = wcmp_from_topology(&topo, None);
+            let wq = wcmp_from_topology(&topo, Some(common::security::KeyGrade::Qkd));
+            maxmin_allocate(&inputs, &wf, &wq)
+        }
+    };
     let lambda = solution.lambda;
     let n_flows_positive = solution.rates.values().filter(|r| **r > 0.0).count();
     let snap = solution.into_mcf_snapshot(&topo);
@@ -511,6 +552,7 @@ fn recompute_mcf_inner(
         h.observe(elapsed.as_secs_f64());
     }
     info!(
+        allocator = ?alloc.allocator,
         n_commodities,
         n_edges,
         lambda,
@@ -609,6 +651,10 @@ pub(crate) mod tests {
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
                 presence_ttl_secs: 90,
+                rate_allocator: "lp".into(),
+                num_alpha: 1.0,
+                num_gamma: 0.2,
+                num_fill_weight: 0.1,
             }),
             topology: TopologyStore::new(small_topo()),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),
@@ -618,7 +664,31 @@ pub(crate) mod tests {
             demand_registry: Arc::new(DemandRegistry::new()),
             debouncer: Arc::new(RwLock::new(None)),
             presence: Arc::new(Presence::new()),
+            // Los tests históricos de este módulo ejercitan el pipeline del
+            // LP; el asignador de producción tiene los suyos en `rates_num`
+            // y un smoke propio más abajo.
+            alloc: RateAlloc::new(Allocator::Lp, NumParams::default()),
         }
+    }
+
+    #[test]
+    fn recompute_with_num_allocator_populates_snapshot() {
+        let mut svc = make_service();
+        svc.alloc = RateAlloc::new(Allocator::Num, NumParams::default());
+        let snap = svc.recompute_mcf();
+        // Con precios a cero el primer tick ya publica rates factibles y
+        // positivas para el par alcanzable en ambos sentidos.
+        assert!(snap.rate_for_flow("dA", "dB") > 0.0);
+        assert!(snap.rate_for_flow("dB", "dA") > 0.0);
+    }
+
+    #[test]
+    fn recompute_with_maxmin_allocator_populates_snapshot() {
+        let mut svc = make_service();
+        svc.alloc = RateAlloc::new(Allocator::Maxmin, NumParams::default());
+        let snap = svc.recompute_mcf();
+        assert!(snap.rate_for_flow("dA", "dB") > 0.0);
+        assert!(snap.rate_for_flow("dB", "dA") > 0.0);
     }
 
     #[test]

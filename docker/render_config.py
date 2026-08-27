@@ -127,15 +127,19 @@ def render_qkc(n, out):
             die("[qkc.link] link to " + str(nid) + " has no neighbor_addr and this node has no "
                 "sdn_url to learn it from: declare one of the two")
         # Physical model of the link. The QKC does not use these — it forwards
-        # them to the SDN, which sizes the edge with r0*10^(-alpha*d/10).
+        # them to the SDN, which sizes the edge with r0*10^(-alpha*d/10) for
+        # qkd links and with capacity_keys_per_s (SDN default 10000) for pqc.
         # Only the institution knows them: its own fibre, or what it configured
-        # on the quditto. PQC edges are uncapacitated, so they can be omitted.
+        # on the quditto.
         if lk.get("r0") is not None:
             lines.append("r0 = " + str(float(lk["r0"])))
         if lk.get("alpha") is not None:
             lines.append("alpha = " + str(float(lk["alpha"])))
         if lk.get("distance_km") is not None:
             lines.append("distance_km = " + str(int(lk["distance_km"])))
+        if lk.get("capacity_keys_per_s") is not None:
+            lines.append("capacity_keys_per_s = "
+                         + str(float(lk["capacity_keys_per_s"])))
         if typ == "qkd":
             kme = str(req(lk, "kme_url", "qkc.link(qkd)"))
             if "//" not in kme:
