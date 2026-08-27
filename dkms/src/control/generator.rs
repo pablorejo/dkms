@@ -321,6 +321,7 @@ impl Generator {
         loop {
             tick.tick().await;
             let now = Instant::now();
+            let now_ms = chrono::Utc::now().timestamp_millis();
             let pool_snap = self.pool.snapshot();
             let ack_snap: HashMap<String, usize> =
                 self.ack_pending.snapshot().into_iter().collect();
@@ -350,6 +351,7 @@ impl Generator {
                     .unwrap_or((0, 0));
                 let ack_pending = ack_snap.get(&peer).copied().unwrap_or(0);
                 let rate_sdn = rates_snap.get(&peer).copied().unwrap_or(0.0);
+                let sae_drain = self.demand_tracker.rate(&peer, now_ms);
                 let emit_total = counters_snap.get(&peer).copied().unwrap_or(0);
                 let observed_rate = if let Some((prev_total, prev_t)) = prev.get(&peer) {
                     let dt = now.saturating_duration_since(*prev_t).as_secs_f64();
@@ -388,6 +390,15 @@ impl Generator {
                     emit_capacity = self.buffer_capacity_per_peer,
                     observed_keys_per_s = format!("{observed_rate:.1}"),
                     sdn_rate_keys_per_s = format!("{rate_sdn:.1}"),
+                    // El δ_k que este DKMS le está contando a la SDN para este
+                    // peer (EWMA de peticiones SAE, muestreada ANTES de la
+                    // admisión del bucket). Al lado de `sdn_rate` cierra el
+                    // lazo entero en una línea: lo que pedimos (drain), lo que
+                    // nos dan (sdn_rate) y lo que hacemos (observed). Sin esto
+                    // un `sdn_rate=0` no distingue "no reportamos demanda" de
+                    // "la SDN nos la negó" — exactamente la ambigüedad que
+                    // dejó abierto el `drain_positive=0` de la campaña CESGA.
+                    sae_drain_keys_per_s = format!("{sae_drain:.1}"),
                     // Techo real del token bucket. La rate del SDN por sí sola
                     // engaña: en un despliegue solo-PQC las aristas llevan una
                     // capacidad centinela de 1e9 (`PQC_EDGE_CAPACITY_KEYS_PER_SECOND`
@@ -561,9 +572,21 @@ impl Generator {
     async fn run_rate_refresh_loop(self: Arc<Self>) {
         let period = Duration::from_millis(self.cfg.rate_refresh_ms);
         let mut backoff_ms = 500u64;
+        // Los fallos sueltos son ruido de red y se quedan en `debug`, pero
+        // una racha significa que `rates_enc` está congelado en el último
+        // valor bueno (solo se reemplaza en el Ok) y nadie lo ve: el
+        // generador sigue emitiendo con una señal que puede tener minutos.
+        let mut consecutive_failures = 0u64;
         loop {
             match self.sdn_http.get_rates(&self.my_dkms_id).await {
                 Ok(resp) => {
+                    if consecutive_failures >= 10 {
+                        info!(
+                            failures = consecutive_failures,
+                            "generator.rates: SDN de vuelta; rates frescas otra vez",
+                        );
+                    }
+                    consecutive_failures = 0;
                     let mut by_peer: HashMap<String, f64> = HashMap::new();
                     let mut qkd: HashMap<String, bool> = HashMap::new();
                     for (peer, rate) in resp.peers.iter() {
@@ -584,11 +607,21 @@ impl Generator {
                     );
                 }
                 Err(e) => {
-                    debug!(
-                        error = %e,
-                        backoff_ms,
-                        "generator.rates refresh failed; will retry",
-                    );
+                    consecutive_failures += 1;
+                    if consecutive_failures.is_multiple_of(10) {
+                        warn!(
+                            error = %e,
+                            consecutive_failures,
+                            "generator.rates: sin respuesta de la SDN; el generador \
+                             sigue con las últimas rates conocidas",
+                        );
+                    } else {
+                        debug!(
+                            error = %e,
+                            backoff_ms,
+                            "generator.rates refresh failed; will retry",
+                        );
+                    }
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(10_000);
                     continue;
@@ -961,15 +994,55 @@ impl Generator {
         // Backoff schedule (ms) chosen so the worst case (3 attempts
         // with two waits) stays well below demand_refresh_ms=1000.
         const BACKOFF_MS: [u64; 2] = [40, 120];
+        // Una línea de resumen cada tantos ticks (~30 s con el default de
+        // 1 s), para que el lado DKMS del lazo de demanda quede en su propio
+        // log y no haya que inferirlo del diag agregado de la SDN.
+        const SUMMARY_EVERY: u64 = 30;
         let period = Duration::from_millis(self.cfg.demand_refresh_ms.max(50));
         let mut tick = tokio::time::interval(period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut ticks: u64 = 0;
         loop {
             tick.tick().await;
             let now_ms = chrono::Utc::now().timestamp_millis();
             let report = self.build_demand_report(now_ms);
             if report.entries.is_empty() {
                 continue;
+            }
+            ticks += 1;
+            if ticks.is_multiple_of(SUMMARY_EVERY) {
+                // `drain_entries` cuenta contra un umbral (≥ 0.01 keys/s), no
+                // `> 0.0`: la EWMA nunca vuelve a 0.0 exacto tras la primera
+                // petición, así que el estrictamente-positivo solo dice "hubo
+                // tráfico SAE alguna vez", no "hay demanda ahora" — la
+                // ambigüedad que dejó abierta el `drain_positive=0` de CESGA.
+                let mut drain_total = 0.0f64;
+                let mut drain_max = 0.0f64;
+                let mut drain_max_peer = "";
+                let mut drain_entries = 0usize;
+                let mut buffers_full = 0usize;
+                for e in &report.entries {
+                    drain_total += e.drain_rate;
+                    if e.drain_rate >= 0.01 {
+                        drain_entries += 1;
+                    }
+                    if e.drain_rate > drain_max {
+                        drain_max = e.drain_rate;
+                        drain_max_peer = &e.dst_dkms;
+                    }
+                    if e.level >= e.capacity {
+                        buffers_full += 1;
+                    }
+                }
+                info!(
+                    entries = report.entries.len(),
+                    drain_entries,
+                    drain_total = format!("{drain_total:.1}"),
+                    drain_max = format!("{drain_max:.1}"),
+                    drain_max_peer,
+                    buffers_full,
+                    "demand.report: δ_k que este DKMS reporta a la SDN",
+                );
             }
             let mut last_err: Option<anyhow::Error> = None;
             let mut applied_ok: Option<crate::southbound::DemandApplied> = None;
