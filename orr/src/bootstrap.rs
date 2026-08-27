@@ -266,7 +266,16 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
                     return;
                 }
                 // §Fase 6 PQC: verifica la firma ML-DSA del anuncio.
-                match peers.verify_announcement(peer_id, &suite, &pk, &signature) {
+                //
+                // Una firma VÁLIDA autentica el anuncio por sí sola y hace
+                // innecesario el pin: el pin existía para cuando no había
+                // firma. Exigir ambos es incoherente — la pubkey ML-KEM del ORR
+                // es efímera (se regenera en cada arranque), así que nunca hay
+                // pin que case y `strict` rechazaba TODO aunque la firma fuese
+                // correcta (medido: 12 rechazos en una malla de 4 nodos).
+                let sig = peers.verify_announcement(peer_id, &suite, &pk, &signature);
+                let firmado = matches!(sig, crate::peers::SigVerdict::Valid);
+                match sig {
                     crate::peers::SigVerdict::Reject => {
                         warn!(
                             local = %local_orr_id, peer = %peer_id, addr = %addr,
@@ -288,7 +297,12 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
                 }
                 // §Fase 6: contrasta la pubkey anunciada contra el pin de
                 // `peer_pubkeys` según `bootstrap_trust`.
-                match peers.verify_fetched_pubkey(peer_id, &pk) {
+                // El pin solo decide si el anuncio NO venía firmado.
+                match if firmado {
+                    crate::peers::PubkeyVerdict::Accept
+                } else {
+                    peers.verify_fetched_pubkey(peer_id, &pk)
+                } {
                     crate::peers::PubkeyVerdict::Reject => {
                         warn!(
                             local = %local_orr_id, peer = %peer_id, addr = %addr,

@@ -80,6 +80,12 @@ SDN_GRPC=19000
 TOPO="${DKMS_MESH_TOPO:-ring}"
 SEED="${DKMS_MESH_SEED:-42}"
 LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
+# DKMS_MESH_PQC_AUTH=sign firma con ML-DSA el handshake del QKC (enlaces PQC) y
+# el anuncio de pubkey del ORR. Con `off` (default) esos dos planos van sin
+# firmar, como han ido siempre. Las identidades las genera `pqc_keygen` en
+# $DIR/signkeys y son efímeras como la malla.
+PQC_AUTH="${DKMS_MESH_PQC_AUTH:-off}"
+SIGNDIR=""
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
 DIST_KM="${DKMS_MESH_DIST_KM:-5}"
@@ -193,6 +199,11 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
         echo 'advertise_ip: "127.0.0.1"'
         echo "sdn_announce_secs: 5"
         echo "ports: {peer: $(peer_port "$n"), local: $(local_port "$n"), admin: $(admin_port "$n")}"
+        # Firma ML-DSA del handshake PQC (DKMS_MESH_PQC_AUTH=sign): la semilla
+        # de este QKC. La clave pública del vecino va en cada enlace, abajo.
+        if [ "$PQC_AUTH" = sign ]; then
+            echo "sign_secret_seed: \"$(cat "$SIGNDIR/qkc-$n.seed")\""
+        fi
         if (( $# > 0 )); then
             echo "links:"
             for nb in "$@"; do
@@ -205,12 +216,22 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                         "$nb" "$(peer_port "$nb")"
                     printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s}\n' \
                         "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$DIST_KM"
-                elif [ -n "${DKMS_MESH_PQC_CAP:-}" ]; then
-                    # Capacidad PQC declarada; sin la variable se prueba el
-                    # default de la SDN (10 000 claves/s).
-                    echo "  - {neighbor_id: $nb, type: pqc, capacity_keys_per_s: $DKMS_MESH_PQC_CAP}"
                 else
-                    echo "  - {neighbor_id: $nb, type: pqc}"
+                    # Firma ML-DSA del handshake (solo enlaces PQC: los QKD no
+                    # negocian ML-KEM, su material lo da el KME). Cada extremo
+                    # firma con SU semilla y verifica con la clave pública del
+                    # vecino, así que solo se comparten claves públicas.
+                    local auth=""
+                    if [ "$PQC_AUTH" = sign ]; then
+                        auth=", pqc_auth: sign, peer_verify_key: \"$(cat "$SIGNDIR/qkc-$nb.vk")\""
+                    fi
+                    if [ -n "${DKMS_MESH_PQC_CAP:-}" ]; then
+                        # Capacidad PQC declarada; sin la variable se prueba el
+                        # default de la SDN (10 000 claves/s).
+                        echo "  - {neighbor_id: $nb, type: pqc, capacity_keys_per_s: $DKMS_MESH_PQC_CAP$auth}"
+                    else
+                        echo "  - {neighbor_id: $nb, type: pqc$auth}"
+                    fi
                 fi
             done
         fi
@@ -237,6 +258,17 @@ patch_dkms_toml() {
 generate() {        # generate <N>
     local total=$1
     rm -rf "$DIR"; mkdir -p "$DIR"/{yml,cfg/sdn,logs,certs}
+    # Identidades de firma ML-DSA (una por QKC y una por ORR) antes de escribir
+    # ningún node.yml: las semillas y las claves públicas se referencian ahí.
+    SIGNDIR="$DIR/signkeys"
+    if [ "$PQC_AUTH" = sign ]; then
+        local kg="$REPO/target/release/pqc_keygen"
+        [ -x "$kg" ] || kg="$REPO/target/debug/pqc_keygen"
+        [ -x "$kg" ] || { echo "mesh: FATAL: falta pqc_keygen (cargo build --release)" >&2; exit 1; }
+        "$kg" --out "$SIGNDIR" --nodes "$total" >/dev/null || {
+            echo "mesh: FATAL: pqc_keygen falló" >&2; exit 1; }
+        echo "mesh: firma ML-DSA activa (handshake QKC + bootstrap ORR)"
+    fi
     build_topology "$total"
     printf 'listen_ip: "0.0.0.0"\npresence_ttl_secs: 90\n' > "$DIR/yml/node.sdn.yml"
     python3 "$RENDER" sdn "$DIR/yml/node.sdn.yml" "$DIR/cfg/sdn" >/dev/null
@@ -244,7 +276,14 @@ generate() {        # generate <N>
     for n in $(seq 1 "$total"); do
         mkdir -p "$DIR/cfg/qkc$n" "$DIR/cfg/orr$n" "$DIR/cfg/dkms$n"
         # shellcheck disable=SC2046
-        if [ "$LINK_TYPE" = qkd ]; then
+        if [ "$LINK_TYPE" = qkd ] || [ "$PQC_AUTH" = sign ]; then
+            # Con firma ML-DSA los declaran los DOS extremos, por la misma razón
+            # que en qkd: la SDN no puede suministrar la clave de verificación
+            # del vecino (no la conoce, y no debe repartir material de
+            # identidad), así que un enlace declarado por un solo lado dejaría
+            # al otro extremo sin con qué verificar — medido: 423 descartes por
+            # "sin peer_verify_key" y 436 por "firma inválida" (el enlace que
+            # crea la SDN heredaba la clave de OTRO vecino).
             write_qkc_yml "$n" $(incident_of "$n" | awk '{print $2}')
         else
             write_qkc_yml "$n" $(neighbours_of "$n")
@@ -259,6 +298,21 @@ advertise_ip: "127.0.0.1"
 sdn_announce_secs: 5
 ports: {grpc: $(orr_port "$n"), metrics: $(port "$n" 20004)}
 EOF
+        # Firma ML-DSA del bootstrap: el ORR firma la pubkey ML-KEM que anuncia
+        # en GetPublicKey, y sus pares la verifican con la clave pública de
+        # aquí. Cierra el MITM del bootstrap aunque la identidad ML-KEM siga
+        # siendo efímera (se regenera en cada arranque).
+        if [ "$PQC_AUTH" = sign ]; then
+            {
+                echo "sign_secret_seed: \"$(cat "$SIGNDIR/orr_$n.seed")\""
+                echo "bootstrap_trust: strict"
+                echo "peer_verify_keys:"
+                for m in $(seq 1 "$total"); do
+                    [ "$m" = "$n" ] && continue
+                    echo "  orr_$m: \"$(cat "$SIGNDIR/orr_$m.vk")\""
+                done
+            } >> "$DIR/yml/node$n.orr.yml"
+        fi
         python3 "$RENDER" orr "$DIR/yml/node$n.orr.yml" "$DIR/cfg/orr$n" >/dev/null
 
         cat > "$DIR/yml/node$n.dkms.yml" <<EOF

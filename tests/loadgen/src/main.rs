@@ -43,9 +43,20 @@ use tokio::sync::mpsc;
 #[derive(Parser, Debug)]
 #[command(name = "sae_load", about = "Cliente SAE de carga (mTLS, RSA o ML-DSA)")]
 struct Args {
-    /// Id del SAE maestro (el del cert de cliente que se presenta).
-    #[arg(long)]
+    /// Id del SAE maestro (el del cert de cliente que se presenta). No hace
+    /// falta en `--roundtrip`, que recorre los pares por su cuenta.
+    #[arg(long, default_value = "")]
     sae: String,
+    /// Modo verificación: por cada par ORDENADO de nodos, el maestro pide
+    /// `enc_keys` en su DKMS, el esclavo recupera esa `key_ID` con `dec_keys`
+    /// en el suyo y se comparan los BYTES. Es el equivalente de
+    /// `keys_smoke.sh`, que usa `curl` y por tanto el OpenSSL del sistema:
+    /// con certs ML-DSA aquel aborta el handshake y no mide nada.
+    #[arg(long, default_value_t = false)]
+    roundtrip: bool,
+    /// Nodos a recorrer en `--roundtrip`, separados por comas (p. ej. "1,5,9").
+    #[arg(long, default_value = "")]
+    nodes: String,
     /// Id del SAE destino (alternativa a `--slaves`).
     #[arg(long, default_value = "")]
     slave: String,
@@ -74,9 +85,9 @@ struct Args {
     rate_cap: f64,
     #[arg(long, default_value_t = 20.0)]
     timeout: f64,
-    /// CSV de salida.
+    /// CSV de salida (obligatorio salvo en `--roundtrip`).
     #[arg(long)]
-    out: PathBuf,
+    out: Option<PathBuf>,
     /// Fichero `key_id,sha256` para la verificación por muestreo.
     #[arg(long = "record-keys", default_value = "")]
     record_keys: String,
@@ -103,9 +114,15 @@ fn now_unix() -> f64 {
 /// clásicas. Un cliente por hilo con el pool a 1 ⇒ una conexión keep-alive por
 /// hilo, como el original Python.
 fn build_client(args: &Args) -> Result<reqwest::Client> {
+    build_client_as(args, &args.sae)
+}
+
+/// Igual que [`build_client`] pero presentando la identidad indicada: en
+/// `--roundtrip` cada lado del par usa su propio cert de SAE.
+fn build_client_as(args: &Args, sae: &str) -> Result<reqwest::Client> {
     let ca_path = args.certs.join("net-ca.crt");
-    let cert_path = args.certs.join(format!("{}.crt", args.sae));
-    let key_path = args.certs.join(format!("{}.key", args.sae));
+    let cert_path = args.certs.join(format!("{}.crt", sae));
+    let key_path = args.certs.join(format!("{}.key", sae));
 
     let mut bundle = std::fs::read(&cert_path)
         .with_context(|| format!("leyendo cert de cliente {}", cert_path.display()))?;
@@ -287,6 +304,129 @@ async fn worker(
     }
 }
 
+/// Puerto del plano SAE del nodo `n` en la malla de `mesh.sh`.
+fn sae_port(n: u32) -> u16 {
+    20005 + ((n - 1) as u16) * 100
+}
+
+/// Un intercambio ETSI-014 completo por cada par ORDENADO: el maestro pide
+/// `enc_keys` en su DKMS y el esclavo recupera esa `key_ID` con `dec_keys` en
+/// el suyo; se comparan los BYTES.
+///
+/// La comparación es el punto: la clave de sesión viaja envuelta en OTP con una
+/// clave de transporte y **no lleva integridad propia**, así que si el material
+/// estuviera desalineado los dos SAE se llevarían claves distintas sin que nada
+/// fallase. Pares ordenados porque el `buffer_enc` de un extremo es el
+/// `buffer_dec` del otro: A→B y B→A gastan material distinto.
+async fn run_roundtrip(args: &Args) -> Result<i32> {
+    let nodes: Vec<u32> = args
+        .nodes
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().parse::<u32>())
+        .collect::<std::result::Result<_, _>>()
+        .context("--nodes debe ser una lista de enteros separados por comas")?;
+    anyhow::ensure!(nodes.len() >= 2, "--roundtrip necesita al menos 2 nodos");
+
+    // Un cliente por identidad de SAE, reutilizado en todos sus pares.
+    let mut clients = std::collections::HashMap::new();
+    for n in &nodes {
+        clients.insert(*n, build_client_as(args, &format!("sae_{n}"))?);
+    }
+
+    let mut ok = 0usize;
+    let mut bad = 0usize;
+    let mut fails: Vec<String> = Vec::new();
+
+    for m in &nodes {
+        for s in &nodes {
+            if m == s {
+                continue;
+            }
+            let enc_url = format!(
+                "https://{}:{}/api/v1/keys/sae_{s}/enc_keys",
+                args.host,
+                sae_port(*m)
+            );
+            let enc: serde_json::Value = match clients[m]
+                .post(&enc_url)
+                .json(&serde_json::json!({"number": 1, "size": 256}))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fails.push(format!("sae_{m}→sae_{s} enc_keys json: {e}"));
+                        bad += 1;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    fails.push(format!("sae_{m}→sae_{s} enc_keys: {e}"));
+                    bad += 1;
+                    continue;
+                }
+            };
+            let kid = enc["keys"][0]["key_ID"].as_str().unwrap_or("").to_string();
+            let master_key = enc["keys"][0]["key"].as_str().unwrap_or("").to_string();
+            if kid.is_empty() || master_key.is_empty() {
+                fails.push(format!("sae_{m}→sae_{s} enc_keys sin clave"));
+                bad += 1;
+                continue;
+            }
+
+            let dec_url = format!(
+                "https://{}:{}/api/v1/keys/sae_{m}/dec_keys",
+                args.host,
+                sae_port(*s)
+            );
+            let dec: serde_json::Value = match clients[s]
+                .post(&dec_url)
+                .json(&serde_json::json!({"key_IDs": [{"key_ID": kid}]}))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fails.push(format!("sae_{m}→sae_{s} dec_keys json: {e}"));
+                        bad += 1;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    fails.push(format!("sae_{m}→sae_{s} dec_keys: {e}"));
+                    bad += 1;
+                    continue;
+                }
+            };
+            let slave_key = dec["keys"][0]["key"].as_str().unwrap_or("").to_string();
+            if slave_key.is_empty() {
+                fails.push(format!("sae_{m}→sae_{s} dec_keys sin clave"));
+                bad += 1;
+            } else if slave_key == master_key {
+                ok += 1;
+            } else {
+                fails.push(format!("sae_{m}→sae_{s} LOS BYTES NO COINCIDEN key_ID={kid}"));
+                bad += 1;
+            }
+        }
+    }
+
+    let n = nodes.len();
+    println!(
+        "  pares ordenados: {}   idénticos: {ok}   fallidos: {bad}",
+        n * (n - 1)
+    );
+    for f in &fails {
+        println!("    ✗ {f}");
+    }
+    Ok(if bad == 0 { 0 } else { 1 })
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     // Provider con ML-DSA + clásicos: es lo que permite presentar un cert de
@@ -294,6 +434,17 @@ fn main() -> Result<()> {
     // ML-DSA falla con "failed to parse private key as RSA, ECDSA, or EdDSA".
     common::tls_pqc::install_process_default();
 
+    if args.roundtrip {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let code = rt.block_on(run_roundtrip(&args))?;
+        std::process::exit(code);
+    }
+
+    let out_path = args.out.clone().context("--out es obligatorio sin --roundtrip")?;
+    anyhow::ensure!(!args.sae.is_empty(), "--sae es obligatorio sin --roundtrip");
     let slave_list: Vec<String> = if !args.slaves.is_empty() {
         args.slaves
             .split(',')
@@ -338,8 +489,8 @@ fn main() -> Result<()> {
         drop(tx); // el writer termina cuando todos los workers sueltan su tx
 
         // Escritor único: el CSV se escribe en un sitio, sin contención.
-        let out = File::create(&args.out)
-            .with_context(|| format!("creando {}", args.out.display()))?;
+        let out = File::create(&out_path)
+            .with_context(|| format!("creando {}", out_path.display()))?;
         let mut csv = BufWriter::new(out);
         writeln!(csv, "t_unix,thread,status,latency_ms,n_keys,key_id,slave")?;
         let mut keyfiles: Vec<(String, BufWriter<File>)> = Vec::new();

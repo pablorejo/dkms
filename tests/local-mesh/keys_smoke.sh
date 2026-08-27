@@ -29,6 +29,18 @@ fi
 
 sae_port() { echo $(( 20005 + ($1 - 1) * 100 )); }
 
+# Con certificados ML-DSA, `curl` no sirve: va contra el OpenSSL del sistema y
+# los de antes de la 3.5 —CESGA tiene 1.1.1g— abortan el handshake (el DKMS lo
+# ve como `tls handshake eof`). Medido el 2026-08-27: el régimen `poca` de la
+# campaña dio 3960 handshakes fallidos y CERO claves, que parecía un fallo del
+# DKMS y era del cliente. El binario Rust usa common::tls_pqc y habla con
+# ambos, así que se prefiere cuando está.
+LOADER_BIN="$REPO/target/release/sae_load"
+if [ -x "$LOADER_BIN" ]; then
+    exec "$LOADER_BIN" --roundtrip --certs "$C" \
+        --nodes "$(IFS=,; echo "${NODES[*]}")"
+fi
+
 ok=0; bad=0; fails=()
 for m in "${NODES[@]}"; do
   for s in "${NODES[@]}"; do

@@ -165,6 +165,28 @@ fn build_provider() -> CryptoProvider {
         mapping: VERIFY_MAPPING,
     };
     provider.key_provider = &PQC_KEY_PROVIDER;
+
+    // Intercambio de claves HÍBRIDO post-cuántico primero.
+    //
+    // Autenticar con ML-DSA protege de que alguien se haga pasar por un nodo,
+    // pero no de «grabar ahora, descifrar después»: si el secreto de sesión se
+    // acuerda solo con X25519, un adversario con ordenador cuántico puede
+    // guardar el tráfico de hoy y descifrarlo mañana. Y por este TLS viajan
+    // claves de sesión de SAE.
+    //
+    // rustls trae `X25519MLKEM768` (draft-ietf-tls-ecdhe-mlkem) pero solo lo
+    // ofrece por defecto con la feature `prefer-post-quantum`, que no está
+    // activa aquí — así que lo ponemos delante explícitamente. Es híbrido: el
+    // secreto sale de combinar X25519 **y** ML-KEM-768, de modo que sigue
+    // siendo tan seguro como X25519 aunque ML-KEM fallara, y resistente a
+    // cuántico aunque X25519 caiga. Los clásicos quedan detrás para no romper
+    // a un peer que aún no lo soporte.
+    provider.kx_groups = vec![
+        aws_lc_rs::kx_group::X25519MLKEM768,
+        aws_lc_rs::kx_group::X25519,
+        aws_lc_rs::kx_group::SECP256R1,
+        aws_lc_rs::kx_group::SECP384R1,
+    ];
     provider
 }
 
@@ -359,6 +381,20 @@ mod tests {
 
         assert!(!client.is_handshaking(), "cliente completó el handshake");
         assert!(!server.is_handshaking(), "servidor completó el handshake");
+
+        // El intercambio de claves negociado tiene que ser el HÍBRIDO
+        // post-cuántico, no X25519 a secas: configurarlo no basta, hay que ver
+        // que se elige. Sin esto, la sesión sería vulnerable a «grabar ahora,
+        // descifrar después» aunque la autenticación fuese ML-DSA.
+        let kx = server
+            .negotiated_key_exchange_group()
+            .expect("hay grupo negociado");
+        assert_eq!(
+            kx.name(),
+            rustls::NamedGroup::X25519MLKEM768,
+            "se negoció {:?} en vez del híbrido post-cuántico",
+            kx.name()
+        );
         // El servidor recibió y verificó el cert cliente ML-DSA.
         assert!(server.peer_certificates().is_some(), "mTLS: cert cliente ML-DSA verificado");
         let _ = std::fs::remove_dir_all(&dir);

@@ -107,6 +107,12 @@ pub struct SdnAnnouncer {
     /// config local: mientras no conozca todavía a un vecino su lista llega
     /// vacía, y borrarlos tiraría abajo enlaces vivos con su material de clave.
     local_links: std::collections::HashSet<u32>,
+    /// Config local COMPLETA por vecino. La `node.yml` es la autoridad sobre la
+    /// identidad del enlace (claves de firma/PSK, suite, capacidad); la SDN solo
+    /// sabe direcciones. Sin esto, un enlace declarado localmente pero sin
+    /// `neighbor_addr` —lo normal en PQC, donde la dirección la pone la SDN— se
+    /// montaba por la vía de la SDN y perdía su material de firma.
+    local_cfgs: std::collections::HashMap<u32, LinkConfig>,
 }
 
 impl SdnAnnouncer {
@@ -200,6 +206,7 @@ impl SdnAnnouncer {
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
             svc,
             local_links: cfg.links.iter().map(|l| l.neighbor_id).collect(),
+            local_cfgs: cfg.links.iter().map(|l| (l.neighbor_id, l.clone())).collect(),
             // Si el node.yml declara enlaces, sus ajustes PQC son la
             // referencia local; si no, los defaults del propio config.
             link_defaults: cfg.links.first().cloned().unwrap_or_else(|| LinkConfig {
@@ -271,14 +278,52 @@ impl SdnAnnouncer {
             if self.svc.link_to(id).is_some() {
                 continue;
             }
+            // Si el enlace está declarado en el `node.yml`, esa config manda:
+            // la SDN solo aporta la DIRECCIÓN. Un enlace PQC declarado sin
+            // `neighbor_addr` (lo normal: la dirección la da la SDN) llegaba
+            // aquí y se reconstruía desde `link_defaults`, perdiendo su
+            // `peer_verify_key` — el peer firmaba y este extremo descartaba por
+            // "sin peer_verify_key" (medido 2026-08-27: 302 descartes en un
+            // nodo de una malla de 4).
+            if let Some(local) = self.local_cfgs.get(&id) {
+                let mut cfg = local.clone();
+                cfg.neighbor_peer_addr = p.peer_addr.clone();
+                match self.svc.add_link(cfg) {
+                    Ok(true) => info!(peer = id, addr = %p.peer_addr,
+                        "enlace local montado con la dirección de la SDN"),
+                    Ok(false) => {}
+                    Err(e) => warn!(peer = id, error = %e, "no pude levantar el enlace local"),
+                }
+                continue;
+            }
             let cfg = LinkConfig {
                 neighbor_id: id,
                 neighbor_peer_addr: p.peer_addr.clone(),
                 link_type: LinkType::Pqc,
                 quditto_url: None,
                 key_size_bits: p.key_size_bits,
+                // El material de identidad NO se hereda de `link_defaults`:
+                // es POR PAR. Heredarlo metía en el enlace nuevo la clave del
+                // primer vecino declarado, y el peer firmaba con otra — medido
+                // 2026-08-27: 436 descartes por "firma ML-DSA inválida" en una
+                // malla donde la mitad de los enlaces los crea la SDN. Con un
+                // PSK el efecto habría sido el mismo. La SDN no reparte
+                // identidades (ver `docs/SECURITY.md`), así que un enlace
+                // firmado tiene que declararse en el `node.yml` de los dos
+                // extremos, como ya pasa con `kme_url` en los QKD.
+                link_psk: None,
+                peer_verify_key: None,
                 ..self.link_defaults.clone()
             };
+            if cfg.pqc_auth != crate::config::PqcAuth::Off {
+                warn!(
+                    peer = id,
+                    modo = ?cfg.pqc_auth,
+                    "enlace creado por la SDN sin material de firma: declara el enlace en el \
+                     node.yml de este QKC (con peer_verify_key/link_psk) o el handshake se \
+                     descartará"
+                );
+            }
             match self.svc.add_link(cfg) {
                 Ok(true) => info!(peer = id, addr = %p.peer_addr, "enlace nuevo, dicho por la SDN"),
                 Ok(false) => {}

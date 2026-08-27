@@ -35,7 +35,11 @@ OUT="$OUTBASE/$TOPO_FAM-n$N-$REG"
 mkdir -p "$OUT"
 
 export DKMS_MESH_DIR="${DKMS_MESH_DIR:-${TMPDIR:-/tmp}/dkms-scale-mesh}"
-export DKMS_MESH_LINK_TYPE=qkd DKMS_MESH_TOPO=custom
+# El tipo de enlace es override-able: la campaña de certificados necesita
+# enlaces PQC, porque la firma ML-DSA del handshake solo existe ahí (un enlace
+# QKD no negocia ML-KEM, su material lo entrega el KME).
+export DKMS_MESH_LINK_TYPE="${DKMS_MESH_LINK_TYPE:-qkd}"
+export DKMS_MESH_TOPO=custom
 
 # ── aristas de la familia a este N ─────────────────────────────────────────
 edges_of() {
