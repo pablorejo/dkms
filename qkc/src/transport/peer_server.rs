@@ -14,7 +14,8 @@ use tokio::{net::TcpStream, sync::Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use wire::{
-    decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_PQC_KEM_INIT,
+    decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_KEY_IDS_NOTIFY_AUTH,
+    FRAME_PQC_KEM_INIT,
     FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED, FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH,
     FRAME_PQC_KEM_RESP_SIGNED, FRAME_RECV, FRAME_RELAY,
 };
@@ -91,8 +92,9 @@ async fn handle_conn(
                 // Sin semáforo: handle_notify es síncrono y trivial
                 // (un push a Mutex<Vec> + notify_one). NO debe nunca
                 // bloquear el flujo de datos por backpressure.
-                handle_notify(svc.clone(), frame);
+                handle_notify(svc.clone(), frame, false);
             }
+            FRAME_KEY_IDS_NOTIFY_AUTH => handle_notify(svc.clone(), frame, true),
             // Handshake ML-KEM de enlaces PQC. Síncrono (encap/decap son
             // µs de CPU); los frames de un peer se procesan en orden, así
             // que no hay encap/decap concurrentes para un mismo enlace.
@@ -112,13 +114,21 @@ async fn handle_conn(
 /// `FRAME_KEY_IDS_NOTIFY`: el peer (sender_id) acaba de pedir N claves
 /// con estos UUIDs al quditto compartido del enlace; nosotros debemos
 /// pedirlos a nuestro `dec_keys` para llenar nuestro buffer DEC.
-fn handle_notify(svc: QkcService, frame: wire::Frame) {
+fn handle_notify(svc: QkcService, frame: wire::Frame, authed: bool) {
     let sender = frame.sender_id;
     let Some(link) = svc.link_to(sender) else {
         warn!(sender, "qkc.notify: unknown neighbor");
         return;
     };
-    let raw_ids = match decode_notify_payload(&frame.payload) {
+    // Con clave de enlace configurada, el NOTIFY tiene que venir autenticado y
+    // con el HMAC correcto. Es lo único que impide que un tercero decida qué
+    // `key_ID` pide este QKC a su KME — el material QKD protege el contenido,
+    // no quién pide qué.
+    let payload = match link.keys.verify_notify(&frame.payload, authed, sender) {
+        Some(p) => p,
+        None => return,
+    };
+    let raw_ids = match decode_notify_payload(payload) {
         Ok(v) => v,
         Err(e) => {
             warn!(sender, error = %e, "qkc.notify: bad payload");

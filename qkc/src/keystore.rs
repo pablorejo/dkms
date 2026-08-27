@@ -74,6 +74,11 @@ pub struct KeyStore {
     peer_out: Arc<PeerOut>,
     /// ID del peer (sender_id de nuestros frames hacia él) y dir TCP.
     peer_id: u32,
+    /// Clave del enlace para autenticar los `FRAME_KEY_IDS_NOTIFY` (HMAC).
+    /// Simétrica ⇒ resistente a cuántico, y 32 B de tag frente a los 3309 de
+    /// una firma ML-DSA, que en un frame tan frecuente no sale a cuenta.
+    /// `None` ⇒ notify sin autenticar (comportamiento histórico).
+    notify_psk: Option<Vec<u8>>,
     peer_addr: String,
     /// Nuestro propio ID (sender_id del NOTIFY).
     my_id: u32,
@@ -128,8 +133,10 @@ impl KeyStore {
         peer_addr: String,
         my_id: u32,
         key_size_bits: u32,
+        notify_psk: Option<Vec<u8>>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            notify_psk,
             enc: ArrayQueue::new(BUFFER_TARGET * 2),
             dec: DashMap::with_capacity(BUFFER_TARGET * 2),
             kme,
@@ -469,9 +476,80 @@ impl KeyStore {
         }
     }
 
+    /// Comprueba el HMAC de un `NOTIFY` entrante y devuelve el payload sin el
+    /// tag. `None` = descartar.
+    ///
+    /// Fail-closed: si este enlace tiene clave, un NOTIFY sin autenticar se
+    /// descarta. Degradar en silencio dejaría el plano abierto justo cuando
+    /// alguien lo está atacando.
+    pub fn verify_notify<'a>(
+        &self,
+        payload: &'a [u8],
+        authed: bool,
+        sender: u32,
+    ) -> Option<&'a [u8]> {
+        let Some(psk) = self.notify_psk.as_deref() else {
+            // Sin clave: comportamiento histórico. Un frame autenticado que
+            // llega a un enlace sin clave no se puede comprobar, así que se
+            // acepta su contenido pero se avisa: es señal de config asimétrica.
+            if authed {
+                warn!(sender, "qkc.notify: llega autenticado pero este enlace no tiene link_psk");
+                return payload.get(..payload.len().saturating_sub(32));
+            }
+            return Some(payload);
+        };
+        if !authed {
+            warn!(sender, "qkc.notify: sin autenticar en un enlace con link_psk; descarto");
+            return None;
+        }
+        if payload.len() < 32 {
+            warn!(sender, "qkc.notify: autenticado pero demasiado corto; descarto");
+            return None;
+        }
+        let (msg, tag) = payload.split_at(payload.len() - 32);
+        if common::crypto::link_mac::verify(
+            psk,
+            common::crypto::link_mac::TAG_NOTIFY,
+            0,
+            sender,      // en recepción el emisor es el peer
+            self.my_id,
+            msg,
+            "notify",
+            self.key_size_bits as u32,
+            tag,
+        )
+        .is_err()
+        {
+            warn!(sender, "qkc.notify: HMAC inválido; descarto");
+            return None;
+        }
+        Some(msg)
+    }
+
     fn send_notify(&self, ids_raw: &[[u8; 16]]) {
-        let payload = encode_notify_payload(ids_raw);
-        let mut frame = Frame::empty(FRAME_KEY_IDS_NOTIFY);
+        let mut payload = encode_notify_payload(ids_raw);
+        // Con clave de enlace, el NOTIFY va autenticado (frame 0x25) con un
+        // HMAC de 32 B al final. Este frame decide qué `key_ID` pide el peer al
+        // KME: forjarlo permite descuadrar el consumo de claves de un enlace
+        // QKD, que es el único plano del enlace que no protege el propio QKD.
+        let kind = match self.notify_psk.as_deref() {
+            Some(psk) => {
+                let tag = common::crypto::link_mac::tag(
+                    psk,
+                    common::crypto::link_mac::TAG_NOTIFY,
+                    0, // el NOTIFY no tiene época propia
+                    self.my_id,
+                    self.peer_id,
+                    &payload,
+                    "notify",
+                    self.key_size_bits as u32,
+                );
+                payload.extend_from_slice(&tag);
+                wire::FRAME_KEY_IDS_NOTIFY_AUTH
+            }
+            None => FRAME_KEY_IDS_NOTIFY,
+        };
+        let mut frame = Frame::empty(kind);
         frame.sender_id = self.my_id;
         frame.receiver_id = self.peer_id;
         frame.dest_final = self.peer_id;

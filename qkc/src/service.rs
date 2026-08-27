@@ -150,10 +150,13 @@ impl QkcService {
                             link.neighbor_id
                         ))
                     })?;
+                    // El QKC presenta su propia identidad de nodo al KME: es
+                    // el mismo material que usa para anunciarse a la SDN.
                     let c = Arc::new(KmeClient::new(
                         url,
                         cfg.qkc_id.to_string(),
                         link.key_size_bits,
+                        cfg.tls.as_ref().map(|t| t.as_client_tls()),
                     )?);
                     (c as Arc<dyn KeySource>, None)
                 }
@@ -216,6 +219,12 @@ impl QkcService {
                     (src as Arc<dyn KeySource>, Some(hs))
                 }
             };
+            // La clave del enlace autentica los NOTIFY (ver KeyStore::verify_notify).
+            // Aplica a QKD y a PQC: es el plano de control del enlace, que el
+            // material QKD no cubre.
+            let notify_psk = link.link_psk.as_deref().and_then(|b64| {
+                base64::engine::general_purpose::STANDARD.decode(b64).ok()
+            });
             let keys = KeyStore::new(
                 Arc::clone(&kme),
                 Arc::clone(peer_out),
@@ -223,6 +232,7 @@ impl QkcService {
                 link.neighbor_peer_addr.clone(),
                 cfg.qkc_id,
                 link.key_size_bits,
+                notify_psk,
             );
             Ok(LinkRuntime {
                 cfg: link.clone(),

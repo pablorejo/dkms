@@ -83,17 +83,36 @@ pub trait KeySource: Send + Sync {
 }
 
 impl KmeClient {
-    pub fn new(base: String, sae_id: String, key_size_bits: u32) -> Result<Self> {
+    pub fn new(
+        base: String,
+        sae_id: String,
+        key_size_bits: u32,
+        tls: Option<common::http::ClientTls<'_>>,
+    ) -> Result<Self> {
         // HTTP/1.1 con pool grande (compat con simple_quditto Python que
         // no soporta h2c). Para loopback con quditto Rust se podría
         // re-habilitar `http2_prior_knowledge()` cuando el quditto Rust
         // multi-link esté disponible.
-        let http = Client::builder()
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(256)
-            .timeout(Duration::from_secs(30))
-            .tcp_nodelay(true)
-            .build()?;
+        // mTLS hacia el KME cuando la URL es https.
+        //
+        // ETSI GS QKD 014 exige TLS mutuo entre el consumidor y el KME, y aquí
+        // importa más que en ningún otro sitio: TODA la seguridad del modo QKD
+        // descansa en que las claves vengan del dispositivo QKD de verdad. Si
+        // este canal va en claro, quien lo controle puede suplantar al KME y
+        // servir claves propias — y entonces el OTP del enlace cifra
+        // perfectamente con una clave que el atacante conoce. Se dejó en HTTP
+        // por ser intra-institución (docs/SECURITY.md §1.2), pero es una
+        // decisión de despliegue, no una propiedad del sistema.
+        let http = match tls {
+            Some(t) => common::http::announcer_client(&base, Some(t), Duration::from_secs(30))
+                .map_err(|e| QkcError::BadRequest(format!("cliente KME TLS: {e}")))?,
+            None => Client::builder()
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(256)
+                .timeout(Duration::from_secs(30))
+                .tcp_nodelay(true)
+                .build()?,
+        };
         Ok(Self {
             inner: Arc::new(KmeInner {
                 http,
