@@ -46,6 +46,8 @@ use tracing::{debug, info, warn};
 use wire::{Frame, FRAME_LOCAL_SEND};
 
 use crate::stats::OrrStats;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{
     bootstrap,
     config::OrrConfig,
@@ -91,6 +93,15 @@ pub struct OrrService {
     path_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Contadores de la línea `orr.state`. Ver [`crate::stats`].
     pub stats: Arc<OrrStats>,
+    /// Encarnación de este ORR, aleatoria por arranque. Va en la cabecera de
+    /// cada cebolla que originamos, y en el AAD de todas sus capas. Sin ella,
+    /// un ORR que reinicia vuelve al contador 1 y sus mensajes legítimos son
+    /// indistinguibles de un replay para el destino.
+    onion_session: u64,
+    /// Contador monotónico de mensajes que originamos, desde 1.
+    onion_counter: Arc<AtomicU64>,
+    /// Ventanas anti-replay de lo que nos llega, una por ORR de origen.
+    pub onion_replay: Arc<crate::onion_replay::OnionReplay>,
 }
 
 impl OrrService {
@@ -181,6 +192,8 @@ impl OrrService {
             }
         };
 
+        let mut sess = [0u8; 8];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut sess);
         let svc = OrrService {
             cfg,
             identity,
@@ -192,6 +205,11 @@ impl OrrService {
             sdn,
             path_cache: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(OrrStats::default()),
+            // La sesión 0 se reserva para "cabecera sin frescura" (passthrough
+            // y cabeceras viejas), así que la nuestra nunca puede ser 0.
+            onion_session: u64::from_be_bytes(sess).max(1),
+            onion_counter: Arc::new(AtomicU64::new(0)),
+            onion_replay: Arc::new(crate::onion_replay::OnionReplay::new()),
         };
 
         // Pump entrante: cada frame `FRAME_LOCAL_DELIVER` del QKC pasa
@@ -431,7 +449,8 @@ impl OrrService {
             master_secret: zeroize::Zeroizing::new(ms),
             epoch_id,
         }];
-        let onion = onion::build_onion(&path, payload)?;
+        let (session, counter) = self.next_onion_freshness();
+        let onion = onion::build_onion(&path, payload, session, counter)?;
         self.send_onion_frame(dest_orr, dest_qkc, onion, app_header, grade)
             .await?;
         debug!(dest = %dest_orr, dest_qkc, "orr.send pqc_e2e");
@@ -542,7 +561,8 @@ impl OrrService {
                 epoch_id,
             });
         }
-        let onion = onion::build_onion(&hops, payload)?;
+        let (session, counter) = self.next_onion_freshness();
+        let onion = onion::build_onion(&hops, payload, session, counter)?;
         let first_qkc = self.peers.qkc_id(&onion.first_hop_orr).ok_or_else(|| {
             OrrError::Relay(format!(
                 "first hop {} sin qkc_id en peers config",
@@ -572,6 +592,14 @@ impl OrrService {
     /// Mete un `OnionWire` dentro de un `FRAME_LOCAL_SEND` y lo encola
     /// al QKC local. El header lleva `next_orr_id` + `key_id` del
     /// `OnionWire` (lo que el peeler del primer hop usará para descifrar
+    /// Siguiente `(session, counter)` para una cebolla que originamos aquí.
+    fn next_onion_freshness(&self) -> (u64, u64) {
+        (
+            self.onion_session,
+            self.onion_counter.fetch_add(1, Ordering::Relaxed) + 1,
+        )
+    }
+
     /// el `payload`).
     async fn send_onion_frame(
         &self,
@@ -587,6 +615,8 @@ impl OrrService {
             &onion.first_hop_orr,
             onion.first_key_id,
             onion.max_hops,
+            onion.session,
+            onion.counter,
         );
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
@@ -671,10 +701,29 @@ impl OrrService {
         };
         // `epoch_id` entra en el AAD del tag: si alguien mueve una capa válida a
         // otra época, el AEAD lo rechaza en vez de devolver un plaintext raro.
-        let peeled =
-            onion::peel(&ms, &key_id, &payload, header.max_hops, epoch_id).inspect_err(|_| {
-                OrrStats::bump(&self.stats.peel_failed);
-            })?;
+        let peeled = onion::peel(
+            &ms,
+            &key_id,
+            &payload,
+            header.max_hops,
+            epoch_id,
+            header.session,
+            header.counter,
+        )
+        .inspect_err(|_| {
+            OrrStats::bump(&self.stats.peel_failed);
+        })?;
+        // Frescura: sólo DESPUÉS de que el tag haya cuadrado. El AAD es lo que
+        // ata session/counter al mensaje; antes de comprobarlo no son de fiar y
+        // cualquiera podría tirar la ventana con una `session` inventada.
+        if let Err(e) = self
+            .onion_replay
+            .check(&header.from, header.session, header.counter)
+        {
+            warn!(from = %header.from, error = %e, "orr.onion replay descartado");
+            OrrStats::bump(&self.stats.replay_dropped);
+            return Ok(());
+        }
         match peeled {
             Peeled::Deliver(body) => {
                 debug!(from = %header.from, to = %header.to, "orr.onion deliver");
@@ -707,12 +756,18 @@ impl OrrService {
         next_qkc_id: u32,
     ) -> Result<()> {
         let remaining_after = (prev_header.max_hops - 1).max(0);
+        // La pareja de frescura es del ORIGEN y se copia sin tocar: va en el
+        // AAD de la capa que estamos reenviando, así que cambiarla rompería el
+        // peel del siguiente salto. Que no se pueda mentir aquí es lo que hace
+        // fiable la ventana anti-replay del destino.
         let new_header = OrrHeader::onion(
             &prev_header.from,
             &prev_header.to,
             &inner.next_orr_id,
             inner.key_id,
             remaining_after,
+            prev_header.session,
+            prev_header.counter,
         );
         let out = Frame {
             kind: FRAME_LOCAL_SEND,

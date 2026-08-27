@@ -47,6 +47,9 @@ pub struct OrrStats {
     pub dropped_no_secret: AtomicU64,
     /// `onion::peel` devolvió error.
     pub peel_failed: AtomicU64,
+    /// Capas con tag válido pero `(session, counter)` ya visto: un mensaje
+    /// reinyectado. Distinto de `peel_failed`, que es el tag que no cuadra.
+    pub replay_dropped: AtomicU64,
 }
 
 impl OrrStats {
@@ -87,6 +90,7 @@ pub fn spawn_state_logger(stats: Arc<OrrStats>, peers: Arc<PeerRegistry>, every:
                 // Los dos que hay que vigilar: ver el módulo.
                 dropped_no_secret = g(&stats.dropped_no_secret),
                 peel_failed = g(&stats.peel_failed),
+                replay_dropped = g(&stats.replay_dropped),
                 "orr.state",
             );
             // Orden estable: si no, dos vueltas seguidas parecen distintas y

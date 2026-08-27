@@ -31,6 +31,7 @@ pub mod header;
 pub mod identity;
 pub mod macs;
 pub mod onion;
+pub mod onion_replay;
 pub mod peers;
 pub mod qkc_link;
 pub mod relay;

@@ -12,7 +12,7 @@ fn main() {
         master_secret: Zeroizing::new(ms),
         epoch_id: 0,
     }];
-    let o1 = build_onion(&path1, body.clone()).unwrap();
+    let o1 = build_onion(&path1, body.clone(), 1, 1).unwrap();
     println!(
         "mode 1 (1 hop):   payload {} B  (body 64 + overhead {})",
         o1.payload.len(),
@@ -32,7 +32,7 @@ fn main() {
             epoch_id: 0,
         },
     ];
-    let o2 = build_onion(&path2, body.clone()).unwrap();
+    let o2 = build_onion(&path2, body.clone(), 1, 1).unwrap();
     println!(
         "mode 2 (2 hops):  payload {} B  (body 64 + overhead {})",
         o2.payload.len(),
@@ -57,7 +57,7 @@ fn main() {
             epoch_id: 0,
         },
     ];
-    let o3 = build_onion(&path3, body.clone()).unwrap();
+    let o3 = build_onion(&path3, body.clone(), 1, 1).unwrap();
     println!(
         "mode -1 (3 hops): payload {} B  (body 64 + overhead {})",
         o3.payload.len(),

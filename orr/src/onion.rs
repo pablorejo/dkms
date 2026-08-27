@@ -175,9 +175,13 @@ pub struct OnionWire {
     /// Hops onion restantes tras pelar la capa externa (= `header.max_hops`).
     /// Si el path tiene N hops, este valor es N-1.
     pub max_hops: i32,
-    /// El payload cifrado de la capa externa: `K ⊕ inner`. Va en el
-    /// `payload` del wire frame.
+    /// El payload sellado de la capa externa. Va en el `payload` del wire frame.
     pub payload: Vec<u8>,
+    /// Encarnación del ORR de origen, aleatoria por arranque de proceso.
+    /// Va en la cabecera y en el AAD de todas las capas.
+    pub session: u64,
+    /// Contador monotónico del origen, uno por mensaje. Idem.
+    pub counter: u64,
 }
 
 /// Resultado de pelar una capa.
@@ -201,12 +205,24 @@ const AAD_V3: &[u8] = b"orr.onion.v3";
 /// Sin esto el tag protege el contenido pero no su contexto, y un QKC en el
 /// camino podría mover una capa válida a otra época o cambiarle el `max_hops`
 /// para que el destino la entregue en vez de reenviarla (o al revés).
-fn layer_aad(key_id: &[u8; 16], epoch_id: u32, max_hops: i32) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(AAD_V3.len() + 16 + 4 + 4);
+fn layer_aad(
+    key_id: &[u8; 16],
+    epoch_id: u32,
+    max_hops: i32,
+    session: u64,
+    counter: u64,
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(AAD_V3.len() + 16 + 4 + 4 + 8 + 8);
     aad.extend_from_slice(AAD_V3);
     aad.extend_from_slice(key_id);
     aad.extend_from_slice(&epoch_id.to_be_bytes());
     aad.extend_from_slice(&max_hops.to_be_bytes());
+    // Frescura: los pone el ORR de ORIGEN, uno por mensaje, y van iguales en
+    // todas las capas. Un ORR que reenvía tiene que copiarlos a la cabecera que
+    // escribe; si los cambia, este AAD deja de cuadrar en el siguiente salto y
+    // el peel falla. Ver `onion_replay`.
+    aad.extend_from_slice(&session.to_be_bytes());
+    aad.extend_from_slice(&counter.to_be_bytes());
     aad
 }
 
@@ -232,30 +248,36 @@ fn layer_key(master_secret: &[u8; 32], key_id: &[u8; 16]) -> Zeroizing<[u8; 32]>
 /// clave** que sólo funciona porque viaja dentro del cifrado. Con AEAD el tag
 /// es la integridad y la autenticación de origen de la capa a la vez, y ya no
 /// dependen de la confidencialidad.
+#[allow(clippy::too_many_arguments)]
 fn seal_layer(
     master_secret: &[u8; 32],
     key_id: &[u8; 16],
     plaintext: &[u8],
     epoch_id: u32,
     max_hops: i32,
+    session: u64,
+    counter: u64,
 ) -> Result<Vec<u8>> {
     let k = layer_key(master_secret, key_id);
-    let aad = layer_aad(key_id, epoch_id, max_hops);
+    let aad = layer_aad(key_id, epoch_id, max_hops, session, counter);
     let sealed = common::crypto::aead::seal(k.as_ref(), plaintext, &aad)?;
     Ok(sealed.to_bytes())
 }
 
 /// Inversa de [`seal_layer`]. Un tag que no cuadra es un error, no un
 /// plaintext raro: es justo la diferencia con el XOR de antes.
+#[allow(clippy::too_many_arguments)]
 fn open_layer(
     master_secret: &[u8; 32],
     key_id: &[u8; 16],
     ct: &[u8],
     epoch_id: u32,
     max_hops: i32,
+    session: u64,
+    counter: u64,
 ) -> Result<Vec<u8>> {
     let k = layer_key(master_secret, key_id);
-    let aad = layer_aad(key_id, epoch_id, max_hops);
+    let aad = layer_aad(key_id, epoch_id, max_hops, session, counter);
     let msg = common::crypto::aead::SealedMessage::from_bytes(ct)?;
     Ok(common::crypto::aead::open(k.as_ref(), &msg, &aad)?)
 }
@@ -270,7 +292,12 @@ fn open_layer(
 /// peeler de la siguiente capa lo usa para descifrar su propia
 /// `xor_ct`). El `epoch_id` del primer hop sale en
 /// `OnionWire.first_epoch_id`.
-pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
+pub fn build_onion(
+    path: &[PathHopSecret],
+    body: Vec<u8>,
+    session: u64,
+    counter: u64,
+) -> Result<OnionWire> {
     if path.is_empty() {
         return Err(OrrError::Relay("onion: empty path".into()));
     }
@@ -283,7 +310,15 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
     // La capa del destino se pela con max_hops = 0 (entrega), y con la época
     // del propio destino: los dos entran en el AAD, así que el tag ata la capa
     // a la posición que le toca en el path.
-    let mut current_xor = seal_layer(&dst.master_secret, &kid_dst, &body, dst.epoch_id, 0)?;
+    let mut current_xor = seal_layer(
+        &dst.master_secret,
+        &kid_dst,
+        &body,
+        dst.epoch_id,
+        0,
+        session,
+        counter,
+    )?;
     let mut current_next_orr_id = dst.orr_id.clone();
     let mut current_next_epoch = dst.epoch_id;
     let mut current_key_id = kid_dst;
@@ -310,6 +345,8 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
             &layer_pt,
             hop.epoch_id,
             hops_left,
+            session,
+            counter,
         )?;
         current_next_orr_id = hop.orr_id.clone();
         current_next_epoch = hop.epoch_id;
@@ -322,6 +359,8 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
         first_key_id: current_key_id,
         max_hops: (path.len() as i32) - 1,
         payload: current_xor,
+        session,
+        counter,
     })
 }
 
@@ -334,14 +373,25 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
 /// QKC en el último hop QKC-OTP).
 /// `max_hops`: del `header.max_hops` del wire frame entrante. Si > 0
 /// devuelve `Forward(InnerLayer)`; si == 0 devuelve `Deliver(body)`.
+#[allow(clippy::too_many_arguments)]
 pub fn peel(
     master_secret: &[u8; 32],
     key_id: &[u8; 16],
     xor_ct: &[u8],
     max_hops: i32,
     epoch_id: u32,
+    session: u64,
+    counter: u64,
 ) -> Result<Peeled> {
-    let pt = open_layer(master_secret, key_id, xor_ct, epoch_id, max_hops)?;
+    let pt = open_layer(
+        master_secret,
+        key_id,
+        xor_ct,
+        epoch_id,
+        max_hops,
+        session,
+        counter,
+    )?;
     if max_hops <= 0 {
         Ok(Peeled::Deliver(pt))
     } else {
@@ -367,9 +417,9 @@ mod tests {
         let ms = random_secret();
         let kid = *Uuid::new_v4().as_bytes();
         let body = b"hola mundo onion v3".to_vec();
-        let ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
+        let ct = seal_layer(&ms, &kid, &body, 5, 1, 9, 4).unwrap();
         assert_eq!(ct.len(), body.len() + NONCE_LEN + AEAD_TAG_LEN);
-        assert_eq!(open_layer(&ms, &kid, &ct, 5, 1).unwrap(), body);
+        assert_eq!(open_layer(&ms, &kid, &ct, 5, 1, 9, 4).unwrap(), body);
     }
 
     #[test]
@@ -380,10 +430,10 @@ mod tests {
         let ms = random_secret();
         let kid = *Uuid::new_v4().as_bytes();
         let body = b"contenido que no debe poder cambiarse".to_vec();
-        let mut ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
+        let mut ct = seal_layer(&ms, &kid, &body, 5, 1, 9, 4).unwrap();
         let i = NONCE_LEN + 3;
         ct[i] ^= 0x01;
-        assert!(open_layer(&ms, &kid, &ct, 5, 1).is_err());
+        assert!(open_layer(&ms, &kid, &ct, 5, 1, 9, 4).is_err());
     }
 
     #[test]
@@ -394,19 +444,31 @@ mod tests {
         let ms = random_secret();
         let kid = *Uuid::new_v4().as_bytes();
         let body = b"capa".to_vec();
-        let ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
-        assert!(open_layer(&ms, &kid, &ct, 6, 1).is_err(), "época cambiada");
-        assert!(open_layer(&ms, &kid, &ct, 5, 0).is_err(), "max_hops cambiado");
+        let ct = seal_layer(&ms, &kid, &body, 5, 1, 9, 4).unwrap();
+        assert!(open_layer(&ms, &kid, &ct, 6, 1, 9, 4).is_err(), "época cambiada");
+        assert!(open_layer(&ms, &kid, &ct, 5, 0, 9, 4).is_err(), "max_hops cambiado");
         // Y el key_id, que selecciona la clave, también está en el AAD.
         let other_kid = *Uuid::new_v4().as_bytes();
-        assert!(open_layer(&ms, &other_kid, &ct, 5, 1).is_err());
+        assert!(open_layer(&ms, &other_kid, &ct, 5, 1, 9, 4).is_err());
+    }
+
+    #[test]
+    fn aead_binds_the_freshness_pair() {
+        // Si session/counter no entrasen en el AAD, un ORR que reenvía podría
+        // cambiarlos y saltarse la ventana anti-replay del destino.
+        let ms = random_secret();
+        let kid = *Uuid::new_v4().as_bytes();
+        let ct = seal_layer(&ms, &kid, b"capa", 5, 1, 9, 4).unwrap();
+        assert!(open_layer(&ms, &kid, &ct, 5, 1, 10, 4).is_err(), "session");
+        assert!(open_layer(&ms, &kid, &ct, 5, 1, 9, 5).is_err(), "counter");
+        assert!(open_layer(&ms, &kid, &ct, 5, 1, 9, 4).is_ok());
     }
 
     #[test]
     fn aead_rejects_a_foreign_secret() {
         let kid = *Uuid::new_v4().as_bytes();
-        let ct = seal_layer(&random_secret(), &kid, b"x", 1, 0).unwrap();
-        assert!(open_layer(&random_secret(), &kid, &ct, 1, 0).is_err());
+        let ct = seal_layer(&random_secret(), &kid, b"x", 1, 0, 1, 1).unwrap();
+        assert!(open_layer(&random_secret(), &kid, &ct, 1, 0, 1, 1).is_err());
     }
 
     #[test]
@@ -415,8 +477,8 @@ mod tests {
         // ciphertexts distintos, o se filtra la igualdad de los cuerpos.
         let ms = random_secret();
         let kid = *Uuid::new_v4().as_bytes();
-        let a = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0).unwrap();
-        let b = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0).unwrap();
+        let a = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0, 1, 1).unwrap();
+        let b = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0, 1, 1).unwrap();
         assert_ne!(a, b);
         assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN]);
     }
@@ -430,11 +492,11 @@ mod tests {
             master_secret: Zeroizing::new(ms_dst),
             epoch_id: 7,
         }];
-        let onion = build_onion(&path, body.clone()).unwrap();
+        let onion = build_onion(&path, body.clone(), 42, 1).unwrap();
         assert_eq!(onion.first_hop_orr, "orr_dst");
         assert_eq!(onion.first_epoch_id, 7);
         assert_eq!(onion.max_hops, 0);
-        let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, 0, 7).unwrap();
+        let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, 0, 7, 42, 1).unwrap();
         assert_eq!(peeled, Peeled::Deliver(body));
     }
 
@@ -461,7 +523,7 @@ mod tests {
                 epoch_id: 33,
             },
         ];
-        let onion = build_onion(&path, body.clone()).unwrap();
+        let onion = build_onion(&path, body.clone(), 42, 1).unwrap();
         assert_eq!(onion.first_hop_orr, "orr_b");
         // El epoch que va al wire (Frame.epoch_id) es el del primer hop.
         assert_eq!(onion.first_epoch_id, 11);
@@ -469,7 +531,7 @@ mod tests {
 
         // B pela: max_hops=2 ⇒ Forward(InnerLayer apuntando a C con
         // epoch_id=22, que es el de C).
-        let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, 2, 11).unwrap();
+        let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, 2, 11, 42, 1).unwrap();
         let inner_b = match peeled_b {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -479,7 +541,7 @@ mod tests {
 
         // C pela: max_hops=1 ⇒ Forward(InnerLayer apuntando a D con
         // epoch_id=33).
-        let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, 1, 22).unwrap();
+        let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, 1, 22, 42, 1).unwrap();
         let inner_c = match peeled_c {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -488,7 +550,7 @@ mod tests {
         assert_eq!(inner_c.epoch_id, 33);
 
         // D pela: max_hops=0 ⇒ Deliver(body_dkms).
-        let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, 0, 33).unwrap();
+        let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, 0, 33, 42, 1).unwrap();
         assert_eq!(peeled_d, Peeled::Deliver(body));
     }
 
@@ -510,7 +572,7 @@ mod tests {
                 epoch_id: 0,
             },
         ];
-        let onion = build_onion(&path, body).unwrap();
+        let onion = build_onion(&path, body, 42, 1).unwrap();
         // Tamaño realista: chequeo de cota superior — no debería estar
         // por debajo de 64 ni explotar a > 200 B. Con `epoch_id: u32`
         // añadido a `InnerLayer` (~10 B msgpack-named: 1 B campo,
@@ -527,7 +589,7 @@ mod tests {
     #[test]
     fn empty_path_fails() {
         let body = vec![1, 2, 3];
-        assert!(build_onion(&[], body).is_err());
+        assert!(build_onion(&[], body, 42, 1).is_err());
     }
 
     #[test]
@@ -543,7 +605,7 @@ mod tests {
             master_secret: Zeroizing::new(ms),
             epoch_id: 0,
         }];
-        let onion = build_onion(&path, body).unwrap();
-        assert!(peel(&wrong, &onion.first_key_id, &onion.payload, 0, 0).is_err());
+        let onion = build_onion(&path, body, 42, 1).unwrap();
+        assert!(peel(&wrong, &onion.first_key_id, &onion.payload, 0, 0, 42, 1).is_err());
     }
 }

@@ -63,6 +63,16 @@ pub struct OrrHeader {
     /// `time.time()` del emisor, en segundos UNIX. Informativo.
     #[serde(default)]
     pub timestamp: f64,
+    /// Encarnación del ORR de ORIGEN (`from`), aleatoria por arranque de
+    /// proceso. No cambia salto a salto: quien reenvía la copia tal cual.
+    #[serde(default)]
+    pub session: u64,
+    /// Contador monotónico del origen, uno por mensaje. Junto con `session` es
+    /// la frescura extremo a extremo: los dos entran en el AAD de todas las
+    /// capas, así que un reenviador no puede cambiarlos sin romper el tag del
+    /// salto siguiente. Ver `onion_replay`.
+    #[serde(default)]
+    pub counter: u64,
 }
 
 impl OrrHeader {
@@ -79,13 +89,26 @@ impl OrrHeader {
             key_id: None,
             max_hops: 0,
             timestamp: now_unix_secs(),
+            // Passthrough no lleva capa onion, así que no hay AAD que atar ni
+            // ventana que consultar; los campos van a 0 por uniformidad.
+            session: 0,
+            counter: 0,
         }
     }
 
     /// Header para una capa onion. `payload = K ⊕ inner`, donde `K` se
     /// deriva con HKDF a partir de `master_secret_{from→next_orr_id}` y
     /// el `key_id` que va aquí.
-    pub fn onion(from: &str, to: &str, next_orr_id: &str, key_id: [u8; 16], max_hops: i32) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn onion(
+        from: &str,
+        to: &str,
+        next_orr_id: &str,
+        key_id: [u8; 16],
+        max_hops: i32,
+        session: u64,
+        counter: u64,
+    ) -> Self {
         Self {
             kind: HEADER_TYPE.to_string(),
             version: HEADER_VERSION,
@@ -95,6 +118,8 @@ impl OrrHeader {
             key_id: Some(key_id),
             max_hops,
             timestamp: now_unix_secs(),
+            session,
+            counter,
         }
     }
 
@@ -141,7 +166,7 @@ mod tests {
     #[test]
     fn onion_round_trip() {
         let kid = [0xAB; 16];
-        let h = OrrHeader::onion("orr_1", "orr_4", "orr_2", kid, 2);
+        let h = OrrHeader::onion("orr_1", "orr_4", "orr_2", kid, 2, 9, 3);
         let buf = h.encode().unwrap();
         let h2 = OrrHeader::decode(&buf).unwrap();
         assert_eq!(h2.from, "orr_1");
