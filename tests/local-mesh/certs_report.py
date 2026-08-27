@@ -30,6 +30,13 @@ def pct(sorted_vals, q):
     return sorted_vals[i]
 
 
+# `tracing` escribe con color aunque la salida sea un fichero, así que los
+# campos llegan como `handshakes\x1b[0m\x1b[2m=\x1b[0m2`. Sin quitar los
+# escapes, cualquier regex sobre `campo=valor` falla en silencio y las
+# métricas salen a cero — que es peor que fallar.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def read_cell(d):
     """Métricas de una celda. Streaming: los CSV de `mucha` son enormes."""
     cell = {"dir": d, "meta": {}, "status": {}, "keys": 0, "lat": [],
@@ -77,7 +84,8 @@ def read_cell(d):
         if not (name.startswith("dkms") and name.endswith(".log")):
             continue
         with open(os.path.join(d, name), errors="replace") as fh:
-            for line in fh:
+            for raw in fh:
+                line = ANSI.sub("", raw)
                 if "tls.stats" in line:
                     m = re_hs.search(line)
                     if m:
@@ -138,7 +146,9 @@ def main(argv):
             continue
         for cd in sorted(os.listdir(ad)):
             d = os.path.join(ad, cd)
-            if os.path.isdir(d):
+            # Sin meta.json la celda está en curso (scale_one.sh lo escribe al
+            # final): listarla daría una fila de ceros que parece un fallo.
+            if os.path.isdir(d) and os.path.exists(os.path.join(d, "meta.json")):
                 cells.append(fmt(read_cell(d)))
     if not cells:
         print("sin celdas en %s" % root)
