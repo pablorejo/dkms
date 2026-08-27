@@ -62,8 +62,11 @@ export DKMS_MESH_DIR="${TMPDIR:-/tmp}/dkms-certs-$SLURM_JOB_ID"
 # y se pierde el término de comparación (pasado el 2026-08-27). Se puede pisar
 # con DKMS_SCALE_OUT desde fuera.
 PQC_AUTH_MODE="${DKMS_MESH_PQC_AUTH:-off}"
+# Y el modo del MAC de frames, por la misma razón: el brazo con MAC y el de
+# referencia tienen que poder convivir en disco o no hay con qué comparar.
+FRAME_AUTH_MODE="${DKMS_MESH_FRAME_AUTH:-off}"
 LINKS="${DKMS_MESH_LINK_TYPE:-qkd}"
-export DKMS_SCALE_OUT="${DKMS_SCALE_OUT:-$HOME/dkms_rust/certs-results/$KEY_ALG-$LINKS-auth$PQC_AUTH_MODE}"
+export DKMS_SCALE_OUT="${DKMS_SCALE_OUT:-$HOME/dkms_rust/certs-results/$KEY_ALG-$LINKS-auth$PQC_AUTH_MODE-frame$FRAME_AUTH_MODE}"
 mkdir -p "$DKMS_SCALE_OUT"
 
 # Certs pre-generados. Para rsa es opcional (el openssl de aquí los hace); para
@@ -80,7 +83,7 @@ if [ "$KEY_ALG" != rsa ]; then
     export DKMS_MESH_CERTS_SRC="$CERTS_DIR"
 fi
 
-echo "########## $(hostname) · $TOPO n=$N $REG · certs=$KEY_ALG · $(date '+%F %T') ##########"
+echo "########## $(hostname) · $TOPO n=$N $REG · certs=$KEY_ALG · pqc_auth=$PQC_AUTH_MODE · frame_auth=$FRAME_AUTH_MODE · $(date '+%F %T') ##########"
 echo "=== openssl del sistema: $(openssl version) ==="
 if [ -n "${DKMS_MESH_CERTS_SRC:-}" ]; then
     echo "=== certs sembrados desde $DKMS_MESH_CERTS_SRC ==="
