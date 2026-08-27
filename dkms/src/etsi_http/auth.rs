@@ -247,13 +247,23 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let pid = resolve_peer_identity(&parts.extensions, &parts.headers);
         if !pid.is_authenticated() {
+            tracing::warn!(
+                uri = %parts.uri,
+                "auth.reject: request sin cert de cliente en el plano SAE"
+            );
             return Err((StatusCode::UNAUTHORIZED, "missing client certificate"));
         }
         let sae = pid
             .san_identifier
             .as_deref()
             .map(sae_id_from_san)
-            .ok_or((StatusCode::UNAUTHORIZED, "no usable SAN in client cert"))?;
+            .ok_or_else(|| {
+                tracing::warn!(
+                    uri = %parts.uri,
+                    "auth.reject: cert de cliente sin SAN/CN utilizable (plano SAE)"
+                );
+                (StatusCode::UNAUTHORIZED, "no usable SAN in client cert")
+            })?;
         Ok(Self { sae_id: sae })
     }
 }
@@ -273,13 +283,23 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let pid = resolve_peer_identity(&parts.extensions, &parts.headers);
         if !pid.is_authenticated() {
+            tracing::warn!(
+                uri = %parts.uri,
+                "auth.reject: request sin cert de cliente en el plano peer"
+            );
             return Err((StatusCode::UNAUTHORIZED, "missing client certificate"));
         }
         let node = pid
             .san_identifier
             .as_deref()
             .map(node_id_from_san)
-            .ok_or((StatusCode::UNAUTHORIZED, "no usable SAN in client cert"))?;
+            .ok_or_else(|| {
+                tracing::warn!(
+                    uri = %parts.uri,
+                    "auth.reject: cert de cliente sin SAN/CN utilizable (plano peer)"
+                );
+                (StatusCode::UNAUTHORIZED, "no usable SAN in client cert")
+            })?;
         Ok(Self { node_id: node })
     }
 }

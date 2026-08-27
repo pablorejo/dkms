@@ -15,7 +15,14 @@
 //! Sin upgrade/ALPN dance — los SAEs y DKMS clientes ya saben que tienen
 //! que abrir HTTP/2.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::Result;
 use axum::{body::Body, Router};
@@ -29,6 +36,55 @@ use tower::Service;
 use tracing::{debug, error, info, warn};
 
 use super::auth::PeerIdentity;
+
+/// Contadores del handshake TLS de un plano, volcados cada
+/// [`STATS_PERIOD`] en una línea `tls.stats`.
+///
+/// Existe para poder comparar el coste de los certificados: con conexiones
+/// keep-alive el handshake se amortiza y **no** se ve en la latencia por
+/// petición del cliente de carga, así que sin esto el sobrecoste de una
+/// firma ML-DSA (3309 B de firma, cadena de ~4 KB) frente a RSA sería
+/// invisible en los datos de campaña. Los fallos van aparte porque
+/// "handshakes lentos" y "handshakes que no cierran" son bugs distintos.
+#[derive(Default)]
+struct TlsStats {
+    accepted: AtomicU64,
+    failed: AtomicU64,
+    total_us: AtomicU64,
+    max_us: AtomicU64,
+}
+
+/// 30 s: con la observación de campaña (600 s) da ~20 muestras, suficientes
+/// para ver la evolución y no solo un promedio. Con 60 s una corrida corta
+/// terminaba antes del primer volcado útil (el primer tick de `interval` es
+/// inmediato y sale vacío) y no dejaba ni una línea.
+const STATS_PERIOD: Duration = Duration::from_secs(30);
+
+impl TlsStats {
+    fn record_ok(&self, us: u64) {
+        self.accepted.fetch_add(1, Ordering::Relaxed);
+        self.total_us.fetch_add(us, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+    }
+
+    /// Vuelca y pone a cero. Devuelve `None` si no hubo actividad, para no
+    /// llenar el log de líneas vacías en los planos ociosos.
+    fn drain(&self) -> Option<(u64, u64, f64, f64)> {
+        let n = self.accepted.swap(0, Ordering::Relaxed);
+        let failed = self.failed.swap(0, Ordering::Relaxed);
+        let total = self.total_us.swap(0, Ordering::Relaxed);
+        let max = self.max_us.swap(0, Ordering::Relaxed);
+        if n == 0 && failed == 0 {
+            return None;
+        }
+        let avg_ms = if n > 0 {
+            total as f64 / n as f64 / 1000.0
+        } else {
+            0.0
+        };
+        Some((n, failed, avg_ms, max as f64 / 1000.0))
+    }
+}
 
 /// Sirve `router` sobre TLS con verificación de cert cliente.
 ///
@@ -44,6 +100,29 @@ pub async fn serve_mtls(
     let listener = common::net::bind_reuse_addr(addr).await?;
     info!(%addr, plane = plane_label, "dkms https listening");
 
+    // Volcado periódico del coste del handshake (ver `TlsStats`).
+    let stats = Arc::new(TlsStats::default());
+    {
+        let stats = stats.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(STATS_PERIOD);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Some((n, failed, avg_ms, max_ms)) = stats.drain() {
+                    info!(
+                        plane = plane_label,
+                        handshakes = n,
+                        failed,
+                        avg_ms = format_args!("{avg_ms:.1}"),
+                        max_ms = format_args!("{max_ms:.1}"),
+                        "tls.stats"
+                    );
+                }
+            }
+        });
+    }
+
     loop {
         let (tcp, peer_addr) = match listener.accept().await {
             Ok(p) => p,
@@ -54,20 +133,47 @@ pub async fn serve_mtls(
         };
         let acceptor = acceptor.clone();
         let router = router.clone();
+        let stats = stats.clone();
 
         tokio::spawn(async move {
+            // Cronometrar el handshake: es la métrica clave para comparar el
+            // coste de certs clásicos vs ML-DSA (campañas de certs). El
+            // fallo se loguea con el detalle de rustls (p.ej. BadSignature,
+            // UnknownIssuer) — es lo que distingue "cert de otra CA" de
+            // "el cliente no mandó cert" en un despliegue real.
+            let t0 = std::time::Instant::now();
             let tls_stream = match acceptor.accept(tcp).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(%peer_addr, error = %e, "tls handshake failed");
+                    stats.failed.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        %peer_addr,
+                        plane = plane_label,
+                        error = %e,
+                        handshake_ms = t0.elapsed().as_millis() as u64,
+                        "tls handshake failed"
+                    );
                     return;
                 }
             };
+            let handshake_us = t0.elapsed().as_micros() as u64;
+            stats.record_ok(handshake_us);
+            let handshake_ms = handshake_us / 1000;
 
             let peer_id = {
                 let (_io, session) = tls_stream.get_ref();
                 PeerIdentity::from_verified(session.peer_certificates())
             };
+            // Una línea por conexión aceptada, con la identidad que rustls
+            // verificó y cuánto costó el handshake. En campañas: grep
+            // "tls.conn" y compara handshake_ms entre arms RSA/ML-DSA.
+            debug!(
+                %peer_addr,
+                plane = plane_label,
+                san = peer_id.san_identifier.as_deref().unwrap_or("<none>"),
+                handshake_ms,
+                "tls.conn accepted"
+            );
 
             let svc = service_fn(move |req: Request<Incoming>| {
                 let mut router = router.clone();

@@ -9,6 +9,9 @@ members = [
     "sdn",
     "dkms",
     "quditto",
+    # Herramienta de test, no un módulo runtime: cliente SAE de carga capaz de
+    # mTLS con certs ML-DSA (el de Python depende del OpenSSL del sistema).
+    "tests/loadgen",
 ]
 
 # Each crate can also be built/published independently:

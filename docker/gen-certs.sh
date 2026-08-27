@@ -59,10 +59,32 @@ ensure_ca() {
   fi
   echo "[gen-certs] creando CA '$cn' ($KEY_ALG) en $out/$base.crt"
   gen_key "$out/$base.key" 4096
+  # Las extensiones van en un fichero de config, NO con `-addext`.
+  #
+  # Con `-x509`, openssl aplica además la sección `v3_ca` de su openssl.cnf, y
+  # en OpenSSL 1.1.1 (CESGA tiene 1.1.1g) `-addext` no la sustituye: la SUMA.
+  # El resultado es un cert con DOS `basicConstraints`, que RFC 5280 prohíbe
+  # («a certificate MUST NOT include more than one instance of a particular
+  # extension»); openssl 1.1.1 deja de reconocerlo como emisor válido y toda
+  # la cadena falla con «unable to get local issuer certificate» — medido en
+  # CESGA 2026-08-27. Con `x509_extensions` en `[req]` mandamos nosotros, y
+  # sale una sola vez tanto en 1.1.1 como en 3.x.
+  local cfg="$out/.$base.cnf"
+  cat > "$cfg" <<CFG
+[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = ca_ext
+[dn]
+CN = $cn
+[ca_ext]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+CFG
   openssl req -x509 -key "$out/$base.key" -out "$out/$base.crt" \
-    -days "$DAYS" -subj "/CN=$cn" \
-    -addext "basicConstraints=critical,CA:TRUE" \
-    -addext "keyUsage=critical,keyCertSign,cRLSign"
+    -days "$DAYS" -config "$cfg"
+  rm -f "$cfg"
 }
 
 # Firma un CSR con una CA dada, aplicando SAN + EKU.

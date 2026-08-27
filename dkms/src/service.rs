@@ -289,6 +289,15 @@ impl DkmsService {
         if sae_served_locally(&self.cfg.sae_bindings, &self.cfg.node_id, requester) {
             Ok(())
         } else {
+            // Con cert válido pero SAE no servido: en campaña, si esto aparece
+            // para SAEs que DEBERÍAN estar servidos, el sae_bindings del nodo
+            // está mal renderizado (mirar el default.toml generado).
+            warn!(
+                sae = %requester,
+                node = %self.cfg.node_id,
+                bindings = self.cfg.sae_bindings.len(),
+                "auth.reject: SAE autenticado pero no servido por este nodo (404)"
+            );
             Err(DkmsError::UnknownSae(requester.clone()))
         }
     }

@@ -280,9 +280,32 @@ EOF
         # DKMS_MESH_CERT_IP: IP extra en el SAN del cert de servidor (gen-certs
         # añade siempre IP:127.0.0.1). Para clientes SAE externos a la máquina,
         # p.ej. contenedores strongSwan que llegan por el gateway del bridge.
-        bash "$GENCERTS" "dkms-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
-        bash "$GENCERTS" --sae "sae_$n" "$DIR/certs" >/dev/null 2>&1
+        #
+        # DKMS_MESH_CERTS_SRC salta la generación y copia un juego ya hecho
+        # (ver más abajo): en máquinas con OpenSSL < 3.5 —CESGA tiene 1.1.1g—
+        # `genpkey -algorithm ML-DSA-65` no existe, así que los certs
+        # post-cuánticos se generan fuera y se traen con el job.
+        if [ -z "${DKMS_MESH_CERTS_SRC:-}" ]; then
+            bash "$GENCERTS" "dkms-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
+            bash "$GENCERTS" --sae "sae_$n" "$DIR/certs" >/dev/null 2>&1
+        fi
     done
+    # Certs pre-generados: se copian enteros (CAs + hojas). Se valida que estén
+    # los de TODOS los nodos, porque una malla a la que le falte un cert
+    # arranca igual y falla mucho después, en el primer handshake.
+    if [ -n "${DKMS_MESH_CERTS_SRC:-}" ]; then
+        cp "$DKMS_MESH_CERTS_SRC"/*.crt "$DKMS_MESH_CERTS_SRC"/*.key "$DIR/certs/" 2>/dev/null
+        local faltan=0 n2
+        for n2 in $(seq 1 "$total"); do
+            [ -s "$DIR/certs/dkms-$n2.crt" ] || faltan=$((faltan+1))
+            [ -s "$DIR/certs/sae_$n2.crt" ] || faltan=$((faltan+1))
+        done
+        if [ "$faltan" -gt 0 ] || [ ! -s "$DIR/certs/net-ca.crt" ] || [ ! -s "$DIR/certs/sae-ca.crt" ]; then
+            echo "mesh: FATAL: DKMS_MESH_CERTS_SRC=$DKMS_MESH_CERTS_SRC no cubre N=$total ($faltan ficheros de nodo/SAE ausentes)" >&2
+            exit 1
+        fi
+        echo "mesh: certs pre-generados desde $DKMS_MESH_CERTS_SRC ($(ls "$DIR"/certs/*.crt | wc -l) certs, firma: $(openssl x509 -in "$DIR/certs/dkms-1.crt" -noout -text 2>/dev/null | grep -m1 'Signature Algorithm' | sed 's/.*: *//'))"
+    fi
     echo "$total" > "$DIR/N"
 }
 

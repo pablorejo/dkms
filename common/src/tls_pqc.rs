@@ -92,9 +92,13 @@ impl KeyProvider for PqcKeyProvider {
     ) -> Result<Arc<dyn SigningKey>, Error> {
         if let PrivateKeyDer::Pkcs8(pkcs8) = &key_der {
             if let Some(k) = MlDsa65Key::from_pkcs8_der(pkcs8.secret_pkcs8_der()) {
+                // Una línea por clave cargada: en campaña confirma que el nodo
+                // está firmando con PQC y no cayó al camino clásico.
+                tracing::info!("tls_pqc: clave de firma ML-DSA-65 cargada (firma PQC activa)");
                 return Ok(Arc::new(k));
             }
         }
+        tracing::debug!("tls_pqc: clave no-ML-DSA; delego en el provider clásico (RSA/ECDSA/EdDSA)");
         aws_lc_rs::default_provider()
             .key_provider
             .load_private_key(key_der)
@@ -177,7 +181,15 @@ pub fn pqc_crypto_provider() -> Arc<CryptoProvider> {
 /// ML-DSA, no solo el `common::tls` que ya lo pasa explícito. Idempotente:
 /// devuelve `true` si lo instaló, `false` si ya había uno.
 pub fn install_process_default() -> bool {
-    build_provider().install_default().is_ok()
+    let installed = build_provider().install_default().is_ok();
+    if installed {
+        tracing::info!("tls_pqc: provider PQC (ML-DSA + clásicos) instalado como default del proceso");
+    } else {
+        // Ya había un provider (p. ej. otro install anterior). reqwest/tonic
+        // usarán ESE: si no es el PQC, los certs ML-DSA fallarán al cargar.
+        tracing::warn!("tls_pqc: ya había un crypto provider default; NO se instaló el PQC");
+    }
+    installed
 }
 
 #[cfg(test)]
