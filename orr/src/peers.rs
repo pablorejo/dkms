@@ -14,7 +14,7 @@
 //!   * `master_secrets[epoch_id]`: shared secret de 32 B por época,
 //!     resultado de cada rotación (`RequestEphemeralKey` +
 //!     `EstablishEphemeralSecret`). Indexado por época monotónica.
-//!     Consumido por `onion::derive_key` como `ikm` del HKDF.
+//!     Consumido por `onion::layer_key` como `ikm` del HKDF.
 //!   * `ephemeral_sks[epoch_id]` (solo lado responder): la `esk` ML-KEM
 //!     efímera generada al recibir `RequestEphemeralKey`. Se ZEROIZA
 //!     inmediatamente tras decapsular el `EstablishEphemeralSecret` →

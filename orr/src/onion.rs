@@ -1,62 +1,89 @@
-//! Onion routing v3 con master_secret pre-compartido + HKDF-XOR.
+//! Onion routing v3 con master_secret pre-compartido + AES-256-GCM.
 //!
 //! Cada par de ORRs comparte un `master_secret` de 32 B (vía ML-KEM
-//! encap al arrancar, RPC `EstablishSecret`). Por cada frame onion, el
-//! origen elige un `key_id` UUID v4 y deriva:
+//! encap al arrancar, RPC `EstablishSecret`). Por cada capa, el origen
+//! elige un `key_id` UUID v4 y deriva una clave AEAD de 32 B:
 //!
 //! ```text
 //! K = HKDF-SHA256(salt=b"orr.onion.v1",
 //!                 ikm=master_secret,
-//!                 info=key_id ‖ u32_be(len) ‖ u32_be(chunk_idx),
-//!                 L=len)
+//!                 info=key_id ‖ b"orr.onion.v3",
+//!                 L=32)
 //! ```
 //!
-//! `xor_ct = plaintext ⊕ K`. El receptor, que tiene el mismo
-//! `master_secret`, vuelve a derivar K idéntica con `key_id` (que viaja
-//! en cleartext en `header_orr_mp`) y hace XOR.
+//! y sella con `AES-256-GCM(K, nonce aleatorio, plaintext, aad)`. En el wire
+//! la capa es `nonce(12) ‖ ciphertext ‖ tag(16)`. El receptor, que tiene el
+//! mismo `master_secret`, deriva la misma K con el `key_id` (que viaja en
+//! cleartext en `header_orr_mp`) y abre.
+//!
+//! ## Por qué AEAD y no XOR
+//!
+//! Hasta 2026-08-28 esto era `plaintext ⊕ HKDF(master_secret, key_id, len)`:
+//! confidencialidad correcta y **cero integridad**, porque XOR es maleable.
+//! Cualquiera que pudiera tocar el ciphertext —un QKC del camino, que lo ve en
+//! claro entre descifrar y recifrar— podía aplicarle un delta arbitrario, y lo
+//! único que quedaba enfrente era el `key_digest` del DKMS: un SHA-256 **sin
+//! clave** que sólo funciona porque viaja dentro del cifrado, es decir,
+//! integridad apoyada en la confidencialidad. Y un `master_secret` divergente
+//! entregaba basura al DKMS en vez de dar error.
+//!
+//! Con AEAD el tag es la integridad y la autenticación de origen de la capa a
+//! la vez, con la clave del par de ORRs, y no dependen de nada más. Además sale
+//! más barato: antes se expandía HKDF byte a byte sobre todo el mensaje; ahora
+//! son 32 B de HKDF y AES-NI para el resto.
+//!
+//! El `aad` ata la capa a la cabecera **en claro** que la acompaña —`key_id`,
+//! `epoch_id` y `max_hops`—, de modo que un QKC del camino no puede mover una
+//! capa válida a otra época ni cambiarle el `max_hops` para que el destino la
+//! entregue en vez de reenviarla.
 //!
 //! ## Construcción multi-capa
 //!
 //! Para path `[X1, X2, ..., Xn]` (X_n = destino final):
 //!
 //! ```text
-//! innermost = body ⊕ K_{O,Xn}(kid_n, len_body)
-//! layer_{n-1} = msgpack(Inner{next=Xn, kid=kid_n, xor=innermost})
-//!               ⊕ K_{O,X_{n-1}}(kid_{n-1}, ...)
+//! innermost = seal(K_{O,Xn}, body,                              aad(kid_n, ep_n, 0))
+//! layer_{n-1} = seal(K_{O,X_{n-1}},
+//!                    msgpack(Inner{next=Xn, kid=kid_n, ct=innermost}),
+//!                    aad(kid_{n-1}, ep_{n-1}, 1))
 //! ...
-//! outermost  = msgpack(Inner{next=X2, kid=kid_2, xor=layer_2})
-//!               ⊕ K_{O,X1}(kid_1, ...)
+//! outermost  = seal(K_{O,X1},
+//!                   msgpack(Inner{next=X2, kid=kid_2, ct=layer_2}),
+//!                   aad(kid_1, ep_1, n-1))
 //! ```
 //!
 //! El header del wire frame externo lleva `from=O`, `to=Xn`,
 //! `next_orr_id=X1`, `key_id=kid_1`, `max_hops=n-1`. El `payload` del
 //! wire frame es `outermost`. El QKC lo OTP-cifra en cada enlace
-//! QKC↔QKC del path.
+//! QKC↔QKC del path —y desde 2026-08-28 le pone además su propio MAC de
+//! enlace, que cubre al atacante del cable; esta capa cubre lo que aquél no
+//! puede: el camino extremo a extremo entre los dos ORRs.
 //!
 //! ## Peeling
 //!
 //! El ORR X1 recibe del QKC:
 //!
 //! 1. Lee header → `next_orr_id == self`, `key_id`, `max_hops`,
-//!    `from`. Busca `master_secret` indexado por `from`.
-//! 2. `K = HKDF(master_secret, key_id, len(payload))`.
-//! 3. `inner = payload ⊕ K`.
+//!    `from`, `epoch_id`. Busca `master_secret` indexado por `from` y época.
+//! 2. `K = HKDF(master_secret, key_id)`.
+//! 3. `inner = open(K, payload, aad(key_id, epoch_id, max_hops))`. Si el tag no
+//!    cuadra, **error** — no un plaintext raro.
 //! 4. Si `max_hops > 0`: inner es `InnerLayer { next=X2, kid=kid_2,
-//!    xor=layer_2 }`. Construye nuevo wire frame con header
+//!    ct=layer_2 }`. Construye nuevo wire frame con header
 //!    reescrito y reenvía al QKC del X2.
 //! 5. Si `max_hops == 0`: inner es `body_dkms` directo. Entrega local.
 //!
 //! ## Tamaño (vs. esquema v2)
 //!
 //! `InnerLayer` msgpack-named overhead ≈ 45 B (next_orr_id ~22 B +
-//! key_id 18 B + length prefix 3 B + struct overhead 4 B). Crecimiento
-//! **lineal** en nº de hops:
+//! key_id 18 B + length prefix 3 B + struct overhead 4 B), más 28 B de
+//! `nonce ‖ tag` por capa. Crecimiento **lineal** en nº de hops:
 //!
 //! ```text
 //! modo 0 (passthrough):  64 B
-//! modo 1 (1 capa):       64 B (xor_ct directo)
-//! modo 2 (2 capas):      64 + 45 = 109 B
-//! modo -1 (3 capas):     64 + 2·45 ≈ 154 B
+//! modo 1 (1 capa):       64 + 28 = 92 B
+//! modo 2 (2 capas):      64 + 28 + 45 + 28 = 165 B
+//! modo -1 (3 capas):     64 + 2·(45 + 28) + 28 ≈ 238 B
 //! ```
 //!
 //! El esquema v2 (`Vec<kem_ct>` per layer) explotaba a ~4 MB en modo -1.
@@ -70,7 +97,6 @@ use zeroize::Zeroizing;
 use crate::error::{OrrError, Result};
 
 const HKDF_SALT: &[u8] = b"orr.onion.v1";
-const HKDF_MAX_OUTPUT: usize = 255 * 32; // HKDF-SHA256 ceiling: 8160 B
 
 /// Una capa interna ya cifrada, lista para meter en el `payload` del
 /// wire frame de la capa siguiente (más externa).
@@ -95,7 +121,9 @@ pub struct InnerLayer {
     /// UUID v4 raw (16 B) de la K de la siguiente capa.
     #[serde(with = "serde_bytes")]
     pub key_id: [u8; 16],
-    /// `K ⊕ inner_plaintext` de la siguiente capa.
+    /// Capa siguiente ya sellada: `nonce ‖ ciphertext ‖ tag` de AES-256-GCM.
+    /// El nombre se queda por compatibilidad del msgpack `named` (era el
+    /// `K ⊕ plaintext` del esquema XOR anterior).
     #[serde(with = "serde_bytes")]
     pub xor_ct: Vec<u8>,
 }
@@ -163,40 +191,73 @@ pub enum Peeled {
     Deliver(Vec<u8>),
 }
 
-/// Deriva la K per-frame con HKDF-SHA256, soportando body_len arbitrario
-/// vía chunking (cada chunk usa un `chunk_idx` distinto en el `info`
-/// para producir keystream independiente).
-pub fn derive_key(master_secret: &[u8; 32], key_id: &[u8; 16], body_len: usize) -> Vec<u8> {
-    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), master_secret);
-    let mut okm = vec![0u8; body_len];
-    let mut info = [0u8; 16 + 4 + 4]; // kid ‖ u32_be(len) ‖ u32_be(chunk_idx)
-    info[..16].copy_from_slice(key_id);
-    info[16..20].copy_from_slice(&(body_len as u32).to_be_bytes());
+/// Etiqueta de versión del AAD de una capa. Cambiarla invalida las capas
+/// construidas con el esquema anterior, que es lo que se quiere: un despliegue
+/// mezclado tiene que fallar ruidoso.
+const AAD_V3: &[u8] = b"orr.onion.v3";
 
-    let mut off = 0usize;
-    let mut chunk_idx: u32 = 0;
-    while off < body_len {
-        let take = (body_len - off).min(HKDF_MAX_OUTPUT);
-        info[20..24].copy_from_slice(&chunk_idx.to_be_bytes());
-        hk.expand(&info, &mut okm[off..off + take])
-            .expect("HKDF-SHA256 expand within 8160 B chunk");
-        off += take;
-        chunk_idx = chunk_idx
-            .checked_add(1)
-            .expect("body_len overflows chunk_idx u32");
-    }
-    okm
+/// AAD de una capa: ata la capa a la cabecera EN CLARO que la acompaña.
+///
+/// Sin esto el tag protege el contenido pero no su contexto, y un QKC en el
+/// camino podría mover una capa válida a otra época o cambiarle el `max_hops`
+/// para que el destino la entregue en vez de reenviarla (o al revés).
+fn layer_aad(key_id: &[u8; 16], epoch_id: u32, max_hops: i32) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(AAD_V3.len() + 16 + 4 + 4);
+    aad.extend_from_slice(AAD_V3);
+    aad.extend_from_slice(key_id);
+    aad.extend_from_slice(&epoch_id.to_be_bytes());
+    aad.extend_from_slice(&max_hops.to_be_bytes());
+    aad
 }
 
-/// XOR del plaintext con la K derivada. XOR es simétrico → cifrar y
-/// descifrar usan esta misma función.
-fn xor_with_derived_key(master_secret: &[u8; 32], key_id: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let k = derive_key(master_secret, key_id, data.len());
-    let mut out = Vec::with_capacity(data.len());
-    for (b, kb) in data.iter().zip(k.iter()) {
-        out.push(b ^ kb);
-    }
-    out
+/// Clave AEAD de una capa: 32 B de HKDF, no un keystream del tamaño del cuerpo.
+/// Con AEAD el cifrado lo hace AES-256-GCM, así que basta la clave — y sale más
+/// barato que expandir HKDF byte a byte sobre todo el mensaje.
+fn layer_key(master_secret: &[u8; 32], key_id: &[u8; 16]) -> Zeroizing<[u8; 32]> {
+    let mut k = Zeroizing::new([0u8; 32]);
+    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), master_secret);
+    let mut info = [0u8; 16 + AAD_V3.len()];
+    info[..16].copy_from_slice(key_id);
+    info[16..].copy_from_slice(AAD_V3);
+    hk.expand(&info, k.as_mut())
+        .expect("32 B is a valid HKDF-SHA256 output length");
+    k
+}
+
+/// Cifra una capa con AES-256-GCM. Devuelve `nonce ‖ ciphertext ‖ tag`.
+///
+/// Antes esto era un XOR con un keystream HKDF: confidencialidad perfecta en su
+/// clase y **cero integridad**, porque XOR es maleable. La única comprobación
+/// que había extremo a extremo era el `key_digest` del DKMS, un SHA-256 **sin
+/// clave** que sólo funciona porque viaja dentro del cifrado. Con AEAD el tag
+/// es la integridad y la autenticación de origen de la capa a la vez, y ya no
+/// dependen de la confidencialidad.
+fn seal_layer(
+    master_secret: &[u8; 32],
+    key_id: &[u8; 16],
+    plaintext: &[u8],
+    epoch_id: u32,
+    max_hops: i32,
+) -> Result<Vec<u8>> {
+    let k = layer_key(master_secret, key_id);
+    let aad = layer_aad(key_id, epoch_id, max_hops);
+    let sealed = common::crypto::aead::seal(k.as_ref(), plaintext, &aad)?;
+    Ok(sealed.to_bytes())
+}
+
+/// Inversa de [`seal_layer`]. Un tag que no cuadra es un error, no un
+/// plaintext raro: es justo la diferencia con el XOR de antes.
+fn open_layer(
+    master_secret: &[u8; 32],
+    key_id: &[u8; 16],
+    ct: &[u8],
+    epoch_id: u32,
+    max_hops: i32,
+) -> Result<Vec<u8>> {
+    let k = layer_key(master_secret, key_id);
+    let aad = layer_aad(key_id, epoch_id, max_hops);
+    let msg = common::crypto::aead::SealedMessage::from_bytes(ct)?;
+    Ok(common::crypto::aead::open(k.as_ref(), &msg, &aad)?)
 }
 
 /// Construye un onion completo dado el `path` (lista ordenada de
@@ -219,7 +280,10 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
     // (acaba en la InnerLayer.epoch_id que llega al penúltimo hop).
     let dst = path.last().unwrap();
     let kid_dst = *Uuid::new_v4().as_bytes();
-    let mut current_xor = xor_with_derived_key(&dst.master_secret, &kid_dst, &body);
+    // La capa del destino se pela con max_hops = 0 (entrega), y con la época
+    // del propio destino: los dos entran en el AAD, así que el tag ata la capa
+    // a la posición que le toca en el path.
+    let mut current_xor = seal_layer(&dst.master_secret, &kid_dst, &body, dst.epoch_id, 0)?;
     let mut current_next_orr_id = dst.orr_id.clone();
     let mut current_next_epoch = dst.epoch_id;
     let mut current_key_id = kid_dst;
@@ -237,7 +301,16 @@ pub fn build_onion(path: &[PathHopSecret], body: Vec<u8>) -> Result<OnionWire> {
         };
         let layer_pt = layer.encode()?;
         let kid_hop = *Uuid::new_v4().as_bytes();
-        current_xor = xor_with_derived_key(&hop.master_secret, &kid_hop, &layer_pt);
+        // El hop i pela su capa con max_hops = (len-1) - i: los que le quedan
+        // al onion por delante.
+        let hops_left = (path.len() - 1 - i) as i32;
+        current_xor = seal_layer(
+            &hop.master_secret,
+            &kid_hop,
+            &layer_pt,
+            hop.epoch_id,
+            hops_left,
+        )?;
         current_next_orr_id = hop.orr_id.clone();
         current_next_epoch = hop.epoch_id;
         current_key_id = kid_hop;
@@ -266,8 +339,9 @@ pub fn peel(
     key_id: &[u8; 16],
     xor_ct: &[u8],
     max_hops: i32,
+    epoch_id: u32,
 ) -> Result<Peeled> {
-    let pt = xor_with_derived_key(master_secret, key_id, xor_ct);
+    let pt = open_layer(master_secret, key_id, xor_ct, epoch_id, max_hops)?;
     if max_hops <= 0 {
         Ok(Peeled::Deliver(pt))
     } else {
@@ -279,6 +353,7 @@ pub fn peel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::crypto::aead::{NONCE_LEN, TAG_LEN as AEAD_TAG_LEN};
     use rand::RngCore;
 
     fn random_secret() -> [u8; 32] {
@@ -288,59 +363,62 @@ mod tests {
     }
 
     #[test]
-    fn hkdf_deterministic() {
-        let ms = [0x42; 32];
-        let kid = [0xAB; 16];
-        let k1 = derive_key(&ms, &kid, 64);
-        let k2 = derive_key(&ms, &kid, 64);
-        assert_eq!(k1, k2);
-        assert_eq!(k1.len(), 64);
-    }
-
-    #[test]
-    fn hkdf_different_kid_different_key() {
-        let ms = [0x42; 32];
-        let kid1 = [0xAB; 16];
-        let kid2 = [0xCD; 16];
-        let k1 = derive_key(&ms, &kid1, 64);
-        let k2 = derive_key(&ms, &kid2, 64);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn hkdf_different_len_different_prefix() {
-        // El info incluye body_len, así que K(L1) y K(L2) no son
-        // truncamientos uno del otro.
-        let ms = [0x42; 32];
-        let kid = [0xAB; 16];
-        let k_64 = derive_key(&ms, &kid, 64);
-        let k_128 = derive_key(&ms, &kid, 128);
-        assert_ne!(k_64[..], k_128[..64]);
-    }
-
-    #[test]
-    fn hkdf_large_body_chunking() {
-        // Verifica que body > HKDF_MAX_OUTPUT funciona correctamente.
-        let ms = [0x42; 32];
-        let kid = [0xAB; 16];
-        let big_len = HKDF_MAX_OUTPUT + 1000;
-        let k = derive_key(&ms, &kid, big_len);
-        assert_eq!(k.len(), big_len);
-        // El XOR round-trip funciona también con bodies grandes.
-        let big_body = vec![0x77u8; big_len];
-        let ct = xor_with_derived_key(&ms, &kid, &big_body);
-        let pt = xor_with_derived_key(&ms, &kid, &ct);
-        assert_eq!(pt, big_body);
-    }
-
-    #[test]
-    fn xor_round_trip() {
+    fn aead_round_trip() {
         let ms = random_secret();
         let kid = *Uuid::new_v4().as_bytes();
         let body = b"hola mundo onion v3".to_vec();
-        let ct = xor_with_derived_key(&ms, &kid, &body);
-        let pt = xor_with_derived_key(&ms, &kid, &ct);
-        assert_eq!(pt, body);
+        let ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
+        assert_eq!(ct.len(), body.len() + NONCE_LEN + AEAD_TAG_LEN);
+        assert_eq!(open_layer(&ms, &kid, &ct, 5, 1).unwrap(), body);
+    }
+
+    #[test]
+    fn aead_catches_a_tampered_layer() {
+        // Con el XOR de antes esto pasaba desapercibido: un bit volteado en el
+        // ciphertext salía como un bit volteado en el plaintext, y la única
+        // defensa era el `key_digest` sin clave del DKMS.
+        let ms = random_secret();
+        let kid = *Uuid::new_v4().as_bytes();
+        let body = b"contenido que no debe poder cambiarse".to_vec();
+        let mut ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
+        let i = NONCE_LEN + 3;
+        ct[i] ^= 0x01;
+        assert!(open_layer(&ms, &kid, &ct, 5, 1).is_err());
+    }
+
+    #[test]
+    fn aead_binds_the_cleartext_header() {
+        // El AAD ata época y max_hops, que viajan EN CLARO en la cabecera. Sin
+        // eso, un QKC del camino podría mover una capa válida a otra época, o
+        // cambiar el max_hops para que el destino entregue en vez de reenviar.
+        let ms = random_secret();
+        let kid = *Uuid::new_v4().as_bytes();
+        let body = b"capa".to_vec();
+        let ct = seal_layer(&ms, &kid, &body, 5, 1).unwrap();
+        assert!(open_layer(&ms, &kid, &ct, 6, 1).is_err(), "época cambiada");
+        assert!(open_layer(&ms, &kid, &ct, 5, 0).is_err(), "max_hops cambiado");
+        // Y el key_id, que selecciona la clave, también está en el AAD.
+        let other_kid = *Uuid::new_v4().as_bytes();
+        assert!(open_layer(&ms, &other_kid, &ct, 5, 1).is_err());
+    }
+
+    #[test]
+    fn aead_rejects_a_foreign_secret() {
+        let kid = *Uuid::new_v4().as_bytes();
+        let ct = seal_layer(&random_secret(), &kid, b"x", 1, 0).unwrap();
+        assert!(open_layer(&random_secret(), &kid, &ct, 1, 0).is_err());
+    }
+
+    #[test]
+    fn aead_nonces_do_not_repeat() {
+        // Dos sellados del MISMO plaintext con la MISMA clave tienen que dar
+        // ciphertexts distintos, o se filtra la igualdad de los cuerpos.
+        let ms = random_secret();
+        let kid = *Uuid::new_v4().as_bytes();
+        let a = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0).unwrap();
+        let b = seal_layer(&ms, &kid, b"mismo cuerpo", 1, 0).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN]);
     }
 
     #[test]
@@ -356,7 +434,7 @@ mod tests {
         assert_eq!(onion.first_hop_orr, "orr_dst");
         assert_eq!(onion.first_epoch_id, 7);
         assert_eq!(onion.max_hops, 0);
-        let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, 0).unwrap();
+        let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, 0, 7).unwrap();
         assert_eq!(peeled, Peeled::Deliver(body));
     }
 
@@ -391,7 +469,7 @@ mod tests {
 
         // B pela: max_hops=2 ⇒ Forward(InnerLayer apuntando a C con
         // epoch_id=22, que es el de C).
-        let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, 2).unwrap();
+        let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, 2, 11).unwrap();
         let inner_b = match peeled_b {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -401,7 +479,7 @@ mod tests {
 
         // C pela: max_hops=1 ⇒ Forward(InnerLayer apuntando a D con
         // epoch_id=33).
-        let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, 1).unwrap();
+        let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, 1, 22).unwrap();
         let inner_c = match peeled_c {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -410,7 +488,7 @@ mod tests {
         assert_eq!(inner_c.epoch_id, 33);
 
         // D pela: max_hops=0 ⇒ Deliver(body_dkms).
-        let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, 0).unwrap();
+        let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, 0, 33).unwrap();
         assert_eq!(peeled_d, Peeled::Deliver(body));
     }
 
@@ -453,7 +531,10 @@ mod tests {
     }
 
     #[test]
-    fn wrong_secret_yields_garbage_not_panic() {
+    fn wrong_secret_is_an_error_not_garbage() {
+        // Con el XOR anterior esto devolvía `Deliver(basura)` y el ORR se la
+        // entregaba tan tranquilo al DKMS: la divergencia de secretos sólo se
+        // notaba más arriba, si acaso. Con AEAD el tag no cuadra y se para aquí.
         let ms = random_secret();
         let wrong = random_secret();
         let body = b"x".to_vec();
@@ -462,12 +543,7 @@ mod tests {
             master_secret: Zeroizing::new(ms),
             epoch_id: 0,
         }];
-        let onion = build_onion(&path, body.clone()).unwrap();
-        let peeled = peel(&wrong, &onion.first_key_id, &onion.payload, 0).unwrap();
-        if let Peeled::Deliver(p) = peeled {
-            assert_ne!(p, body);
-        } else {
-            panic!("expected Deliver");
-        }
+        let onion = build_onion(&path, body).unwrap();
+        assert!(peel(&wrong, &onion.first_key_id, &onion.payload, 0, 0).is_err());
     }
 }

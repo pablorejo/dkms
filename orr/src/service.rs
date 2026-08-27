@@ -669,9 +669,12 @@ impl OrrService {
                 return Ok(());
             }
         };
-        let peeled = onion::peel(&ms, &key_id, &payload, header.max_hops).inspect_err(|_| {
-            OrrStats::bump(&self.stats.peel_failed);
-        })?;
+        // `epoch_id` entra en el AAD del tag: si alguien mueve una capa válida a
+        // otra época, el AEAD lo rechaza en vez de devolver un plaintext raro.
+        let peeled =
+            onion::peel(&ms, &key_id, &payload, header.max_hops, epoch_id).inspect_err(|_| {
+                OrrStats::bump(&self.stats.peel_failed);
+            })?;
         match peeled {
             Peeled::Deliver(body) => {
                 debug!(from = %header.from, to = %header.to, "orr.onion deliver");
