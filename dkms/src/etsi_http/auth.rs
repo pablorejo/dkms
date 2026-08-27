@@ -13,10 +13,14 @@
 //! reverso que termina mTLS (típicamente nginx-ingress en EKS con
 //! `auth-tls-pass-certificate-to-upstream: true`), el cert del cliente
 //! no aparece en la capa TLS local, sino en el header `ssl-client-cert`
-//! (URL-encoded PEM). Si la capa TLS no trae cert, intentamos extraer
-//! identidad del header. La confianza viene de la red — solo el proxy
-//! reverso puede alcanzar :4001 en cluster, así que aceptar el header
-//! sin verificar la firma es coherente con el modelo de despliegue.
+//! (URL-encoded PEM). El PEM del header **no** se verifica contra ninguna
+//! CA, así que confiar en él equivale a confiar en cualquiera que pueda
+//! fijarlo. Por eso solo se consulta cuando
+//! `listen.trust_proxy_client_cert_header = true` (inyectado como
+//! [`AuthPolicy`]); en ese modo estos puertos deben ser alcanzables
+//! *exclusivamente* a través del proxy que ya validó el mTLS. Por defecto
+//! el flag es `false` y la identidad sale **únicamente** del cert
+//! verificado por rustls en la capa TLS local.
 
 use std::sync::Arc;
 
@@ -34,6 +38,16 @@ use common::ids::{NodeId, SaeId};
 /// `auth-tls-pass-certificate-to-upstream: true`) deposita el cert del
 /// cliente verificado en el borde. Valor: PEM url-encoded.
 const SSL_CLIENT_CERT_HEADER: &str = "ssl-client-cert";
+
+/// Política de autenticación inyectada a nivel de router (una por plano)
+/// vía `axum::Extension`. Hoy solo lleva si se confía en el header
+/// `ssl-client-cert` del proxy; nace de `listen.trust_proxy_client_cert_header`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AuthPolicy {
+    /// Aceptar la identidad venida en `ssl-client-cert` (PEM sin verificar).
+    /// Ver el doc del módulo. Default `false` (solo cert verificado por TLS).
+    pub trust_proxy_client_cert_header: bool,
+}
 
 /// Información de la otra parte en la conexión TLS — útil para autorizar
 /// la request.  Se inyecta a nivel de conexión, **no** de petición.
@@ -272,27 +286,41 @@ where
 
 /// Resuelve la identidad del peer.
 ///
-/// Prioridad: `ssl-client-cert` (header inyectado por el proxy reverso
-/// tras validar mTLS en el borde) sobre la capa TLS local. Esto permite
-/// que el cert del SAE original sobreviva el salto proxy→DKMS aunque la
-/// capa TLS local termine con un cert distinto (típicamente un
-/// "ingress-proxy" cert firmado por la CA interna del sim).
+/// La fuente **por defecto** es el cert verificado por rustls en la capa
+/// TLS local (`PeerIdentity` en las extensiones de conexión). Solo cuando
+/// la [`AuthPolicy`] del router indica `trust_proxy_client_cert_header`
+/// se consulta *primero* el header `ssl-client-cert` — el modo detrás de
+/// nginx-ingress, donde el cert del SAE original sobrevive el salto
+/// proxy→DKMS aunque la capa TLS local termine con otro cert.
 ///
-/// Si el header no está presente, fallback al cert de la capa TLS
-/// (modo "SAE habla directo al DKMS sin proxy intermedio").
-///
-/// Seguridad: confiamos en el header porque el DKMS:4001 sólo es
-/// alcanzable desde dentro del cluster — el único entrypoint público es
-/// el proxy reverso (nginx-ingress) que valida `auth-tls-verify-client`
-/// contra la CA de simulación antes de fijar el header. Si el modelo de
-/// red cambia, hay que reevaluar.
+/// Seguridad: el PEM del header no se verifica contra ninguna CA, así que
+/// confiar en él equivale a confiar en cualquiera que pueda alcanzar el
+/// puerto y fijarlo. Con el flag a `false` (default) ese vector queda
+/// cerrado y la identidad es exactamente la del handshake mTLS.
 fn resolve_peer_identity(extensions: &axum::http::Extensions, headers: &HeaderMap) -> PeerIdentity {
-    if let Some(pid) = PeerIdentity::from_proxy_header(headers) {
-        return pid;
-    }
-    extensions
-        .get::<PeerIdentity>()
-        .cloned()
+    let trust_header = extensions
+        .get::<AuthPolicy>()
+        .map(|p| p.trust_proxy_client_cert_header)
+        .unwrap_or(false);
+    let from_header = if trust_header {
+        PeerIdentity::from_proxy_header(headers)
+    } else {
+        None
+    };
+    let from_tls = extensions.get::<PeerIdentity>().cloned();
+    select_identity(from_header, from_tls)
+}
+
+/// Elige la identidad efectiva entre la del header de proxy (ya filtrada
+/// por la política: es `Some` solo si se confía en ella) y la del cert
+/// verificado por la capa TLS local. El header, cuando se admite, tiene
+/// prioridad para el modo nginx-ingress; si no hay ninguna, anónima.
+fn select_identity(
+    from_header: Option<PeerIdentity>,
+    from_tls: Option<PeerIdentity>,
+) -> PeerIdentity {
+    from_header
+        .or(from_tls)
         .unwrap_or_else(PeerIdentity::anonymous)
 }
 
@@ -335,4 +363,75 @@ fn strip_known_dkms_prefix(s: &str) -> &str {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{Extensions, HeaderValue};
+
+    fn id_with_san(san: &str) -> PeerIdentity {
+        PeerIdentity {
+            leaf_der: Some(Arc::new(vec![0xDE, 0xAD])),
+            san_identifier: Some(san.to_owned()),
+        }
+    }
+
+    #[test]
+    fn header_wins_over_tls_when_present() {
+        // Modo nginx-ingress: el cert del SAE original (header) tiene
+        // prioridad sobre el cert con el que la capa TLS local terminó.
+        let chosen = select_identity(
+            Some(id_with_san("urn:dkms:sae:from-header")),
+            Some(id_with_san("dkms://proxy-cert")),
+        );
+        assert_eq!(
+            chosen.san_identifier.as_deref(),
+            Some("urn:dkms:sae:from-header")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_tls_then_anonymous() {
+        let chosen = select_identity(None, Some(id_with_san("sae://direct")));
+        assert_eq!(chosen.san_identifier.as_deref(), Some("sae://direct"));
+        assert!(!select_identity(None, None).is_authenticated());
+    }
+
+    #[test]
+    fn proxy_header_ignored_unless_policy_trusts_it() {
+        // Un cliente que completa el mTLS con su propio cert y encima
+        // adjunta un `ssl-client-cert` forjado NO debe poder suplantar:
+        // con la política por defecto (no confiar en el header), la
+        // identidad es la del cert verificado por TLS, no la del header.
+        let mut ext = Extensions::new();
+        ext.insert(AuthPolicy {
+            trust_proxy_client_cert_header: false,
+        });
+        ext.insert(id_with_san("urn:dkms:sae:real-caller"));
+
+        let mut headers = HeaderMap::new();
+        // Un PEM cualquiera en el header: da igual su contenido, no debe
+        // ni mirarse mientras el flag sea false.
+        headers.insert(
+            SSL_CLIENT_CERT_HEADER,
+            HeaderValue::from_static(
+                "-----BEGIN%20CERTIFICATE-----forged-----END%20CERTIFICATE-----",
+            ),
+        );
+
+        let pid = resolve_peer_identity(&ext, &headers);
+        assert_eq!(
+            pid.san_identifier.as_deref(),
+            Some("urn:dkms:sae:real-caller"),
+            "el header no verificado no puede ganar al cert mTLS con el flag por defecto",
+        );
+    }
+
+    #[test]
+    fn sae_prefixes_are_stripped() {
+        assert_eq!(sae_id_from_san("urn:dkms:sae:sae-7").as_str(), "sae-7");
+        assert_eq!(sae_id_from_san("sae://org/sae-7").as_str(), "sae-7");
+        assert_eq!(sae_id_from_san("sae-7").as_str(), "sae-7");
+    }
 }

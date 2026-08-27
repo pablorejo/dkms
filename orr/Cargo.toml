@@ -18,6 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 common             = { workspace = true }
+rustls             = { workspace = true }
 wire               = { path = "../wire" }
 
 tokio              = { workspace = true }

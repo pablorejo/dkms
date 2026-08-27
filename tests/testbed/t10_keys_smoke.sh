@@ -128,7 +128,7 @@ if (( DO_EDGES )); then
         printf '%s' "${out:-000}"
     }
 
-    C="curl -s --max-time 15 --cacert $CERTS_REMOTE/ca.crt"
+    C="curl -s --max-time 15 --cacert $CERTS_REMOTE/net-ca.crt"
 
     # 1. key_ID inventada → error ETSI, nunca 5xx
     code=$(raw_code "$HS" "$C --cert $CERTS_REMOTE/$SS.crt --key $CERTS_REMOTE/$SS.key \

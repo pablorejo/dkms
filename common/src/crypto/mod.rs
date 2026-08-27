@@ -9,5 +9,7 @@
 //! DKMS) vive en su propio sitio; aquí está sólo lo común.
 
 pub mod aead;
+pub mod link_mac;
 pub mod otp;
 pub mod pqc;
+pub mod pqc_sign;

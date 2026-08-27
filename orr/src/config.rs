@@ -67,6 +67,11 @@ pub struct OrrConfig {
     #[serde(default = "default_announce_secs")]
     pub sdn_announce_secs: u64,
 
+    /// TLS de cliente para el anuncio al SDN (docs/SECURITY.md §Fase 3).
+    /// Solo se usa si `sdn_http_url` es `https://`; en claro se ignora.
+    #[serde(default)]
+    pub tls: Option<common::http::ControlTlsCfg>,
+
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 
@@ -104,6 +109,31 @@ pub struct OrrConfig {
     #[serde(default = "default_suite")]
     pub default_pqc_suite: String,
 
+    /// Semilla ML-DSA (32 B, base64) de la **identidad de firma estable** de
+    /// este ORR (docs/SECURITY.md §Fase 6 PQC). Con ella se firma la pubkey
+    /// ML-KEM que se anuncia en `GetPublicKey`, para que el peer detecte un
+    /// MITM aunque la identidad ML-KEM sea efímera. Solo config local; la clave
+    /// pública correspondiente se reparte a los peers como su `peer_verify_keys`.
+    #[serde(default)]
+    pub sign_secret_seed: Option<String>,
+
+    /// Mapa `orr_id -> base64(ML-DSA verifying key)` de los peers, para
+    /// verificar la firma de su anuncio de pubkey. Si falta la de un peer, su
+    /// firma no se puede verificar (en `strict` se rechaza; en `tofu` se avisa).
+    #[serde(default)]
+    pub peer_verify_keys: HashMap<String, String>,
+
+    /// Ancla de confianza del bootstrap (docs/SECURITY.md §Fase 6). `tofu`
+    /// (default): acepta la pubkey que el peer anuncia por `GetPublicKey`
+    /// (trust-on-first-use), avisando si difiere de un pin en `peer_pubkeys`.
+    /// `strict`: exige que la pubkey case un pin configurado; rechaza el
+    /// fetch si no. Nota: `strict` es práctico solo con identidades ORR
+    /// estables entre reinicios — hoy la identidad se regenera en cada boot
+    /// (ver `service.rs`), así que strict requiere persistir la identidad
+    /// (pendiente, decisión de diseño).
+    #[serde(default)]
+    pub bootstrap_trust: BootstrapTrust,
+
     /// Tamaño de cola para entregas locales hacia los suscriptores
     /// `StreamDeliveries`. Si se llena, los suscriptores lentos pierden
     /// mensajes (modo lossy intencional — el control plane no se debe
@@ -133,6 +163,17 @@ pub struct OrrConfig {
     /// rotación exitosa vía `peers.drop_old_epochs(keep)`.
     #[serde(default = "default_epoch_history_keep")]
     pub epoch_history_keep: usize,
+}
+
+/// Ancla de confianza del bootstrap de pubkeys (§Fase 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BootstrapTrust {
+    /// Trust-on-first-use: acepta la pubkey anunciada; avisa si difiere de un pin.
+    #[default]
+    Tofu,
+    /// Exige que la pubkey case un pin de `peer_pubkeys`; rechaza si no.
+    Strict,
 }
 
 fn default_announce_secs() -> u64 {

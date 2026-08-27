@@ -294,7 +294,7 @@ verify_integrity() {
         while IFS=, read -r kid digest; do
             [ -n "$kid" ] || continue
             local got
-            got=$(curl -sS --max-time 10 --cacert "$MESH_DIR/certs/ca.crt" \
+            got=$(curl -sS --max-time 10 --cacert "$MESH_DIR/certs/net-ca.crt" \
                   --cert "$MESH_DIR/certs/$slave.crt" --key "$MESH_DIR/certs/$slave.key" \
                   -H 'Content-Type: application/json' \
                   -d "{\"key_IDs\":[{\"key_ID\":\"$kid\"}]}" \

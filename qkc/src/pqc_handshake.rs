@@ -39,12 +39,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use common::crypto::link_mac::{self, TAG_INIT, TAG_LEN, TAG_RESP};
+use common::crypto::pqc_sign::{self, SIGNATURE_LEN};
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
-use wire::{Frame, FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_RESP};
+use wire::{
+    Frame, FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED,
+    FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH, FRAME_PQC_KEM_RESP_SIGNED,
+};
 use zeroize::Zeroizing;
 
 use crate::{
+    config::PqcAuth,
     pqc_source::{RekeyClock, SecretStore},
     transport::peer_client::PeerOut,
 };
@@ -78,6 +84,28 @@ pub struct PqcHandshake {
     resp_cache: Mutex<HashMap<u32, (Vec<u8>, Vec<u8>)>>,
     /// Último re-enlace, para el rate-limit de [`RELINK_MIN_INTERVAL`].
     last_relink: Mutex<Option<Instant>>,
+    /// PSK del enlace para autenticar el handshake por HMAC (§Fase 5).
+    /// `None` → sin PSK.
+    psk: Option<Vec<u8>>,
+    /// Semilla ML-DSA de firma de ESTE nodo (modo `sign`). `None` → no firma.
+    sign_seed: Option<Vec<u8>>,
+    /// Clave pública ML-DSA del PEER para verificar sus firmas (modo `sign`).
+    peer_verify_key: Option<Vec<u8>>,
+    /// Política de autenticación (off/prefer/require/sign).
+    auth: PqcAuth,
+    /// Tamaño de clave en bits, atado en el MAC/firma (cierra el mismatch).
+    key_size_bits: u32,
+}
+
+/// Cómo llegó autenticado un frame de handshake, según su tipo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RecvAuth {
+    /// 0x21/0x22 — en claro.
+    Plain,
+    /// 0x23/0x24 — HMAC-PSK.
+    Hmac,
+    /// 0x26/0x27 — firma ML-DSA.
+    Signed,
 }
 
 /// Parte un payload `época_be(4) ‖ blob` en `(época, blob)`.
@@ -101,6 +129,11 @@ impl PqcHandshake {
         clock: Arc<RekeyClock>,
         lookahead: u32,
         rekey_secs: u64,
+        key_size_bits: u32,
+        psk: Option<Vec<u8>>,
+        auth: PqcAuth,
+        sign_seed: Option<Vec<u8>>,
+        peer_verify_key: Option<Vec<u8>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             suite,
@@ -115,7 +148,17 @@ impl PqcHandshake {
             pending_sk: Mutex::new(HashMap::new()),
             resp_cache: Mutex::new(HashMap::new()),
             last_relink: Mutex::new(None),
+            psk,
+            sign_seed,
+            peer_verify_key,
+            auth,
+            key_size_bits,
         })
+    }
+
+    /// ¿Enviamos/exigimos HMAC-PSK? Requiere PSK y modo prefer/require.
+    fn hmac_active(&self) -> bool {
+        self.psk.is_some() && matches!(self.auth, PqcAuth::Prefer | PqcAuth::Require)
     }
 
     fn is_initiator(&self) -> bool {
@@ -158,16 +201,158 @@ impl PqcHandshake {
         );
     }
 
-    fn send(&self, kind: u8, epoch: u32, blob: &[u8]) {
-        let mut payload = Vec::with_capacity(4 + blob.len());
+    /// Envía un mensaje del handshake. `is_init` elige INIT vs RESP. El modo
+    /// `pqc_auth` decide el frame:
+    /// - `sign` + seed → 0x26/0x27 con `payload = época‖blob‖firma_MLDSA`.
+    /// - `prefer`/`require` + psk → 0x23/0x24 con `payload = época‖blob‖tag_HMAC`.
+    /// - resto → 0x21/0x22 en claro.
+    fn send_handshake(&self, is_init: bool, epoch: u32, blob: &[u8]) {
+        let (plain, hmac_kind, signed_kind, tag_kind) = if is_init {
+            (
+                FRAME_PQC_KEM_INIT,
+                FRAME_PQC_KEM_INIT_AUTH,
+                FRAME_PQC_KEM_INIT_SIGNED,
+                TAG_INIT,
+            )
+        } else {
+            (
+                FRAME_PQC_KEM_RESP,
+                FRAME_PQC_KEM_RESP_AUTH,
+                FRAME_PQC_KEM_RESP_SIGNED,
+                TAG_RESP,
+            )
+        };
+        let mut payload = Vec::with_capacity(4 + blob.len() + SIGNATURE_LEN);
         payload.extend_from_slice(&epoch.to_be_bytes());
         payload.extend_from_slice(blob);
+
+        let kind = if self.auth == PqcAuth::Sign {
+            match self.sign_seed.as_deref() {
+                Some(seed) => match pqc_sign::sign_handshake(
+                    seed,
+                    tag_kind,
+                    epoch,
+                    self.my_id,
+                    self.peer_id,
+                    blob,
+                    &self.suite,
+                    self.key_size_bits,
+                ) {
+                    Ok(sig) => {
+                        payload.extend_from_slice(&sig);
+                        signed_kind
+                    }
+                    Err(e) => {
+                        warn!(peer = self.peer_id, error = ?e, "qkc.pqc: fallo al firmar; envío en claro");
+                        plain
+                    }
+                },
+                None => {
+                    warn!(peer = self.peer_id, "qkc.pqc: modo sign sin sign_secret_seed; envío en claro");
+                    plain
+                }
+            }
+        } else if let Some(psk) = self.psk.as_deref().filter(|_| self.hmac_active()) {
+            let mac = link_mac::tag(
+                psk,
+                tag_kind,
+                epoch,
+                self.my_id,
+                self.peer_id,
+                blob,
+                &self.suite,
+                self.key_size_bits,
+            );
+            payload.extend_from_slice(&mac);
+            hmac_kind
+        } else {
+            plain
+        };
         let mut f = Frame::empty(kind);
         f.sender_id = self.my_id;
         f.receiver_id = self.peer_id;
         f.dest_final = self.peer_id;
         f.payload = payload;
         self.peer_out.send(self.peer_id, &self.peer_addr, f);
+    }
+
+    /// Extrae `(época, blob)` de un payload de handshake aplicando la política.
+    /// `recv` indica cómo llegó el frame (claro / HMAC / firmado). Devuelve
+    /// `None` (descartar) si la autenticación no valida o si la política exige
+    /// autenticación y el frame llegó sin ella. En recepción el MAC/firma se
+    /// computó con (sender=peer, receiver=yo). `tag_kind` es TAG_INIT/TAG_RESP.
+    fn accept<'a>(
+        &self,
+        tag_kind: &[u8],
+        payload: &'a [u8],
+        recv: RecvAuth,
+    ) -> Option<(u32, &'a [u8])> {
+        match recv {
+            RecvAuth::Signed => {
+                let Some(vk) = self.peer_verify_key.as_deref() else {
+                    warn!(peer = self.peer_id, "qkc.pqc: frame firmado pero sin peer_verify_key; descarto");
+                    return None;
+                };
+                if payload.len() < 4 + SIGNATURE_LEN {
+                    warn!(peer = self.peer_id, "qkc.pqc: payload firmado demasiado corto");
+                    return None;
+                }
+                let (msg, sig) = payload.split_at(payload.len() - SIGNATURE_LEN);
+                let (epoch, blob) = split_epoch(msg)?;
+                if pqc_sign::verify_handshake(
+                    vk,
+                    tag_kind,
+                    epoch,
+                    self.peer_id,
+                    self.my_id,
+                    blob,
+                    &self.suite,
+                    self.key_size_bits,
+                    sig,
+                )
+                .is_err()
+                {
+                    warn!(peer = self.peer_id, epoch, "qkc.pqc: firma ML-DSA inválida; descarto");
+                    return None;
+                }
+                Some((epoch, blob))
+            }
+            RecvAuth::Hmac => {
+                let Some(psk) = self.psk.as_deref() else {
+                    warn!(peer = self.peer_id, "qkc.pqc: frame HMAC pero sin link_psk; descarto");
+                    return None;
+                };
+                if payload.len() < 4 + TAG_LEN {
+                    warn!(peer = self.peer_id, "qkc.pqc: payload HMAC demasiado corto");
+                    return None;
+                }
+                let (msg, mac) = payload.split_at(payload.len() - TAG_LEN);
+                let (epoch, blob) = split_epoch(msg)?;
+                if link_mac::verify(
+                    psk, tag_kind, epoch, self.peer_id, self.my_id, blob, &self.suite,
+                    self.key_size_bits, mac,
+                )
+                .is_err()
+                {
+                    warn!(peer = self.peer_id, epoch, "qkc.pqc: MAC de handshake inválido; descarto");
+                    return None;
+                }
+                Some((epoch, blob))
+            }
+            RecvAuth::Plain => {
+                // La política exige autenticación → descartar el frame en claro.
+                let require_auth = self.auth == PqcAuth::Sign
+                    || (self.auth == PqcAuth::Require && self.psk.is_some());
+                if require_auth {
+                    warn!(
+                        peer = self.peer_id,
+                        "qkc.pqc: la política exige handshake autenticado, descarto el frame en claro"
+                    );
+                    return None;
+                }
+                split_epoch(payload)
+            }
+        }
     }
 
     /// Arranca la tarea de rotación/pre-carga. No-op en el respondedor (que es
@@ -338,7 +523,7 @@ impl PqcHandshake {
         let pubkey = kp.public;
         let mut attempts: u64 = 0;
         while !self.store.contains(epoch) {
-            self.send(FRAME_PQC_KEM_INIT, epoch, &pubkey);
+            self.send_handshake(true, epoch, &pubkey);
             attempts += 1;
             if attempts.is_multiple_of(20) {
                 debug!(
@@ -351,10 +536,9 @@ impl PqcHandshake {
         self.pending_sk.lock().remove(&epoch);
     }
 
-    /// Respondedor: llegó un INIT `época‖pubkey`.
-    pub fn handle_init(&self, payload: &[u8]) {
-        let Some((epoch, peer_pubkey)) = split_epoch(payload) else {
-            warn!(peer = self.peer_id, "qkc.pqc: INIT payload too short");
+    /// Respondedor: llegó un INIT `época‖pubkey` (`authed` = frame 0x23).
+    pub fn handle_init(&self, payload: &[u8], recv: RecvAuth) {
+        let Some((epoch, peer_pubkey)) = self.accept(TAG_INIT, payload, recv) else {
             return;
         };
         // Idempotencia por época: si ya encapsulamos PARA ESTA MISMA pubkey,
@@ -375,7 +559,7 @@ impl PqcHandshake {
         let mut stale = false;
         match cached {
             Some((pk, ct)) if pk == peer_pubkey => {
-                self.send(FRAME_PQC_KEM_RESP, epoch, &ct);
+                self.send_handshake(false, epoch, &ct);
                 return;
             }
             Some(_) => {
@@ -411,13 +595,12 @@ impl PqcHandshake {
         self.resp_cache
             .lock()
             .insert(epoch, (peer_pubkey.to_vec(), encap.ciphertext.clone()));
-        self.send(FRAME_PQC_KEM_RESP, epoch, &encap.ciphertext);
+        self.send_handshake(false, epoch, &encap.ciphertext);
     }
 
-    /// Iniciador: llegó el RESP `época‖ciphertext`. Decapsula y publica.
-    pub fn handle_resp(&self, payload: &[u8]) {
-        let Some((epoch, ciphertext)) = split_epoch(payload) else {
-            warn!(peer = self.peer_id, "qkc.pqc: RESP payload too short");
+    /// Iniciador: llegó el RESP `época‖ciphertext` (`authed` = frame 0x24).
+    pub fn handle_resp(&self, payload: &[u8], recv: RecvAuth) {
+        let Some((epoch, ciphertext)) = self.accept(TAG_RESP, payload, recv) else {
             return;
         };
         if self.store.contains(epoch) {
@@ -453,6 +636,27 @@ mod tests {
     use crate::pqc_source::epoch_of;
 
     fn handshake(my_id: u32, peer_id: u32) -> Arc<PqcHandshake> {
+        handshake_auth(my_id, peer_id, None, PqcAuth::Off)
+    }
+
+    fn handshake_auth(
+        my_id: u32,
+        peer_id: u32,
+        psk: Option<Vec<u8>>,
+        auth: PqcAuth,
+    ) -> Arc<PqcHandshake> {
+        handshake_full(my_id, peer_id, psk, auth, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handshake_full(
+        my_id: u32,
+        peer_id: u32,
+        psk: Option<Vec<u8>>,
+        auth: PqcAuth,
+        sign_seed: Option<Vec<u8>>,
+        peer_verify_key: Option<Vec<u8>>,
+    ) -> Arc<PqcHandshake> {
         PqcHandshake::new(
             common::crypto::pqc::suite::ML_KEM_768.to_string(),
             my_id,
@@ -463,6 +667,11 @@ mod tests {
             RekeyClock::new(1000),
             2,
             3600,
+            1024,
+            psk,
+            auth,
+            sign_seed,
+            peer_verify_key,
         )
     }
 
@@ -484,13 +693,13 @@ mod tests {
             // INIT = época ‖ pubkey
             let mut init_payload = epoch.to_be_bytes().to_vec();
             init_payload.extend_from_slice(&kp.public);
-            resp.handle_init(&init_payload);
+            resp.handle_init(&init_payload, RecvAuth::Plain);
             let ct = resp.resp_cache.lock().get(&epoch).cloned().unwrap().1;
 
             // RESP = época ‖ ciphertext
             let mut resp_payload = epoch.to_be_bytes().to_vec();
             resp_payload.extend_from_slice(&ct);
-            ini.handle_resp(&resp_payload);
+            ini.handle_resp(&resp_payload, RecvAuth::Plain);
 
             let s_ini = ini.store.get(epoch).unwrap();
             let s_resp = resp.store.get(epoch).unwrap();
@@ -501,6 +710,133 @@ mod tests {
         }
     }
 
+    const PSK: &[u8] = b"link-psk-shared-between-the-two-qkcs";
+
+    // Construye un payload INIT autenticado tal como lo emitiría el iniciador
+    // (my_id, peer_id) → tag con (my_id, peer_id).
+    fn authed(kind: &[u8], epoch: u32, sender: u32, receiver: u32, blob: &[u8]) -> Vec<u8> {
+        let mut p = epoch.to_be_bytes().to_vec();
+        p.extend_from_slice(blob);
+        let mac = link_mac::tag(PSK, kind, epoch, sender, receiver, blob, "ml-kem-768", 1024);
+        p.extend_from_slice(&mac);
+        p
+    }
+
+    #[tokio::test]
+    async fn authenticated_handshake_round_trip() {
+        let ini = handshake_auth(1, 2, Some(PSK.to_vec()), PqcAuth::Require);
+        let resp = handshake_auth(2, 1, Some(PSK.to_vec()), PqcAuth::Require);
+        let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
+        let kp = kem.keygen().unwrap();
+        ini.pending_sk
+            .lock()
+            .insert(5, Zeroizing::new(kp.secret.clone()));
+
+        // INIT autenticado (iniciador 1 → respondedor 2).
+        resp.handle_init(&authed(TAG_INIT, 5, 1, 2, &kp.public), RecvAuth::Hmac);
+        let ct = resp.resp_cache.lock().get(&5).cloned().unwrap().1;
+        // RESP autenticado (respondedor 2 → iniciador 1).
+        ini.handle_resp(&authed(TAG_RESP, 5, 2, 1, &ct), RecvAuth::Hmac);
+
+        assert_eq!(*ini.store.get(5).unwrap(), *resp.store.get(5).unwrap());
+    }
+
+    #[tokio::test]
+    async fn require_mode_rejects_forged_and_plaintext_init() {
+        let resp = handshake_auth(2, 1, Some(PSK.to_vec()), PqcAuth::Require);
+        let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
+        let kp = kem.keygen().unwrap();
+
+        // 1) INIT en claro bajo require → descartado, no encapsula.
+        let mut plain = 9u32.to_be_bytes().to_vec();
+        plain.extend_from_slice(&kp.public);
+        resp.handle_init(&plain, RecvAuth::Plain);
+        assert!(resp.store.get(9).is_none(), "plaintext INIT rechazado en require");
+
+        // 2) INIT autenticado con PSK equivocado → MAC inválido, descartado.
+        let mut forged = 9u32.to_be_bytes().to_vec();
+        forged.extend_from_slice(&kp.public);
+        let bad = link_mac::tag(b"wrong-psk", TAG_INIT, 9, 1, 2, &kp.public, "ml-kem-768", 1024);
+        forged.extend_from_slice(&bad);
+        resp.handle_init(&forged, RecvAuth::Hmac);
+        assert!(resp.store.get(9).is_none(), "MAC inválido rechazado, época intacta");
+
+        // 3) INIT autenticado correcto → sí encapsula.
+        resp.handle_init(&authed(TAG_INIT, 9, 1, 2, &kp.public), RecvAuth::Hmac);
+        assert!(resp.store.get(9).is_some(), "INIT válido aceptado");
+    }
+
+    /// Handshake firmado con **ML-DSA** (modo `sign`, criptografía asimétrica
+    /// post-cuántica): round-trip end to end + rechazo de firma inválida y de
+    /// frame en claro. Cada extremo firma con SU seed y verifica con la clave
+    /// pública del peer.
+    #[tokio::test]
+    async fn signed_handshake_round_trip_and_rejects() {
+        use common::crypto::pqc_sign;
+        let a = pqc_sign::keygen(); // identidad del nodo 1 (iniciador)
+        let b = pqc_sign::keygen(); // identidad del nodo 2 (respondedor)
+
+        let ini = handshake_full(
+            1, 2, None, PqcAuth::Sign,
+            Some(a.secret_seed.to_vec()), Some(b.verifying_key.clone()),
+        );
+        let resp = handshake_full(
+            2, 1, None, PqcAuth::Sign,
+            Some(b.secret_seed.to_vec()), Some(a.verifying_key.clone()),
+        );
+        let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
+        let kp = kem.keygen().unwrap();
+        ini.pending_sk.lock().insert(3, Zeroizing::new(kp.secret.clone()));
+
+        // Construye un INIT firmado por el nodo 1 (sender=1, receiver=2).
+        let signed_init = |epoch: u32, blob: &[u8]| {
+            let mut p = epoch.to_be_bytes().to_vec();
+            p.extend_from_slice(blob);
+            let sig = pqc_sign::sign_handshake(
+                &a.secret_seed, TAG_INIT, epoch, 1, 2, blob, "ml-kem-768", 1024,
+            )
+            .unwrap();
+            p.extend_from_slice(&sig);
+            p
+        };
+
+        // 1) Frame en claro bajo modo sign → rechazado.
+        let mut plain = 3u32.to_be_bytes().to_vec();
+        plain.extend_from_slice(&kp.public);
+        resp.handle_init(&plain, RecvAuth::Plain);
+        assert!(resp.store.get(3).is_none(), "sign: frame en claro rechazado");
+
+        // 2) INIT firmado pero por la clave EQUIVOCADA (nodo b firmando como a)
+        //    → firma inválida contra a.verifying_key → rechazado.
+        let mut wrong = 3u32.to_be_bytes().to_vec();
+        wrong.extend_from_slice(&kp.public);
+        let bad_sig = pqc_sign::sign_handshake(
+            &b.secret_seed, TAG_INIT, 3, 1, 2, &kp.public, "ml-kem-768", 1024,
+        )
+        .unwrap();
+        wrong.extend_from_slice(&bad_sig);
+        resp.handle_init(&wrong, RecvAuth::Signed);
+        assert!(resp.store.get(3).is_none(), "sign: firma con clave equivocada rechazada");
+
+        // 3) INIT firmado correctamente → encapsula.
+        resp.handle_init(&signed_init(3, &kp.public), RecvAuth::Signed);
+        let ct = resp.resp_cache.lock().get(&3).cloned().unwrap().1;
+
+        // RESP firmado por el nodo 2 (sender=2, receiver=1); el nodo 1 lo verifica
+        // con b.verifying_key (su peer_verify_key).
+        let mut resp_payload = 3u32.to_be_bytes().to_vec();
+        resp_payload.extend_from_slice(&ct);
+        let resp_sig = pqc_sign::sign_handshake(
+            &b.secret_seed, TAG_RESP, 3, 2, 1, &ct, "ml-kem-768", 1024,
+        )
+        .unwrap();
+        resp_payload.extend_from_slice(&resp_sig);
+        ini.handle_resp(&resp_payload, RecvAuth::Signed);
+
+        // Ambos extremos comparten el mismo secreto, con handshake 100% firmado PQC.
+        assert_eq!(*ini.store.get(3).unwrap(), *resp.store.get(3).unwrap());
+    }
+
     #[tokio::test]
     async fn duplicate_init_keeps_same_secret_per_epoch() {
         let resp = handshake(2, 1);
@@ -509,10 +845,10 @@ mod tests {
         let mut init = 3u32.to_be_bytes().to_vec();
         init.extend_from_slice(&kp.public);
 
-        resp.handle_init(&init);
+        resp.handle_init(&init, RecvAuth::Plain);
         let s1 = resp.store.get(3).unwrap();
         let ct1 = resp.resp_cache.lock().get(&3).cloned().unwrap().1;
-        resp.handle_init(&init); // duplicado
+        resp.handle_init(&init, RecvAuth::Plain); // duplicado
         let s2 = resp.store.get(3).unwrap();
         let ct2 = resp.resp_cache.lock().get(&3).cloned().unwrap().1;
         assert_eq!(*s1, *s2, "secret stable on duplicate INIT");
@@ -538,7 +874,7 @@ mod tests {
         let kp_old = kem.keygen().unwrap();
         let mut init_old = epoch.to_be_bytes().to_vec();
         init_old.extend_from_slice(&kp_old.public);
-        resp.handle_init(&init_old);
+        resp.handle_init(&init_old, RecvAuth::Plain);
         let s_old = resp.store.get(epoch).unwrap();
 
         // Se reinicia: keypair nuevo, misma época.
@@ -549,14 +885,14 @@ mod tests {
             .insert(epoch, Zeroizing::new(kp_new.secret.clone()));
         let mut init_new = epoch.to_be_bytes().to_vec();
         init_new.extend_from_slice(&kp_new.public);
-        resp.handle_init(&init_new);
+        resp.handle_init(&init_new, RecvAuth::Plain);
 
         let (cached_pk, ct_new) = resp.resp_cache.lock().get(&epoch).cloned().unwrap();
         assert_eq!(cached_pk, kp_new.public, "la caché sigue a la pubkey nueva");
 
         let mut resp_payload = epoch.to_be_bytes().to_vec();
         resp_payload.extend_from_slice(&ct_new);
-        ini.handle_resp(&resp_payload);
+        ini.handle_resp(&resp_payload, RecvAuth::Plain);
 
         let s_ini = ini.store.get(epoch).unwrap();
         let s_resp = resp.store.get(epoch).unwrap();
@@ -589,6 +925,11 @@ mod tests {
             RekeyClock::new(0),
             0,
             0,
+            1024,
+            None,
+            PqcAuth::Off,
+            None,
+            None,
         );
         assert!(hs.clock_disabled());
         // (epoch_of sanity, para no dejar el import sin uso si se recorta arriba)

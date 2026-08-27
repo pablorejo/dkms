@@ -14,7 +14,7 @@ Uso:
     sae_sim.py --sae-id sae_001 --slave sae_050 \
                --url https://127.0.0.1:8411 \
                --cert tls/sae_001.crt --key tls/sae_001.key \
-               --ca   tls/ca.crt \
+               --ca   tls/net-ca.crt \
                --log  /tmp/sae_001.log \
                --duration 200
 """

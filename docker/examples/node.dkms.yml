@@ -22,8 +22,9 @@ peers:
 # security_level: qkd_prefer   # strict_qkd | qkd_prefer | no_worry
 # fill_rate: 0                 # floor de llenado keys/s (0 = solo lo que asigne la SDN)
 
-# Certificados: monta ca.crt + <node_id>.crt + <node_id>.key en /config/certs
-# (ver docker/gen-certs.sh). Ruta configurable con certs_dir.
+# Certificados: monta net-ca.crt + sae-ca.crt + <node_id>.crt + <node_id>.key en
+# /config/certs (ver docker/gen-certs.sh y docs/SECURITY.md §2: net-ca firma
+# nodos, sae-ca firma SAEs). Ruta configurable con certs_dir.
 # certs_dir: /config/certs
 
 # sae_bindings:                # fallback SAE->DKMS si la SDN no responde

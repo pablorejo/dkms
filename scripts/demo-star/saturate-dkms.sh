@@ -43,7 +43,7 @@ echo
 curl_sae() {
     local sae="$1"; shift
     curl -sS --max-time 30 \
-        --cert "$TLS/$sae.crt" --key "$TLS/$sae.key" --cacert "$TLS/ca.crt" \
+        --cert "$TLS/$sae.crt" --key "$TLS/$sae.key" --cacert "$TLS/net-ca.crt" \
         -H 'content-type: application/json' "$@"
 }
 

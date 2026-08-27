@@ -42,7 +42,7 @@
 //!    `authorized = target_sae_ids` y el TTL del container.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -136,6 +136,20 @@ fn check_request_limits(body: &Etsi014KeyRequest, n_saes: usize) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// ¿`requester` es un SAE que este DKMS (`node_id`) declara servir?
+/// La fuente es el mapa `sae_bindings` (SAE → node_id del DKMS donde
+/// reside): sirve al SAE si hay una entrada suya que apunta a mí. Es la
+/// misma lista que se anuncia a la SDN.
+fn sae_served_locally(
+    sae_bindings: &HashMap<String, String>,
+    node_id: &str,
+    requester: &SaeId,
+) -> bool {
+    sae_bindings
+        .iter()
+        .any(|(sae, node)| node == node_id && sae.as_str() == requester.as_str())
 }
 
 #[derive(Clone)]
@@ -259,10 +273,31 @@ impl DkmsService {
         NodeId::new(self.cfg.node_id.clone())
     }
 
+    /// Autoriza que el SAE autenticado por mTLS sea uno de los que este
+    /// DKMS declara servir. La lista es `sae_bindings` cuyo valor es mi
+    /// `node_id` — la misma que anuncio a la SDN. Cierra el hueco de que
+    /// cualquier cert válido pudiera pedir/recuperar claves en nombre de
+    /// cualquier SAE: en ETSI-014 el que llama (master en enc/status,
+    /// slave en dec) es siempre un SAE local a este KME.
+    ///
+    /// Desactivable con `sae.enforce_authorization = false` para
+    /// despliegues con pertenencia SAE→DKMS puramente dinámica vía SDN.
+    fn authorize_local_sae(&self, requester: &SaeId) -> Result<()> {
+        if !self.cfg.sae.enforce_authorization {
+            return Ok(());
+        }
+        if sae_served_locally(&self.cfg.sae_bindings, &self.cfg.node_id, requester) {
+            Ok(())
+        } else {
+            Err(DkmsError::UnknownSae(requester.clone()))
+        }
+    }
+
     // ─── ETSI 014 ──────────────────────────────────────────────────────
 
     #[instrument(skip(self))]
     pub async fn status_for(&self, requester: &SaeId, slave: &SaeId) -> Result<Etsi014Status> {
+        self.authorize_local_sae(requester)?;
         let target_node = self
             .sae_binding
             .resolve(slave)
@@ -298,6 +333,7 @@ impl DkmsService {
         body: Etsi014KeyRequest,
         extra_saes_header: Option<&Value>,
     ) -> Result<Etsi014KeyContainer> {
+        self.authorize_local_sae(master)?;
         body.validate()
             .map_err(|e| DkmsError::BadRequest(e.to_string()))?;
 
@@ -559,6 +595,7 @@ impl DkmsService {
         master: &SaeId,
         body: Etsi014KeyIDs,
     ) -> Result<Etsi014KeyContainer> {
+        self.authorize_local_sae(requester)?;
         let _ = master; // master_SAE_ID viaja por auditoría; la autoría real la fija mTLS.
         let mut out = Vec::with_capacity(body.key_ids.len());
         for kid in &body.key_ids {
@@ -648,6 +685,24 @@ impl DkmsService {
         })
     }
 
+    /// ACK entrante por el plano ETSI-020 (mTLS): un peer nos confirma que
+    /// recibió las claves con estos `key_ids`, y las movemos de `ack_pending`
+    /// a `buffer_enc` vía `Generator::on_ack`. La identidad del emisor es la
+    /// del **cert** (`peer`), no un campo del cuerpo — a diferencia del socket
+    /// TCP plano heredado, cuyo `from` es autodeclarado (docs/SECURITY.md
+    /// §Fase 4). Devuelve cuántos `key_ids` casaron. Ruta aditiva: hoy los
+    /// ACKs salientes usan el socket; migrar la salida aquí y retirar el
+    /// socket queda pendiente de verificación en testbed.
+    pub fn handle_incoming_ack(&self, peer: &NodeId, key_ids: &[Etsi020KeyID]) -> usize {
+        let Some(gen) = self.generator.as_ref() else {
+            return 0;
+        };
+        key_ids
+            .iter()
+            .filter(|kid| gen.on_ack(peer.as_str(), &KeyId::new(kid.key_id.to_string())))
+            .count()
+    }
+
     // ─── Helpers internos ──────────────────────────────────────────────
 
     /// Registra la ejecución del peer y, si ha cambiado, olvida el material
@@ -668,8 +723,19 @@ impl DkmsService {
     /// `buffer_dec` (su `buffer_enc` tampoco) y lo pendiente de ACK, que
     /// cuenta contra el tope de emisión y retrasaría el relleno un TTL
     /// entero.
+    /// Cooldown entre wipes por peer disparados por cambio de `incarnation`.
+    /// Un reinicio legítimo cambia la incarnation una vez; este margen impide
+    /// que un peer que la cambie en cada mensaje (bug o abuso, viene en un
+    /// header ORR sin autenticar) vacíe el buffer en bucle. Ver `note_at`.
+    const INCARNATION_WIPE_COOLDOWN: Duration = Duration::from_secs(30);
+
     fn note_peer_incarnation(&self, peer: &str, incarnation: &str) {
-        if let Some(previous) = self.peer_incarnations.note(peer, incarnation) {
+        if let Some(previous) = self.peer_incarnations.note_at(
+            peer,
+            incarnation,
+            std::time::Instant::now(),
+            Self::INCARNATION_WIPE_COOLDOWN,
+        ) {
             self.forget_material_of_previous_incarnation(peer, &previous, incarnation);
         }
     }
@@ -1069,6 +1135,47 @@ fn unwrap_session_key(transport: &[u8], wire: &[u8]) -> std::result::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bindings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(s, n)| (s.to_string(), n.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn sae_authorization_only_accepts_served_saes() {
+        let map = bindings(&[
+            ("sae-local-1", "dkms-a"),
+            ("sae-local-2", "dkms-a"),
+            ("sae-elsewhere", "dkms-b"),
+        ]);
+
+        // Un SAE que este DKMS declara servir pasa.
+        assert!(sae_served_locally(
+            &map,
+            "dkms-a",
+            &SaeId::new("sae-local-1")
+        ));
+        // Uno que reside en otro DKMS, no — aunque su cert sea válido.
+        assert!(!sae_served_locally(
+            &map,
+            "dkms-a",
+            &SaeId::new("sae-elsewhere")
+        ));
+        // Uno desconocido, tampoco.
+        assert!(!sae_served_locally(
+            &map,
+            "dkms-a",
+            &SaeId::new("sae-ghost")
+        ));
+        // Con el mapa vacío no se sirve a nadie (fail-closed).
+        assert!(!sae_served_locally(
+            &HashMap::new(),
+            "dkms-a",
+            &SaeId::new("sae-local-1")
+        ));
+    }
 
     #[test]
     fn otp_wrap_unwrap_roundtrip() {

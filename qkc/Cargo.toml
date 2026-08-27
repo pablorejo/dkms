@@ -26,6 +26,7 @@ etsi = { path = "../etsi" }
 wire = { path = "../wire" }
 # Helpers de red (bind_reuse_addr) compartidos.
 common = { workspace = true }
+rustls = { workspace = true }
 
 # Async runtime + HTTP admin server.
 tokio = { workspace = true }

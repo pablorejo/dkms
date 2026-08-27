@@ -23,12 +23,14 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
+    Extension,
 };
 use serde_json::json;
 use tracing::warn;
 
 use crate::{config::ListenCfg, error::DkmsError, service::DkmsService};
 use admission_layer::AdmissionLayer;
+use auth::AuthPolicy;
 
 /// Lanza los dos servidores HTTPS (SAE plane + Peer plane).
 ///
@@ -41,12 +43,17 @@ pub async fn serve(
     peer_tls: Arc<rustls::ServerConfig>,
 ) -> Result<()> {
     let admission_layer = AdmissionLayer::new(svc.admission.clone());
+    let auth_policy = AuthPolicy {
+        trust_proxy_client_cert_header: listen.trust_proxy_client_cert_header,
+    };
     let sae_router = v014::router(svc.clone())
         .route("/healthz", get(healthz))
-        .layer(admission_layer.clone());
+        .layer(admission_layer.clone())
+        .layer(Extension(auth_policy));
     let peer_router = v020::router(svc.clone())
         .route("/healthz", get(healthz))
-        .layer(admission_layer);
+        .layer(admission_layer)
+        .layer(Extension(auth_policy));
 
     let sae_task = tokio::spawn(mtls::serve_mtls(
         listen.sae_addr,

@@ -254,7 +254,7 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
     let max_backoff = Duration::from_secs(30);
     loop {
         match try_fetch_pubkey(addr).await {
-            Ok((pk, suite, reported_id)) => {
+            Ok((pk, suite, reported_id, signature)) => {
                 let reported_lc = reported_id.to_lowercase();
                 if !reported_lc.is_empty() && reported_lc != peer_id {
                     warn!(
@@ -264,6 +264,46 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
                         "peer pubkey reports a different orr_id; ignoring",
                     );
                     return;
+                }
+                // §Fase 6 PQC: verifica la firma ML-DSA del anuncio.
+                match peers.verify_announcement(peer_id, &suite, &pk, &signature) {
+                    crate::peers::SigVerdict::Reject => {
+                        warn!(
+                            local = %local_orr_id, peer = %peer_id, addr = %addr,
+                            "orr.peer_pubkey: firma ML-DSA del anuncio inválida/ausente; rechazo",
+                        );
+                        return;
+                    }
+                    crate::peers::SigVerdict::Unsigned => warn!(
+                        peer = %peer_id,
+                        "orr.peer_pubkey: el peer no firmó su anuncio (sin sign_secret_seed); tofu lo acepta",
+                    ),
+                    crate::peers::SigVerdict::NoKey => debug!(
+                        peer = %peer_id,
+                        "orr.peer_pubkey: sin peer_verify_key configurada; no verifico firma (tofu)",
+                    ),
+                    crate::peers::SigVerdict::Valid => debug!(
+                        peer = %peer_id, "orr.peer_pubkey: firma ML-DSA válida",
+                    ),
+                }
+                // §Fase 6: contrasta la pubkey anunciada contra el pin de
+                // `peer_pubkeys` según `bootstrap_trust`.
+                match peers.verify_fetched_pubkey(peer_id, &pk) {
+                    crate::peers::PubkeyVerdict::Reject => {
+                        warn!(
+                            local = %local_orr_id, peer = %peer_id, addr = %addr,
+                            "orr.peer_pubkey: strict + sin pin que case; rechazo la pubkey anunciada",
+                        );
+                        return;
+                    }
+                    crate::peers::PubkeyVerdict::AcceptPinMismatch => {
+                        warn!(
+                            local = %local_orr_id, peer = %peer_id, addr = %addr,
+                            "orr.peer_pubkey: la pubkey anunciada DIFIERE del pin configurado \
+                             (reinicio del peer con identidad efímera, o MITM); la acepto (tofu)",
+                        );
+                    }
+                    crate::peers::PubkeyVerdict::Accept => {}
                 }
                 info!(
                     local = %local_orr_id,
@@ -304,7 +344,7 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
 /// (verificado smoke 2026-05-25 n10-real16k).
 pub(crate) async fn try_fetch_pubkey(
     addr: &str,
-) -> std::result::Result<(Vec<u8>, String, String), String> {
+) -> std::result::Result<(Vec<u8>, String, String, Vec<u8>), String> {
     let ch = Channel::from_shared(addr.to_string())
         .map_err(|e| format!("addr inválido: {e}"))?
         .connect()
@@ -317,7 +357,7 @@ pub(crate) async fn try_fetch_pubkey(
         .map_err(|s| format!("rpc: {s}"))?
         .into_inner();
     let id = resp.orr_id.map(|n| n.value).unwrap_or_default();
-    Ok((resp.public_key, resp.suite, id))
+    Ok((resp.public_key, resp.suite, id, resp.signature))
 }
 
 /// Hace el encap contra `pk`, llama a `EstablishSecret` y devuelve el

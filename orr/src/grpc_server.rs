@@ -136,12 +136,15 @@ impl OrrControl for OrrGrpc {
         _req: Request<GetPublicKeyRequest>,
     ) -> std::result::Result<Response<GetPublicKeyResponse>, Status> {
         let id = &self.svc.identity;
+        // Firma ML-DSA del anuncio (§Fase 6 PQC); vacía si no hay seed de firma.
+        let signature = id.sign_pubkey_announcement().unwrap_or_default();
         Ok(Response::new(GetPublicKeyResponse {
             public_key: id.public_key.clone(),
             suite: id.suite.clone(),
             orr_id: Some(NodeId {
                 value: self.svc.cfg.orr_id.clone(),
             }),
+            signature,
         }))
     }
 

@@ -97,7 +97,7 @@ while IFS=, read -r sae_id home_dkms slave_sae dkms_url sae_port; do
         --url "$dkms_url" \
         --cert "$TLS/${sae_id}.crt" \
         --key  "$TLS/${sae_id}.key" \
-        --ca   "$TLS/ca.crt" \
+        --ca   "$TLS/net-ca.crt" \
         --log  "$logf" \
         --duration "$remaining" \
         --size-bits "$SIZE_BITS" \

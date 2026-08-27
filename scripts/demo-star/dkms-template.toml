@@ -19,10 +19,11 @@ ack_socket_addr = "127.0.0.1:83__NN__"
 rate_refresh_ms = 1000
 
 [tls]
-cert_path     = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.crt"
-key_path      = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.key"
-sae_client_ca = "__ROOT__/scripts/demo-star/tls/ca.crt"
-peer_dkms_ca  = "__ROOT__/scripts/demo-star/tls/ca.crt"
+cert_path        = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.crt"
+key_path         = "__ROOT__/scripts/demo-star/tls/dkms-__NN__.key"
+sae_client_ca    = "__ROOT__/scripts/demo-star/tls/sae-ca.crt"
+peer_dkms_ca     = "__ROOT__/scripts/demo-star/tls/net-ca.crt"
+control_plane_ca = "__ROOT__/scripts/demo-star/tls/net-ca.crt"
 
 [southbound]
 # SDN: con la demo-star levantada por start-sdn.sh, el DKMS hará

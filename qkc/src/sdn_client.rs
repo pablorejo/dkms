@@ -173,10 +173,17 @@ impl SdnAnnouncer {
             })
             .collect();
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .ok()?;
+        let http = match common::http::announcer_client(
+            &sdn_url,
+            cfg.tls.as_ref().map(|t| t.as_client_tls()),
+            Duration::from_secs(5),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "no pude construir el cliente de anuncio (TLS?); no me anuncio");
+                return None;
+            }
+        };
 
         Some(Self {
             http,
@@ -209,6 +216,9 @@ impl SdnAnnouncer {
                 alpha: None,
                 distance_km: None,
                 capacity_keys_per_s: None,
+                link_psk: None,
+                pqc_auth: crate::config::PqcAuth::Off,
+                peer_verify_key: None,
             }),
         })
     }

@@ -175,7 +175,7 @@ info "── clave extremo a extremo con el nodo nuevo (ejercita el forwarding 4
 sleep 20   # margen para que dkms-4 tenga buffer con dkms-1
 CERTS_D="/home/debian/$D_DIR/certs"
 resp=$(on "$D_HOST" "curl -sf --max-time 30 \
-    --cacert $CERTS_D/ca.crt --cert $CERTS_D/sae_4.crt --key $CERTS_D/sae_4.key \
+    --cacert $CERTS_D/net-ca.crt --cert $CERTS_D/sae_4.crt --key $CERTS_D/sae_4.key \
     -H 'Content-Type: application/json' -d '{\"number\":1,\"size\":256}' \
     https://127.0.0.1:$DKMS_SAE/api/v1/keys/sae_1/enc_keys" 2>/dev/null || true)
 kid=$(jq -r '.keys[0].key_ID // empty' <<<"${resp:-{\}}")

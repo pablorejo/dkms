@@ -25,6 +25,11 @@ async fn main() -> Result<()> {
     logging::init("sdn");
     let _cli = Cli::parse();
 
+    // Proveedor criptográfico de rustls: obligatorio antes de cualquier
+    // handshake TLS (el plano de control mTLS opcional lo usa). Sin esto
+    // rustls hace panic en el primer handshake. Idempotente si ya estaba.
+    let _ = common::tls_pqc::install_process_default();
+
     let cfg: SdnConfig = common::config::load_config("sdn")?;
     info!(?cfg, "sdn starting");
 
@@ -36,12 +41,15 @@ async fn main() -> Result<()> {
     let grpc = tokio::spawn({
         let svc = service.clone();
         let addr = cfg.grpc_addr.clone();
-        async move { sdn::grpc_server::serve(svc, &addr).await }
+        let tls = cfg.tls.clone();
+        async move { sdn::grpc_server::serve(svc, &addr, tls.as_ref()).await }
     });
     let http = tokio::spawn({
         let svc = service.clone();
         let addr = cfg.http_addr.clone();
-        async move { sdn::http_api::serve(svc, &addr).await }
+        let tls = cfg.tls.clone();
+        let ro = cfg.http_ro_addr.clone();
+        async move { sdn::http_api::serve_with_tls(svc, &addr, tls.as_ref(), ro.as_deref()).await }
     });
     let bg = tokio::spawn({
         let svc = service.clone();

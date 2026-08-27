@@ -47,7 +47,7 @@ def make_ctx(certs: str, sae: str) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False           # el SAN lleva IP, no hostname
     ctx.verify_mode = ssl.CERT_REQUIRED
-    ctx.load_verify_locations(f"{certs}/ca.crt")
+    ctx.load_verify_locations(f"{certs}/net-ca.crt")
     ctx.load_cert_chain(certfile=f"{certs}/{sae}.crt", keyfile=f"{certs}/{sae}.key")
     return ctx
 

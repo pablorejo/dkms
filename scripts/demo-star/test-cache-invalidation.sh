@@ -25,7 +25,7 @@ for p in 50053 50055 50511 8411; do
 done
 
 echo "── 1) warmup: un enc/dec sae_aa→sae_bb (calienta caches DKMS+ORR)"
-warmup=$(curl -sS --cert "$TLS/sae_aa.crt" --key "$TLS/sae_aa.key" --cacert "$TLS/ca.crt" \
+warmup=$(curl -sS --cert "$TLS/sae_aa.crt" --key "$TLS/sae_aa.key" --cacert "$TLS/net-ca.crt" \
     -H 'content-type: application/json' \
     "https://127.0.0.1:8411/api/v1/keys/sae_bb/enc_keys" \
     -d '{"number":1,"size":256}')
@@ -49,13 +49,13 @@ sed -n "$((before_orr+1)),\$p" "$LOGS/orr-11.log" | grep -E "path_cache invalida
 
 echo
 echo "── 4) post-mutación: otro enc/dec para comprobar que no se rompió"
-post=$(curl -sS --cert "$TLS/sae_aa.crt" --key "$TLS/sae_aa.key" --cacert "$TLS/ca.crt" \
+post=$(curl -sS --cert "$TLS/sae_aa.crt" --key "$TLS/sae_aa.key" --cacert "$TLS/net-ca.crt" \
     -H 'content-type: application/json' \
     "https://127.0.0.1:8411/api/v1/keys/sae_bb/enc_keys" \
     -d '{"number":1,"size":256}')
 kid=$(echo "$post" | jq -r '.keys[0].key_ID')
 kval=$(echo "$post" | jq -r '.keys[0].key')
-dec=$(curl -sS --cert "$TLS/sae_bb.crt" --key "$TLS/sae_bb.key" --cacert "$TLS/ca.crt" \
+dec=$(curl -sS --cert "$TLS/sae_bb.crt" --key "$TLS/sae_bb.key" --cacert "$TLS/net-ca.crt" \
     -H 'content-type: application/json' \
     "https://127.0.0.1:8422/api/v1/keys/sae_aa/dec_keys" \
     -d "{\"key_IDs\":[{\"key_ID\":\"$kid\"}]}")

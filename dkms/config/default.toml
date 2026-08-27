@@ -3,15 +3,27 @@ node_id = "dkms-a"
 [listen]
 sae_addr     = "0.0.0.0:8443"
 peer_addr    = "0.0.0.0:8444"
-grpc_addr    = "0.0.0.0:50054"
+# gRPC DkmsControl: plano de operador SIN auth. El RPC `Drain` cierra admisión
+# y BORRA pending + todos los buffers de transporte con una sola llamada, así
+# que por defecto bindea a localhost (docs/SECURITY.md §Fase 7 y §1.2). Si un
+# orquestador remoto lo necesita, ponlo a 0.0.0.0 y firewalléalo a la red
+# interna de la institución — nunca expuesto entre instituciones.
+grpc_addr    = "127.0.0.1:50054"
+# /metrics: sin auth y responde a CUALQUIER path. Mantenlo en la red interna.
 metrics_addr = "0.0.0.0:9103"
+# Confiar en el header `ssl-client-cert` (PEM sin verificar) por delante del
+# cert mTLS local. Solo para despliegues detrás de nginx-ingress que termina
+# el mTLS en el borde y donde estos puertos NO son accesibles de otro modo.
+# trust_proxy_client_cert_header = false
 
 [tls]
+# Dos raíces separadas (docs/SECURITY.md §2): SAEs firmados por sae-ca;
+# peers DKMS y control plane (SDN/QKC/ORR) por net-ca.
 cert_path        = "/etc/dkms/tls/dkms.crt"
 key_path         = "/etc/dkms/tls/dkms.key"
 sae_client_ca    = "/etc/dkms/tls/sae-ca.crt"
-peer_dkms_ca     = "/etc/dkms/tls/dkms-ca.crt"
-# control_plane_ca = "/etc/dkms/tls/control-plane-ca.crt"
+peer_dkms_ca     = "/etc/dkms/tls/net-ca.crt"
+control_plane_ca = "/etc/dkms/tls/net-ca.crt"
 
 [southbound]
 sdn_endpoint        = "https://sdn:50053"
@@ -36,6 +48,10 @@ sweep_interval_secs = 30
 default_rate_keys_per_sec = 100
 default_burst_keys        = 400
 token_unit_bytes          = 32
+# Exigir que el SAE autenticado sea uno de los declarados en [sae_bindings]
+# como servidos por este DKMS. `false` solo si la pertenencia es dinámica
+# vía SDN y no se declara localmente.
+# enforce_authorization     = true
 
 [sae_binding]
 ttl_secs    = 60

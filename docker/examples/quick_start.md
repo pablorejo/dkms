@@ -109,12 +109,12 @@ docker compose -f site.yml up -d
 C=./certs
 
 # sae_1 -> dkms del nodo 1: pedir clave con sae_2 (apunta el key_ID)
-curl -s --cacert $C/ca.crt --cert $C/sae_1.crt --key $C/sae_1.key \
+curl -s --cacert $C/net-ca.crt --cert $C/sae_1.crt --key $C/sae_1.key \
   -H 'Content-Type: application/json' -d '{"number":1,"size":256}' \
   https://10.0.0.11:20005/api/v1/keys/sae_2/enc_keys
 
 # sae_2 -> dkms del nodo 2: recoger la clave (debe ser la misma "key")
-curl -s --cacert $C/ca.crt --cert $C/sae_2.crt --key $C/sae_2.key \
+curl -s --cacert $C/net-ca.crt --cert $C/sae_2.crt --key $C/sae_2.key \
   -H 'Content-Type: application/json' -d '{"key_IDs":[{"key_ID":"<uuid>"}]}' \
   https://10.0.0.12:20005/api/v1/keys/sae_1/dec_keys
 ```

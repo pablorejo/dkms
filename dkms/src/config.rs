@@ -94,6 +94,16 @@ pub struct ListenCfg {
     pub grpc_addr: SocketAddr,
     /// Prometheus `/metrics` bind.
     pub metrics_addr: SocketAddr,
+
+    /// Aceptar la identidad del cert cliente venida en el header
+    /// `ssl-client-cert` (lo inyecta nginx-ingress cuando termina mTLS en
+    /// el borde). El PEM del header **no** se verifica contra ninguna CA:
+    /// solo es seguro si estos puertos son alcanzables *exclusivamente* a
+    /// través de ese proxy, que ya validó el cert. Por defecto `false` —
+    /// la identidad sale del cert verificado por rustls en la capa TLS
+    /// local. Los despliegues con nginx-ingress lo ponen a `true`.
+    #[serde(default)]
+    pub trust_proxy_client_cert_header: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +262,20 @@ pub struct SaeCfg {
     /// Floor mínimo del bucket capacity. Evita que `live_occupancy=0`
     /// en warmup haga rate-limit instant al primer cliente.
     pub min_capacity_tokens: f64,
+
+    /// Exigir que el SAE autenticado (por mTLS) sea uno de los que este
+    /// DKMS declara servir (`sae_bindings` cuyo valor es mi `node_id`,
+    /// la misma lista que anuncio a la SDN). Cierra el hueco de que
+    /// cualquier cert válido pudiera pedir claves en nombre de cualquier
+    /// SAE. Por defecto `true` (fail-closed). Ponlo a `false` solo en
+    /// despliegues donde la pertenencia SAE→DKMS es puramente dinámica vía
+    /// SDN y no se declara localmente.
+    #[serde(default = "default_enforce_authorization")]
+    pub enforce_authorization: bool,
+}
+
+fn default_enforce_authorization() -> bool {
+    true
 }
 
 impl Default for SaeCfg {
@@ -262,6 +286,7 @@ impl Default for SaeCfg {
             token_unit_bytes: 32,
             observation_window_secs: 60.0,
             min_capacity_tokens: 1.0,
+            enforce_authorization: true,
         }
     }
 }

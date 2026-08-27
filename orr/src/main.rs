@@ -18,6 +18,8 @@ struct Cli {
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     logging::init("orr");
+    // Proveedor rustls: necesario si el anuncio al SDN va por mTLS (https).
+    let _ = common::tls_pqc::install_process_default();
     let _cli = Cli::parse();
 
     let cfg: OrrConfig = common::config::load_config("orr")?;

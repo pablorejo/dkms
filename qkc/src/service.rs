@@ -1,6 +1,7 @@
 //! `QkcService` — handle Arc-shared entre todos los listeners y workers.
 
 use arc_swap::ArcSwap;
+use base64::Engine as _;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -164,6 +165,30 @@ impl QkcService {
                     let is_initiator = cfg.qkc_id < link.neighbor_id;
                     let store = SecretStore::new(lookahead, link.pqc_rekey_keys);
                     let clock = RekeyClock::new(link.pqc_rekey_keys);
+                    // PSK del enlace (base64) para autenticar el handshake
+                    // (Fase 5). Un PSK mal formado se trata como ausente, con
+                    // aviso: preferimos degradar a sin-auth que no montar el
+                    // enlace por un typo en la config.
+                    let decode_b64 = |b64: &str, what: &str| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| {
+                                tracing::warn!(neighbor = link.neighbor_id, field = what, error = %e,
+                                    "config base64 inválido; se ignora (enlace sin ese material)");
+                            })
+                            .ok()
+                    };
+                    let psk = link.link_psk.as_deref().and_then(|b| decode_b64(b, "link_psk"));
+                    // Modo `sign` (Fase 5 upgrade, ML-DSA): seed de firma de este
+                    // nodo + clave pública de verificación del peer.
+                    let sign_seed = cfg
+                        .sign_secret_seed
+                        .as_deref()
+                        .and_then(|b| decode_b64(b, "sign_secret_seed"));
+                    let peer_verify_key = link
+                        .peer_verify_key
+                        .as_deref()
+                        .and_then(|b| decode_b64(b, "peer_verify_key"));
                     let hs = PqcHandshake::new(
                         link.pqc_suite.clone(),
                         cfg.qkc_id,
@@ -174,6 +199,11 @@ impl QkcService {
                         Arc::clone(&clock),
                         lookahead,
                         link.pqc_rekey_secs,
+                        link.key_size_bits,
+                        psk,
+                        link.pqc_auth,
+                        sign_seed,
+                        peer_verify_key,
                     );
                     // El reloj solo lo alimenta el emisor del lado iniciador; el
                     // respondedor sigue la rotación vía store.highest().
@@ -395,6 +425,8 @@ mod tests {
             sdn_url: None,
             advertise_ip: None,
             sdn_announce_secs: 30,
+            tls: None,
+            sign_secret_seed: None,
             links,
         }
     }
@@ -414,6 +446,9 @@ mod tests {
             alpha: None,
             distance_km: None,
             capacity_keys_per_s: None,
+            link_psk: None,
+            pqc_auth: crate::config::PqcAuth::Off,
+            peer_verify_key: None,
         }
     }
 

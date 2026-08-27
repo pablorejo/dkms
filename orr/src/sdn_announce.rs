@@ -114,10 +114,17 @@ impl SdnAnnouncer {
             }
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .ok()?;
+        let http = match common::http::announcer_client(
+            &base,
+            cfg.tls.as_ref().map(|t| t.as_client_tls()),
+            Duration::from_secs(5),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "no pude construir el cliente de anuncio (TLS?); no me anuncio");
+                return None;
+            }
+        };
 
         Some(Self {
             http,

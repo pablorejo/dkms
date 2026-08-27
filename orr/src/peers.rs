@@ -97,37 +97,104 @@ pub struct PeerRegistry {
     /// medias) quedaba condenado a dropear frames para siempre, en
     /// silencio. Que es exactamente el síntoma "emito y no llega nada".
     grpc_addrs: RwLock<HashMap<String, String>>,
+    /// Snapshot **inmutable** de los pins de `peer_pubkeys` (TOML). Se compara
+    /// contra lo que llega por `GetPublicKey` para detectar/rechazar MITM
+    /// (§Fase 6). Separado de `pubkeys`, que el fetch/rebootstrap sobrescribe.
+    pinned_pubkeys: HashMap<String, Vec<u8>>,
+    /// `orr_id -> ML-DSA verifying key` de los peers (§Fase 6 PQC), para
+    /// verificar la firma de su anuncio de pubkey. Inmutable (de config).
+    peer_verify_keys: HashMap<String, Vec<u8>>,
+    bootstrap_trust: crate::config::BootstrapTrust,
     local_orr_id: String,
     local_qkc_id: u32,
 }
 
+/// Veredicto sobre la **firma ML-DSA** del anuncio de pubkey de un peer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SigVerdict {
+    /// Firma válida contra la verify key configurada del peer.
+    Valid,
+    /// No hay verify key configurada para este peer (tofu: se acepta sin firma).
+    NoKey,
+    /// Hay verify key pero el anuncio no traía firma (tofu: se avisa).
+    Unsigned,
+    /// Rechazar: firma inválida, o strict sin verify key / sin firma.
+    Reject,
+}
+
+/// Veredicto sobre una pubkey recién obtenida por `GetPublicKey`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PubkeyVerdict {
+    /// Aceptar y almacenar (no hay pin, o casa el pin).
+    Accept,
+    /// TOFU: aceptar, pero difiere del pin configurado — posible reinicio del
+    /// peer (identidad efímera) o MITM. Se registra un aviso.
+    AcceptPinMismatch,
+    /// `strict`: rechazar (no casa ningún pin configurado).
+    Reject,
+}
+
 impl PeerRegistry {
     pub fn new(seed_qkc: HashMap<String, u32>, local_orr_id: String, local_qkc_id: u32) -> Self {
-        Self {
-            by_orr: RwLock::new(seed_qkc),
-            pubkeys: RwLock::new(HashMap::new()),
-            bootstrap_secrets: RwLock::new(HashMap::new()),
-            master_secrets: RwLock::new(HashMap::new()),
-            ephemeral_sks: RwLock::new(HashMap::new()),
-            current_send_epochs: RwLock::new(HashMap::new()),
-            rebootstrap_last_failure: RwLock::new(HashMap::new()),
-            rebootstrap_inflight: RwLock::new(HashMap::new()),
-            grpc_addrs: RwLock::new(HashMap::new()),
+        Self::with_pubkeys(
+            seed_qkc,
+            HashMap::new(),
             local_orr_id,
             local_qkc_id,
-        }
+        )
     }
 
     /// Constructor con ambos sembrados a la vez. Lo usa `OrrService::new`
-    /// para inyectar los pubkeys decodificados desde TOML.
+    /// para inyectar los pubkeys decodificados desde TOML. `bootstrap_trust`
+    /// = Tofu (default) — usa [`Self::with_pubkeys_trust`] para fijarlo.
     pub fn with_pubkeys(
         seed_qkc: HashMap<String, u32>,
         seed_pubkeys: HashMap<String, Vec<u8>>,
         local_orr_id: String,
         local_qkc_id: u32,
     ) -> Self {
+        Self::with_pubkeys_trust(
+            seed_qkc,
+            seed_pubkeys,
+            local_orr_id,
+            local_qkc_id,
+            crate::config::BootstrapTrust::default(),
+        )
+    }
+
+    /// Como [`Self::with_pubkeys`] fijando la política de confianza. Los pins
+    /// (`seed_pubkeys`) se guardan también como snapshot inmutable.
+    pub fn with_pubkeys_trust(
+        seed_qkc: HashMap<String, u32>,
+        seed_pubkeys: HashMap<String, Vec<u8>>,
+        local_orr_id: String,
+        local_qkc_id: u32,
+        bootstrap_trust: crate::config::BootstrapTrust,
+    ) -> Self {
+        Self::with_all(
+            seed_qkc,
+            seed_pubkeys,
+            HashMap::new(),
+            local_orr_id,
+            local_qkc_id,
+            bootstrap_trust,
+        )
+    }
+
+    /// Constructor completo: además de los pins, las **verifying keys ML-DSA**
+    /// de los peers (§Fase 6 PQC) para verificar la firma de sus anuncios.
+    pub fn with_all(
+        seed_qkc: HashMap<String, u32>,
+        seed_pubkeys: HashMap<String, Vec<u8>>,
+        peer_verify_keys: HashMap<String, Vec<u8>>,
+        local_orr_id: String,
+        local_qkc_id: u32,
+        bootstrap_trust: crate::config::BootstrapTrust,
+    ) -> Self {
         Self {
             by_orr: RwLock::new(seed_qkc),
+            pinned_pubkeys: seed_pubkeys.clone(),
+            peer_verify_keys,
             pubkeys: RwLock::new(seed_pubkeys),
             bootstrap_secrets: RwLock::new(HashMap::new()),
             master_secrets: RwLock::new(HashMap::new()),
@@ -136,8 +203,60 @@ impl PeerRegistry {
             rebootstrap_last_failure: RwLock::new(HashMap::new()),
             rebootstrap_inflight: RwLock::new(HashMap::new()),
             grpc_addrs: RwLock::new(HashMap::new()),
+            bootstrap_trust,
             local_orr_id,
             local_qkc_id,
+        }
+    }
+
+    /// Decide si aceptar una pubkey obtenida por `GetPublicKey`, según la
+    /// política `bootstrap_trust` y el pin de `peer_pubkeys` (si lo hay).
+    /// Función pura (testeable); el caller registra el aviso y actúa.
+    pub fn verify_fetched_pubkey(&self, orr_id: &str, fetched: &[u8]) -> PubkeyVerdict {
+        use crate::config::BootstrapTrust::*;
+        let pin = self.pinned_pubkeys.get(orr_id);
+        match (self.bootstrap_trust, pin) {
+            // strict: solo si casa un pin configurado.
+            (Strict, Some(p)) if p.as_slice() == fetched => PubkeyVerdict::Accept,
+            (Strict, _) => PubkeyVerdict::Reject,
+            // tofu: acepta siempre; avisa si difiere de un pin (reinicio/MITM).
+            (Tofu, Some(p)) if p.as_slice() != fetched => PubkeyVerdict::AcceptPinMismatch,
+            (Tofu, _) => PubkeyVerdict::Accept,
+        }
+    }
+
+    /// Verifica la **firma ML-DSA** del anuncio de pubkey de un peer
+    /// (§Fase 6 PQC). Devuelve el veredicto según haya verify key configurada,
+    /// la firma valide, y la política `bootstrap_trust`.
+    pub fn verify_announcement(
+        &self,
+        orr_id: &str,
+        suite: &str,
+        public_key: &[u8],
+        signature: &[u8],
+    ) -> SigVerdict {
+        use crate::config::BootstrapTrust::*;
+        match self.peer_verify_keys.get(orr_id) {
+            Some(vk) => {
+                if signature.is_empty() {
+                    // Tenemos su clave pero no vino firma: en strict se rechaza.
+                    return match self.bootstrap_trust {
+                        Strict => SigVerdict::Reject,
+                        Tofu => SigVerdict::Unsigned,
+                    };
+                }
+                match common::crypto::pqc_sign::verify_orr_pubkey(
+                    vk, orr_id, suite, public_key, signature,
+                ) {
+                    Ok(()) => SigVerdict::Valid,
+                    Err(_) => SigVerdict::Reject, // firma inválida: siempre se rechaza
+                }
+            }
+            // Sin verify key configurada: no podemos verificar. strict lo exige.
+            None => match self.bootstrap_trust {
+                Strict => SigVerdict::Reject,
+                Tofu => SigVerdict::NoKey,
+            },
         }
     }
 
@@ -516,6 +635,72 @@ mod tests {
         let reg = PeerRegistry::with_pubkeys(q, p, "ORR_1".into(), 1);
         assert_eq!(reg.qkc_id("ORR_2"), Some(2));
         assert_eq!(reg.public_key("ORR_2"), Some(vec![0xBB; 16]));
+    }
+
+    #[test]
+    fn verify_announcement_signature() {
+        use crate::config::BootstrapTrust::*;
+        use common::crypto::pqc_sign;
+        let kp = pqc_sign::keygen();
+        let pk = vec![0x33; 1184];
+        let sig = pqc_sign::sign_orr_pubkey(&kp.secret_seed, "orr_2", "ml-kem-768", &pk).unwrap();
+
+        let mut vks = HashMap::new();
+        vks.insert("orr_2".to_string(), kp.verifying_key.clone());
+
+        // Con verify key configurada: firma válida → Valid; inválida/pubkey
+        // sustituida → Reject.
+        let reg = PeerRegistry::with_all(
+            HashMap::new(), HashMap::new(), vks.clone(), "orr_1".into(), 1, Tofu,
+        );
+        assert_eq!(reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig), SigVerdict::Valid);
+        assert_eq!(
+            reg.verify_announcement("orr_2", "ml-kem-768", &[0x44; 1184], &sig),
+            SigVerdict::Reject,
+            "un MITM que sustituye la pubkey no puede reproducir la firma",
+        );
+        // Sin firma, tofu → Unsigned; strict → Reject.
+        assert_eq!(reg.verify_announcement("orr_2", "ml-kem-768", &pk, &[]), SigVerdict::Unsigned);
+        let reg_strict = PeerRegistry::with_all(
+            HashMap::new(), HashMap::new(), vks, "orr_1".into(), 1, Strict,
+        );
+        assert_eq!(reg_strict.verify_announcement("orr_2", "ml-kem-768", &pk, &[]), SigVerdict::Reject);
+
+        // Sin verify key: tofu → NoKey; strict → Reject.
+        let reg_nokey = PeerRegistry::with_all(
+            HashMap::new(), HashMap::new(), HashMap::new(), "orr_1".into(), 1, Tofu,
+        );
+        assert_eq!(reg_nokey.verify_announcement("orr_9", "ml-kem-768", &pk, &sig), SigVerdict::NoKey);
+        let reg_nokey_strict = PeerRegistry::with_all(
+            HashMap::new(), HashMap::new(), HashMap::new(), "orr_1".into(), 1, Strict,
+        );
+        assert_eq!(reg_nokey_strict.verify_announcement("orr_9", "ml-kem-768", &pk, &sig), SigVerdict::Reject);
+    }
+
+    #[test]
+    fn verify_fetched_pubkey_tofu_and_strict() {
+        use crate::config::BootstrapTrust::*;
+        let mut q = HashMap::new();
+        q.insert("orr_2".into(), 2);
+        let mut pins = HashMap::new();
+        pins.insert("orr_2".into(), vec![0xAA; 8]);
+
+        // tofu (default): acepta todo; avisa si difiere del pin.
+        let tofu =
+            PeerRegistry::with_pubkeys_trust(q.clone(), pins.clone(), "orr_1".into(), 1, Tofu);
+        assert_eq!(tofu.verify_fetched_pubkey("orr_2", &[0xAA; 8]), PubkeyVerdict::Accept);
+        assert_eq!(
+            tofu.verify_fetched_pubkey("orr_2", &[0xBB; 8]),
+            PubkeyVerdict::AcceptPinMismatch,
+        );
+        // sin pin: tofu acepta (TOFU).
+        assert_eq!(tofu.verify_fetched_pubkey("orr_9", &[1, 2, 3]), PubkeyVerdict::Accept);
+
+        // strict: solo si casa un pin.
+        let strict = PeerRegistry::with_pubkeys_trust(q, pins, "orr_1".into(), 1, Strict);
+        assert_eq!(strict.verify_fetched_pubkey("orr_2", &[0xAA; 8]), PubkeyVerdict::Accept);
+        assert_eq!(strict.verify_fetched_pubkey("orr_2", &[0xBB; 8]), PubkeyVerdict::Reject);
+        assert_eq!(strict.verify_fetched_pubkey("orr_9", &[1, 2, 3]), PubkeyVerdict::Reject);
     }
 
     #[test]

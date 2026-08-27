@@ -655,6 +655,8 @@ pub(crate) mod tests {
                 num_alpha: 1.0,
                 num_gamma: 0.2,
                 num_fill_weight: 0.1,
+                tls: None,
+                http_ro_addr: None,
             }),
             topology: TopologyStore::new(small_topo()),
             mcf_snapshot: Arc::new(ArcSwap::from_pointee(McfSnapshot::default())),

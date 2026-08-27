@@ -83,6 +83,19 @@ pub struct QkcConfig {
     #[serde(default = "default_announce_secs")]
     pub sdn_announce_secs: u64,
 
+    /// TLS de cliente para el anuncio al SDN (docs/SECURITY.md §Fase 3).
+    /// Solo se usa si `sdn_url` es `https://`; en claro se ignora.
+    #[serde(default)]
+    pub tls: Option<common::http::ControlTlsCfg>,
+
+    /// Semilla ML-DSA (32 B, base64) de la **identidad de firma** de este QKC,
+    /// usada para firmar el handshake en los enlaces con `pqc_auth = sign`
+    /// (§Fase 5 upgrade). La clave pública correspondiente se reparte a los
+    /// vecinos como su `peer_verify_key`. Solo config local. Sin ella, los
+    /// enlaces en modo `sign` no pueden emitir handshakes firmados.
+    #[serde(default)]
+    pub sign_secret_seed: Option<String>,
+
     /// Un entry por enlace QKC↔QKC con este vecino directo.
     #[serde(default)]
     pub links: Vec<LinkConfig>,
@@ -181,6 +194,44 @@ pub struct LinkConfig {
     /// SDN.
     #[serde(default)]
     pub capacity_keys_per_s: Option<f64>,
+
+    /// **Secreto pre-compartido por enlace** (base64) para autenticar el
+    /// handshake PQC (docs/SECURITY.md §Fase 5). Solo config local: el SDN no
+    /// transporta secretos. Sin él, el handshake va sin autenticar (frames
+    /// 0x21/0x22), como hasta ahora. Debe ser idéntico en ambos extremos.
+    #[serde(default)]
+    pub link_psk: Option<String>,
+
+    /// Política de autenticación del handshake PQC de este enlace. Ver `PqcAuth`
+    /// (`off` | `prefer` | `require` = HMAC-PSK; `sign` = firma ML-DSA).
+    #[serde(default)]
+    pub pqc_auth: PqcAuth,
+
+    /// Clave pública ML-DSA del **peer** (base64) para verificar su firma del
+    /// handshake cuando `pqc_auth = sign`. Solo config local. Ver §Fase 5.
+    #[serde(default)]
+    pub peer_verify_key: Option<String>,
+}
+
+/// Política de autenticación del handshake PQC por enlace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PqcAuth {
+    /// Sin autenticar (comportamiento histórico). Frames 0x21/0x22.
+    #[default]
+    Off,
+    /// HMAC-PSK: autentica si hay `link_psk`; acepta frames autenticados y en
+    /// claro. Para migración: despliega en `prefer`, reparte PSKs, sube a
+    /// `require`.
+    Prefer,
+    /// HMAC-PSK: exige handshake autenticado; descarta INIT/RESP sin MAC válido.
+    Require,
+    /// **Firma post-cuántica ML-DSA** (docs/SECURITY.md §Fase 5 upgrade): exige
+    /// que el handshake vaya firmado (frames 0x26/0x27) y verifica con la
+    /// clave pública del peer (`peer_verify_key`). Necesita también el seed de
+    /// firma de este nodo (`sign_secret_seed`). A diferencia del PSK simétrico,
+    /// solo se comparten claves **públicas**.
+    Sign,
 }
 
 fn default_key_size() -> u32 {

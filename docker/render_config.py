@@ -97,6 +97,10 @@ def render_qkc(n, out):
         "local_listen = " + q(local_l),
         "admin_http = " + q(admin_l),
     ]
+    # Identidad de firma ML-DSA de este QKC (seed base64), para enlaces con
+    # pqc_auth = sign (docs/SECURITY.md §Fase 5). Solo config local.
+    if n.get("sign_secret_seed") is not None:
+        lines.append("sign_secret_seed = " + q(str(n["sign_secret_seed"])))
     # Self-registration with the SDN. Optional: without it somebody has to add
     # this node to the SDN's topology by hand.
     if n.get("sdn_url"):
@@ -151,6 +155,19 @@ def render_qkc(n, out):
                       "pqc_rekey_keys = " + str(int(lk.get("pqc_rekey_keys", 1000))),
                       "pqc_rekey_secs = " + str(int(lk.get("pqc_rekey_secs", 3600))),
                       "pqc_rekey_lookahead = " + str(int(lk.get("pqc_rekey_lookahead", 2)))]
+            # Autenticación del handshake PQC (docs/SECURITY.md §Fase 5).
+            # pqc_auth = off|prefer|require (HMAC con link_psk) | sign (firma
+            # ML-DSA). Default off. Para `sign`: peer_verify_key es la clave
+            # pública ML-DSA del vecino (base64); el seed propio va a nivel de
+            # nodo (sign_secret_seed, abajo).
+            if lk.get("link_psk") is not None:
+                lines.append("link_psk = " + q(str(lk["link_psk"])))
+            if lk.get("pqc_auth") is not None:
+                lines.append("pqc_auth = " + q(str(lk["pqc_auth"])))
+            if lk.get("peer_verify_key") is not None:
+                lines.append("peer_verify_key = " + q(str(lk["peer_verify_key"])))
+    qkc_cert = n.get("cert_name", "qkc-" + str(int(req(n, "qkc_id", "qkc"))))
+    lines += control_tls_lines(n, qkc_cert, "client")
     write(os.path.join(out, "qkc.toml"), "\n".join(lines) + "\n")
 
 
@@ -171,6 +188,13 @@ def render_orr(n, out):
         "metrics_addr = " + q(metrics_l),
         "default_max_hops = " + str(int(n.get("default_max_hops", 1))),
     ]
+    # Firma ML-DSA del bootstrap (docs/SECURITY.md §Fase 6 PQC): seed de firma
+    # de este ORR (escalar, seguro antes de cualquier tabla). Las verifying
+    # keys de los peers van en su [peer_verify_keys] al final (con las tablas).
+    if n.get("sign_secret_seed") is not None:
+        lines.append("sign_secret_seed = " + q(str(n["sign_secret_seed"])))
+    if n.get("bootstrap_trust") is not None:
+        lines.append("bootstrap_trust = " + q(str(n["bootstrap_trust"])))
     # Self-registration. sdn_url is the SDN's gRPC; the registration endpoint
     # lives on its HTTP admin, so derive that port rather than asking for a
     # second URL in node.yml.
@@ -190,6 +214,11 @@ def render_orr(n, out):
     peers = n.get("peers") or {}           # orr_id -> qkc_id
     if peers:
         lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
+    orr_cert = n.get("cert_name", req(n, "orr_id", "orr"))
+    lines += control_tls_lines(n, orr_cert, "client")
+    pvk = n.get("peer_verify_keys") or {}  # orr_id -> base64(ML-DSA verify key)
+    if pvk:
+        lines += ["", "[peer_verify_keys]"] + [q(str(k)) + " = " + q(str(v)) for k, v in pvk.items()]
     pg = n.get("peer_grpc_addrs") or {}    # orr_id -> grpc url
     if pg:
         lines += ["", "[peer_grpc_addrs]"] + [str(k) + " = " + q(v) for k, v in pg.items()]
@@ -222,8 +251,12 @@ def render_dkms(n, out):
         "[tls]",
         "cert_path = " + q(certs + "/" + node_id + ".crt"),
         "key_path = " + q(certs + "/" + node_id + ".key"),
-        "sae_client_ca = " + q(certs + "/ca.crt"),
-        "peer_dkms_ca = " + q(certs + "/ca.crt"),
+        # Dos raíces separadas (docs/SECURITY.md §2): SAEs verificados por
+        # sae-ca; peers DKMS y control plane por net-ca. Antes ambas eran
+        # ca.crt, lo que hacía que un cert de SAE valiera como cert de DKMS.
+        "sae_client_ca = " + q(certs + "/sae-ca.crt"),
+        "peer_dkms_ca = " + q(certs + "/net-ca.crt"),
+        "control_plane_ca = " + q(certs + "/net-ca.crt"),
         "",
         "[southbound]",
         "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
@@ -258,23 +291,47 @@ def render_dkms(n, out):
 
 
 # ─────────────────────────────── SDN ────────────────────────────────────────
+def control_tls_lines(n, node_id, kind):
+    """Optional [tls] block for control-plane mTLS (docs/SECURITY.md §Fase 3).
+    Emitted only when node.yml sets `control_tls: true` — default is plaintext,
+    so existing local-mesh/testbed deployments are unaffected. `kind` selects
+    the field shape: the SDN is a server (cert/key/client_ca), orr/qkc are
+    clients (cert/key/control_plane_ca)."""
+    if not n.get("control_tls"):
+        return []
+    certs = n.get("certs_dir", "/config/certs")
+    lines = ["", "[tls]",
+             "cert_path = " + q(certs + "/" + node_id + ".crt"),
+             "key_path = " + q(certs + "/" + node_id + ".key")]
+    if kind == "server":
+        lines.append("client_ca = " + q(certs + "/net-ca.crt"))
+    else:
+        lines.append("control_plane_ca = " + q(certs + "/net-ca.crt"))
+    return lines
+
+
 def render_sdn(n, out):
     """The SDN no longer takes a topology: it builds one from what the modules
     announce (POST /register/{qkc,orr,dkms}). So its node.yml is just its own
     listen addresses and timers."""
     p = dict(PORTS["sdn"]); p.update(n.get("ports") or {})
     bind = n.get("listen_ip", "0.0.0.0")
-    write(os.path.join(out, "default.toml"),
-          "node_id = \"sdn\"\n"
-          "grpc_addr = " + q(bind + ":" + str(p["grpc"])) + "\n"
-          "http_addr = " + q(bind + ":" + str(p["http"])) + "\n"
-          "metrics_addr = " + q(bind + ":" + str(p["metrics"])) + "\n"
-          "default_policy = \"shortest_hops\"\n"
-          "mcf_period_ms = " + str(int(n.get("mcf_period_ms", 5000))) + "\n"
-          "push_debounce_ms = 100\n"
-          # How long a module may go quiet before being dropped. Must exceed
-          # the modules' sdn_announce_secs; 0 disables expiry.
-          "presence_ttl_secs = " + str(int(n.get("presence_ttl_secs", 90))) + "\n")
+    lines = [
+        "node_id = \"sdn\"",
+        "grpc_addr = " + q(bind + ":" + str(p["grpc"])),
+        "http_addr = " + q(bind + ":" + str(p["http"])),
+        "metrics_addr = " + q(bind + ":" + str(p["metrics"])),
+        "default_policy = \"shortest_hops\"",
+        "mcf_period_ms = " + str(int(n.get("mcf_period_ms", 5000))),
+        "push_debounce_ms = 100",
+        # How long a module may go quiet before being dropped. Must exceed
+        # the modules' sdn_announce_secs; 0 disables expiry.
+        "presence_ttl_secs = " + str(int(n.get("presence_ttl_secs", 90))),
+    ]
+    if n.get("http_ro_port"):
+        lines.append("http_ro_addr = " + q(bind + ":" + str(int(n["http_ro_port"]))))
+    lines += control_tls_lines(n, "sdn", "server")
+    write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
 
 # ───────────────────────────── quditto ──────────────────────────────────────

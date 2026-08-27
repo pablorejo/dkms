@@ -13,13 +13,23 @@
 //! `common::crypto::pqc`.
 
 use common::crypto::pqc::{kem_for, Kem, PqcError};
+use zeroize::Zeroizing;
 
 /// Par ML-KEM persistente del ORR mientras dure el proceso.
 pub struct OrrIdentity {
     pub orr_id: String,
     pub suite: String,
     pub public_key: Vec<u8>,
-    pub secret_key: Vec<u8>,
+    /// Clave privada ML-KEM long-term. `Zeroizing` para borrarla del heap al
+    /// soltar la identidad (audit M-1): es el único secreto de larga vida que
+    /// no estaba envuelto (el resto —pending_sk, ephemeral_sks, bootstrap/
+    /// master secrets— ya van en Zeroizing en su almacenamiento).
+    pub secret_key: Zeroizing<Vec<u8>>,
+    /// Semilla ML-DSA (32 B) de la identidad de **firma** estable de este ORR
+    /// (§Fase 6 PQC). `None` → no firma sus anuncios de pubkey. A diferencia de
+    /// la clave ML-KEM (efímera), esta viene de config y es estable, así que el
+    /// peer puede verificarla con una clave pública fija.
+    pub sign_seed: Option<Zeroizing<Vec<u8>>>,
     /// Instancia `Kem` para esta suite. Se mantiene para reutilizar el
     /// dispatch (encap/decap) sin volver a llamar a `kem_for` en cada
     /// mensaje.
@@ -36,9 +46,34 @@ impl OrrIdentity {
             orr_id: orr_id.into(),
             suite: kp.suite,
             public_key: kp.public,
-            secret_key: kp.secret,
+            secret_key: Zeroizing::new(kp.secret),
+            sign_seed: None,
             kem,
         })
+    }
+
+    /// Fija la semilla ML-DSA de firma (de config). Consuming builder.
+    pub fn with_sign_seed(mut self, seed: Option<Vec<u8>>) -> Self {
+        self.sign_seed = seed.map(Zeroizing::new);
+        self
+    }
+
+    /// Firma el anuncio `(orr_id, suite, public_key)` con la identidad ML-DSA,
+    /// si está configurada. `None` si este ORR no tiene semilla de firma.
+    pub fn sign_pubkey_announcement(&self) -> Option<Vec<u8>> {
+        let seed = self.sign_seed.as_deref()?;
+        match common::crypto::pqc_sign::sign_orr_pubkey(
+            seed,
+            &self.orr_id,
+            &self.suite,
+            &self.public_key,
+        ) {
+            Ok(sig) => Some(sig),
+            Err(e) => {
+                tracing::warn!(error = ?e, "orr: fallo al firmar el anuncio de pubkey");
+                None
+            }
+        }
     }
 
     /// Tamaño en bytes del shared secret (siempre 32 para ML-KEM, pero

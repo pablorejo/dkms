@@ -34,7 +34,7 @@ for m in "${NODES[@]}"; do
   for s in "${NODES[@]}"; do
     [ "$m" = "$s" ] && continue
 
-    enc=$(curl -sS --max-time 25 --cacert "$C/ca.crt" \
+    enc=$(curl -sS --max-time 25 --cacert "$C/net-ca.crt" \
           --cert "$C/sae_$m.crt" --key "$C/sae_$m.key" \
           -H 'Content-Type: application/json' -d '{"number":1,"size":256}' \
           "https://127.0.0.1:$(sae_port "$m")/api/v1/keys/sae_$s/enc_keys" 2>&1)
@@ -45,7 +45,7 @@ for m in "${NODES[@]}"; do
         bad=$((bad+1)); continue
     fi
 
-    dec=$(curl -sS --max-time 25 --cacert "$C/ca.crt" \
+    dec=$(curl -sS --max-time 25 --cacert "$C/net-ca.crt" \
           --cert "$C/sae_$s.crt" --key "$C/sae_$s.key" \
           -H 'Content-Type: application/json' \
           -d "{\"key_IDs\":[{\"key_ID\":\"$kid\"}]}" \

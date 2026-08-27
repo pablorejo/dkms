@@ -31,7 +31,7 @@ fi
 : > "$PIDS"
 
 # Asegura TLS
-if [ ! -f "$HERE/tls/ca.crt" ]; then
+if [ ! -f "$HERE/tls/net-ca.crt" ]; then
     echo "── falta TLS; generando…"
     "$HERE/gen-tls.sh"
 fi

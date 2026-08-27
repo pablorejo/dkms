@@ -120,7 +120,7 @@ dlogs_since() {
 enc_keys() {
     local host="$1" master="$2" slave="$3" number="${4:-1}" size="${5:-256}"
     on "$host" "curl -sSf --max-time 20 \
-        --cacert $CERTS_REMOTE/ca.crt \
+        --cacert $CERTS_REMOTE/net-ca.crt \
         --cert   $CERTS_REMOTE/$master.crt \
         --key    $CERTS_REMOTE/$master.key \
         -H 'Content-Type: application/json' \
@@ -132,7 +132,7 @@ enc_keys() {
 dec_keys() {
     local host="$1" slave="$2" master="$3" key_id="$4"
     on "$host" "curl -sSf --max-time 20 \
-        --cacert $CERTS_REMOTE/ca.crt \
+        --cacert $CERTS_REMOTE/net-ca.crt \
         --cert   $CERTS_REMOTE/$slave.crt \
         --key    $CERTS_REMOTE/$slave.key \
         -H 'Content-Type: application/json' \
@@ -144,7 +144,7 @@ dec_keys() {
 etsi_status() {
     local host="$1" me="$2" other="$3"
     on "$host" "curl -sSf --max-time 10 \
-        --cacert $CERTS_REMOTE/ca.crt \
+        --cacert $CERTS_REMOTE/net-ca.crt \
         --cert   $CERTS_REMOTE/$me.crt \
         --key    $CERTS_REMOTE/$me.key \
         https://127.0.0.1:$DKMS_SAE/api/v1/keys/$other/status"

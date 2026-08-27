@@ -19,11 +19,14 @@
 //!   POST   /demand                    DKMS reports (L_k, B_k, δ_k) per commodity
 //!   GET    /demand                    inspect the demand registry
 //!
-//! Auth/JWT is intentionally out of scope here; the web frontend gates
-//! access at its own layer.
+//! Autenticación del plano de control (docs/SECURITY.md §Fase 3): cuando
+//! `[tls]` está configurado, `http_addr` es mTLS y las rutas mutantes exigen
+//! un cert de la CA de red cuyo SAN case con el id anunciado (un módulo solo
+//! se anuncia a sí mismo / rebindea sus SAEs). Sin `[tls]` el SDN sirve todo
+//! en claro (comportamiento histórico; el web frontend gatea a su capa).
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Extension, Path as AxumPath, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
@@ -32,11 +35,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
+    config::SdnTlsCfg,
     demand::{CommodityDemand, DemandReport},
     error::SdnError,
+    mtls::PeerCertIdentity,
     presence::Kind,
     routing,
     service::SdnService,
@@ -303,8 +308,12 @@ async fn list_sae_bindings(
 /// heartbeat, and an unchanged announcement leaves the topology version alone.
 async fn announce_qkc(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(reg): Json<QkcAnnounce>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "qkc") {
+        return resp;
+    }
     let mut out = svc.topology.announce_qkc(&reg);
     // Un QKC no tiene ancla: siempre entra, así que siempre cuenta como vivo.
     svc.presence.touch(Kind::Qkc, &reg.id);
@@ -326,8 +335,12 @@ async fn announce_qkc(
 /// An ORR announcing itself, anchored to its QKC.
 async fn announce_orr(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(reg): Json<OrrAnnounce>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "orr") {
+        return resp;
+    }
     let mut out = svc.topology.announce_orr(&reg);
     // Solo si entró: lo que no está en la topología no puede caducar de ella.
     if out.accepted {
@@ -343,8 +356,12 @@ async fn announce_orr(
 /// A DKMS announcing itself, anchored to its ORR.
 async fn announce_dkms(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(reg): Json<DkmsAnnounce>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "dkms") {
+        return resp;
+    }
     let mut out = svc.topology.announce_dkms(&reg);
     if out.accepted {
         svc.presence.touch(Kind::Dkms, &reg.id);
@@ -383,8 +400,12 @@ struct SaeUpdatePayload {
 
 async fn register_sae(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(p): Json<SaeCreatePayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(resp) = require_sae_owner(identity.as_deref(), p.dkms_id.as_deref()) {
+        return resp;
+    }
     let target = p.dkms_target.as_ref().map(|t| (t.ip.as_str(), t.port));
     match svc
         .topology
@@ -430,8 +451,12 @@ async fn register_sae_bulk(
 async fn update_sae(
     State(svc): State<SdnService>,
     AxumPath(sae_id): AxumPath<String>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(p): Json<SaeUpdatePayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(resp) = require_sae_owner(identity.as_deref(), p.dkms_id.as_deref()) {
+        return resp;
+    }
     let target = p.dkms_target.as_ref().map(|t| (t.ip.as_str(), t.port));
     match svc
         .topology
@@ -624,10 +649,91 @@ fn http_status_for(e: &SdnError) -> (StatusCode, String) {
     (code, msg)
 }
 
+// ---------------- identity binding ------------------------------------------
+
+/// Normaliza un SAN de nodo a su id: quita los prefijos de esquema que emite
+/// `docker/gen-certs.sh` (`dkms://<id>`, `urn:dkms:node:<id>`) y se queda con
+/// el último segmento de una URI con path. Un SAN ya pelado se devuelve igual.
+fn node_id_from_san(san: &str) -> &str {
+    for prefix in ["urn:dkms:node:", "dkms://"] {
+        if let Some(rest) = san.strip_prefix(prefix) {
+            return rest.rsplit('/').next().unwrap_or(rest);
+        }
+    }
+    san
+}
+
+/// ¿El cert del peer (si lo hay) autoriza a actuar como `claimed_id`?
+///
+/// - `None` (plano en claro, sin mTLS): se permite — preserva el
+///   comportamiento histórico donde el registro no estaba autenticado.
+/// - `Some` con SAN que casa `claimed_id`: permitido.
+/// - `Some` con SAN distinto o ausente: denegado.
+fn identity_authorizes(identity: Option<&PeerCertIdentity>, claimed_id: &str) -> bool {
+    match identity.and_then(|i| i.san.as_deref()) {
+        None => identity.is_none(), // sin cert (plaintext) ok; cert sin SAN no
+        Some(san) => node_id_from_san(san) == claimed_id,
+    }
+}
+
+/// Traduce la decisión a `Result` para los handlers. `who` es para el log.
+fn require_identity(
+    identity: Option<&PeerCertIdentity>,
+    claimed_id: &str,
+    who: &str,
+) -> Result<(), axum::response::Response> {
+    if identity_authorizes(identity, claimed_id) {
+        return Ok(());
+    }
+    let san = identity.and_then(|i| i.san.clone());
+    warn!(claimed = %claimed_id, cert_san = ?san, %who, "sdn: identity mismatch, rejecting");
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({"detail": format!("cert identity does not authorize {who} '{claimed_id}'")})),
+    )
+        .into_response())
+}
+
+/// Autoriza una operación sobre un SAE: un DKMS solo puede crear/rebindear
+/// SAEs que residan en sí mismo, luego el cert debe casar con `dkms_id`. En
+/// mTLS exige que `dkms_id` esté presente (no se puede autorizar un bind sin
+/// dueño). En claro (sin cert) se permite — comportamiento histórico.
+fn require_sae_owner(
+    identity: Option<&PeerCertIdentity>,
+    dkms_id: Option<&str>,
+) -> Result<(), axum::response::Response> {
+    if identity.is_none() {
+        return Ok(());
+    }
+    match dkms_id {
+        Some(id) => require_identity(identity, id, "sae-owner"),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"detail": "mTLS: SAE bind must name its owning dkms_id"})),
+        )
+            .into_response()),
+    }
+}
+
 // ---------------- server -----------------------------------------------------
 
-pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
-    let app = Router::new()
+/// Rutas mutantes (registro de nodos, rebind de SAE): en mTLS exigen cert.
+fn mutating_routes() -> Router<SdnService> {
+    Router::new()
+        .route("/register/qkc", post(announce_qkc))
+        .route("/register/orr", post(announce_orr))
+        .route("/register/dkms", post(announce_dkms))
+        .route("/sae", post(register_sae))
+        .route("/sae-bulk", post(register_sae_bulk))
+        .route("/sae/:sae_id", put(update_sae).delete(delete_sae))
+        .route("/link-capacity", post(update_link_capacity))
+        .route("/demand", post(post_demand))
+}
+
+/// Rutas de solo lectura (web UI / inspección). También servidas en claro
+/// en `http_ro_addr` cuando el mTLS está activo.
+fn readonly_routes() -> Router<SdnService> {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/topology", get(get_topology))
         .route("/qkcs", get(get_qkcs))
@@ -635,23 +741,56 @@ pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
         .route("/dkms", get(get_dkms_all))
         .route("/saes", get(get_saes))
         .route("/links", get(get_links))
-        .route("/register/qkc", post(announce_qkc))
-        .route("/register/orr", post(announce_orr))
-        .route("/register/dkms", post(announce_dkms))
-        .route("/sae", post(register_sae))
-        .route("/sae-bulk", post(register_sae_bulk))
-        .route("/sae/:sae_id", put(update_sae).delete(delete_sae))
         .route("/sae/:sae_id/binding", get(get_sae_binding))
         .route("/sae-bindings/:dkms_id", get(list_sae_bindings))
-        .route("/link-capacity", post(update_link_capacity))
         .route("/paths", post(compute_path))
         .route("/rate/:dkms_id", get(get_rate))
-        .route("/demand", post(post_demand).get(get_demand))
+        .route("/demand", get(get_demand))
         .route("/wcmp", get(get_wcmp))
-        .with_state(svc);
+}
+
+fn full_router(svc: SdnService) -> Router {
+    mutating_routes()
+        .merge(readonly_routes())
+        .with_state(svc)
+}
+
+pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
+    serve_with_tls(svc, addr, None, None).await
+}
+
+/// Sirve el plano HTTP. Con `tls = Some`, `addr` pasa a mTLS (rutas mutantes
+/// autenticadas) y las read-only se sirven además en claro en `ro_addr`. Sin
+/// `tls`, todo va en claro en `addr` (comportamiento histórico).
+pub async fn serve_with_tls(
+    svc: SdnService,
+    addr: &str,
+    tls: Option<&SdnTlsCfg>,
+    ro_addr: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(tls) = tls else {
+        let listener = TcpListener::bind(addr).await?;
+        info!(%addr, "sdn HTTP listening (plaintext)");
+        axum::serve(listener, full_router(svc)).await?;
+        return Ok(());
+    };
+
+    let server_cfg = common::tls::server_config(&tls.cert_path, &tls.key_path, Some(&tls.client_ca))?;
     let listener = TcpListener::bind(addr).await?;
-    info!(%addr, "sdn HTTP listening");
-    axum::serve(listener, app).await?;
+    info!(%addr, "sdn HTTP listening (mTLS)");
+    let mtls = crate::mtls::serve_mtls(listener, server_cfg, full_router(svc.clone()));
+
+    if let Some(ro) = ro_addr {
+        let ro_listener = TcpListener::bind(ro).await?;
+        info!(ro_addr = %ro, "sdn HTTP read-only listening (plaintext)");
+        let ro_router = readonly_routes().with_state(svc);
+        tokio::select! {
+            r = mtls => r?,
+            r = async move { axum::serve(ro_listener, ro_router).await } => r?,
+        }
+    } else {
+        mtls.await?;
+    }
     Ok(())
 }
 
@@ -662,6 +801,48 @@ mod tests {
 
     use super::*;
     use crate::{demand::CommodityDemand, service::tests::make_service, service::SdnService};
+
+    fn ident(san: &str) -> PeerCertIdentity {
+        PeerCertIdentity {
+            san: Some(san.to_owned()),
+        }
+    }
+
+    #[test]
+    fn node_id_from_san_strips_schemes() {
+        assert_eq!(node_id_from_san("dkms://dkms-1"), "dkms-1");
+        assert_eq!(node_id_from_san("urn:dkms:node:dkms-1"), "dkms-1");
+        assert_eq!(node_id_from_san("dkms://org/dkms-1"), "dkms-1");
+        assert_eq!(node_id_from_san("dkms-1"), "dkms-1");
+    }
+
+    #[test]
+    fn plaintext_is_allowed_but_wrong_cert_is_not() {
+        // Sin cert (plano en claro): se permite — comportamiento histórico.
+        assert!(identity_authorizes(None, "dkms-1"));
+        // Cert cuyo SAN casa: permitido.
+        assert!(identity_authorizes(Some(&ident("dkms://dkms-1")), "dkms-1"));
+        // Cert de OTRO nodo intentando anunciar dkms-1: denegado.
+        assert!(!identity_authorizes(Some(&ident("dkms://dkms-2")), "dkms-1"));
+        // Cert sin SAN: denegado.
+        assert!(!identity_authorizes(
+            Some(&PeerCertIdentity { san: None }),
+            "dkms-1"
+        ));
+    }
+
+    #[test]
+    fn sae_owner_requires_matching_dkms_under_mtls() {
+        // En claro: cualquier cosa pasa.
+        assert!(require_sae_owner(None, Some("dkms-9")).is_ok());
+        assert!(require_sae_owner(None, None).is_ok());
+        // mTLS: el dkms_id del bind debe casar con el cert.
+        let id = ident("dkms://dkms-1");
+        assert!(require_sae_owner(Some(&id), Some("dkms-1")).is_ok());
+        assert!(require_sae_owner(Some(&id), Some("dkms-2")).is_err());
+        // mTLS sin dueño nombrado: denegado.
+        assert!(require_sae_owner(Some(&id), None).is_err());
+    }
 
     /// Bind a minimal SDN HTTP router (just the demand endpoints) to
     /// 127.0.0.1:0 and return the concrete `http://127.0.0.1:<port>`

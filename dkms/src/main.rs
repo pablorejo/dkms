@@ -61,6 +61,29 @@ fn derive_sdn_http_url(grpc_url: &str) -> String {
     format!("http://{host}:{http_port}")
 }
 
+/// `ClientTlsConfig` para el gRPC dkms→SDN si `sdn_endpoint` es https:
+/// presenta el cert de este DKMS y verifica al SDN con `control_plane_ca`
+/// (fallback a `peer_dkms_ca`, la misma CA de red). `None` si es http (claro).
+fn build_control_plane_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::ClientTlsConfig>> {
+    if !cfg.southbound.sdn_endpoint.trim_start().to_ascii_lowercase().starts_with("https://") {
+        return Ok(None);
+    }
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+    let ca_path = cfg
+        .tls
+        .control_plane_ca
+        .as_deref()
+        .unwrap_or(&cfg.tls.peer_dkms_ca);
+    let ca = std::fs::read(ca_path).with_context(|| format!("read control_plane_ca {ca_path:?}"))?;
+    let cert = std::fs::read(&cfg.tls.cert_path).context("read tls.cert_path")?;
+    let key = std::fs::read(&cfg.tls.key_path).context("read tls.key_path")?;
+    Ok(Some(
+        ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca))
+            .identity(Identity::from_pem(cert, key)),
+    ))
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -70,9 +93,10 @@ async fn main() -> Result<()> {
         std::env::set_var("CONFIG_DIR", d);
     }
 
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok(); // idempotente; ignora si ya estaba puesto
+    // Provider PQC (ML-DSA + clásicos) como default del proceso: así reqwest
+    // (peer_client, announcers) y tonic pueden cargar/verificar certs ML-DSA,
+    // no solo `common::tls`. Idempotente. Ver common::tls_pqc.
+    let _ = common::tls_pqc::install_process_default();
 
     let cfg: DkmsConfig = common::config::load_config("dkms")?;
     info!(node_id = %cfg.node_id, "dkms starting");
@@ -137,11 +161,15 @@ async fn main() -> Result<()> {
     // `sdn = None` permanentemente: ni `SdnSaeResolver` ni el bucle de
     // `stream_topology` se cablean, y el DKMS responde 404 para todo
     // `enc_keys` con peer SAE remoto hasta que lo reinicies.
+    // mTLS del plano de control gRPC si `sdn_endpoint` es https: presentamos
+    // el cert de este DKMS y verificamos al SDN con control_plane_ca (fallback
+    // a peer_dkms_ca, la misma CA de red). docs/SECURITY.md §Fase 3.
+    let sdn_grpc_tls = build_control_plane_tls(&cfg)?;
     let sdn = {
         let mut last_err: Option<String> = None;
         let mut connected: Option<std::sync::Arc<SdnClient>> = None;
         for attempt in 0..30 {
-            match SdnClient::connect(&cfg.southbound, None).await {
+            match SdnClient::connect(&cfg.southbound, sdn_grpc_tls.clone()).await {
                 Ok(c) => {
                     info!(
                         endpoint = %cfg.southbound.sdn_endpoint,
@@ -321,10 +349,20 @@ async fn main() -> Result<()> {
                 ack_socket_addr = Some(a);
             }
             let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
+            let ctrl_ca = cfg
+                .tls
+                .control_plane_ca
+                .as_deref()
+                .unwrap_or(&cfg.tls.peer_dkms_ca);
             let sdn_http = Arc::new(
-                SdnHttpClient::new(
+                SdnHttpClient::new_with_tls(
                     sdn_http_url,
                     std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
+                    Some(common::http::ClientTls {
+                        ca_path: ctrl_ca,
+                        cert_path: &cfg.tls.cert_path,
+                        key_path: &cfg.tls.key_path,
+                    }),
                 )
                 .context("sdn http client")?,
             );

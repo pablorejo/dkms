@@ -103,10 +103,26 @@ impl SdnAnnouncer {
             }
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .ok()?;
+        // mTLS si el SDN está en https: presentamos el cert de este DKMS
+        // (firmado por la CA de red) y verificamos al SDN con control_plane_ca
+        // (fallback a peer_dkms_ca, que es la misma CA de red).
+        let ctrl_ca = cfg
+            .tls
+            .control_plane_ca
+            .as_deref()
+            .unwrap_or(&cfg.tls.peer_dkms_ca);
+        let tls = common::http::ClientTls {
+            ca_path: ctrl_ca,
+            cert_path: &cfg.tls.cert_path,
+            key_path: &cfg.tls.key_path,
+        };
+        let http = match common::http::announcer_client(&base, Some(tls), Duration::from_secs(5)) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "no pude construir el cliente de anuncio (TLS?); no me anuncio");
+                return None;
+            }
+        };
 
         // Mis SAE: las entradas de `sae_bindings` que apuntan a mí. La SDN las
         // necesita para resolver `sae → DKMS` cuando un SAE pide claves contra

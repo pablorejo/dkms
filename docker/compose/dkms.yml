@@ -7,4 +7,4 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
-      - ./certs:/config/certs:ro          # ca.crt + <node_id>.crt + <node_id>.key
+      - ./certs:/config/certs:ro          # net-ca.crt + sae-ca.crt + <node_id>.crt + <node_id>.key

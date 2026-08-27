@@ -136,6 +136,12 @@ message GetPublicKeyResponse {
   bytes  public_key = 1;   // raw ML-KEM pubkey bytes (ej. 1184 B para ml-kem-768)
   string suite      = 2;   // nombre de la suite, p.ej. "ml-kem-768"
   .dkms.common.v1.NodeId orr_id = 3;
+  // Firma ML-DSA (FIPS 204) sobre (orr_id ‖ suite ‖ public_key) con la
+  // identidad de firma estable del ORR (docs/SECURITY.md §Fase 6 PQC). Vacía
+  // si el ORR no tiene `sign_secret_seed`. El peer la verifica con la
+  // `peer_verify_keys[orr_id]` configurada — cierra el MITM sobre GetPublicKey
+  // sin necesidad de persistir la identidad ML-KEM (que sigue siendo efímera).
+  bytes  signature  = 4;
 }
 
 message EstablishSecretRequest {

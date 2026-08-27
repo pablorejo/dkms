@@ -40,21 +40,26 @@ async fn handle_ext_keys(
     }
 }
 
-#[instrument(skip(_svc, peer, ack))]
+#[instrument(skip(svc, peer, ack))]
 async fn handle_ext_keys_ack(
-    State(_svc): State<DkmsService>,
+    State(svc): State<DkmsService>,
     peer: DkmsPeer,
     Json(ack): Json<Etsi020ExtKeyAckContainer>,
 ) -> Response {
-    // Hoy el flujo síncrono cubre el reembolso de tokens. Loggeamos por si
-    // un peer prefiere ACK diferido.
+    // ACK autenticado por mTLS: la identidad del emisor es su cert
+    // (`peer.node_id`), no un campo del cuerpo. Movemos las claves de
+    // `ack_pending` a `buffer_enc` (docs/SECURITY.md §Fase 4). Es la variante
+    // segura del socket TCP plano heredado; hoy los ACKs salientes aún usan el
+    // socket, así que esta ruta solo actúa si un peer decide usarla.
+    let matched = svc.handle_incoming_ack(&peer.node_id, &ack.key_ids);
     info!(
         peer = %peer.node_id,
         ack_status = ?ack.ack_status,
         keys = ack.key_ids.len(),
-        "received deferred ETSI 020 ack"
+        matched,
+        "received ETSI 020 ack"
     );
-    Json(serde_json::json!({"status": "ok"})).into_response()
+    Json(serde_json::json!({"status": "ok", "matched": matched})).into_response()
 }
 
 #[instrument(skip(_svc))]

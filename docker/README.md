@@ -101,6 +101,25 @@ todas. Los `metrics` y el 19002 pueden quedarse cerrados.
 Override de puertos: bloque `ports:` en el `node.yml` del módulo — solo
 necesario si una máquina corre **varios nodos del mismo rol** (p. ej. tests).
 
+### Seguridad y firewall (léelo — modelo completo en `docs/SECURITY.md`)
+
+La autenticación fuerte está **solo** donde debe: mTLS DKMS↔SAE (siempre) y,
+opt-in, el plano de control (SDN, announce, gRPC) y el handshake PQC QKC↔QKC.
+El resto **depende de que estos puertos vivan en red confiable**:
+
+- **`grpc` del DKMS (20007)**: plano de operador SIN auth; su RPC `Drain` borra
+  todos los buffers de una llamada. Bindea a **localhost por defecto**; si lo
+  abres, firewaléalo a la red interna. Nunca entre instituciones.
+- **`ack` del DKMS (20009)**: TCP plano sin auth hoy (migración a ETSI-020
+  pendiente). Ábrelo solo entre los DKMS que se enlazan.
+- **`local`/`admin` del QKC, `grpc` del ORR hacia su DKMS**: intra-institución.
+  DKMS↔ORR lleva material de clave en claro en ese salto: **deben compartir
+  host o red L2 confiable**.
+- **`metrics` (todos)**: sin auth y responden a cualquier path — red interna.
+- **SDN `http`/`grpc` (19000/19002)**: en multi-host, actívales mTLS
+  (`control_tls: true` en su `node.yml` + certs de `net-ca`) — si no, cualquiera
+  con acceso de red puede registrar nodos o rebindear SAEs.
+
 ## Paso 0 (mantenedor): construir y publicar las imágenes
 
 Lo hace **una sola persona, una vez por versión** — las instituciones solo
@@ -409,16 +428,17 @@ por el 20009). Es el único módulo con TLS, así que tiene un paso extra.
 .../docker/gen-certs.sh dkms-1 10.0.0.11 ./certs
 ```
 
-Produce `ca.crt`/`ca.key` (solo la primera vez — después **reutiliza** la CA
-que encuentre en el directorio) y `dkms-1.crt`/`dkms-1.key` con SAN
-`URI:dkms://dkms-1, IP:10.0.0.11, DNS:localhost`.
+Produce **dos raíces** `net-ca.crt`/`net-ca.key` (nodos) y
+`sae-ca.crt`/`sae-ca.key` (SAEs) — solo la primera vez, después **reutiliza**
+las que encuentre — y `dkms-1.crt`/`dkms-1.key` (firmado por net-ca) con SAN
+`URI:dkms://dkms-1, IP:10.0.0.11, DNS:localhost`. Ver `docs/SECURITY.md` §2.
 
-**Multi-institución**: el mTLS exige raíz de confianza común. O una CA
-central emite el cert de cada institución (cada una manda su CSR o recibe su
-par), o cada institución tiene CA propia y se cross-firman. `ca.crt` se
-distribuye a todos; **`ca.key` no sale de quien firma**. El nombre del
-fichero de cert debe ser exactamente `<node_id>.crt`/`.key` — el binario los
-busca por ese nombre en `/config/certs`.
+**Multi-institución**: `net-ca` es la raíz COMÚN de la federación (el mTLS
+entre DKMS la exige); se distribuye `net-ca.crt` a todos y **`net-ca.key` no
+sale de quien firma**. `sae-ca` puede ser por institución (cada DKMS pone en
+`sae_client_ca` la CA de SUS SAEs). Separarlas impide que un cert de SAE valga
+como cert de DKMS. El nombre del fichero de cert de nodo debe ser exactamente
+`<node_id>.crt`/`.key` — el binario los busca por ese nombre en `/config/certs`.
 
 **Paso 2 — directorio y ficheros:**
 
@@ -591,13 +611,13 @@ Intercambio completo entre dos nodos (la prueba de que la red funciona):
 ```bash
 C=./certs
 # 1) sae_1 pide a SU dkms (nodo 1) una clave con sae_2
-curl -s --cacert $C/ca.crt --cert $C/sae_1.crt --key $C/sae_1.key \
+curl -s --cacert $C/net-ca.crt --cert $C/sae_1.crt --key $C/sae_1.key \
   -H 'Content-Type: application/json' -d '{"number":1,"size":256}' \
   https://10.0.0.11:20005/api/v1/keys/sae_2/enc_keys
 # -> {"keys":[{"key_ID":"<uuid>","key":"<b64>"}]}
 
 # 2) sae_2 recoge esa clave en el dkms del nodo 2
-curl -s --cacert $C/ca.crt --cert $C/sae_2.crt --key $C/sae_2.key \
+curl -s --cacert $C/net-ca.crt --cert $C/sae_2.crt --key $C/sae_2.key \
   -H 'Content-Type: application/json' -d '{"key_IDs":[{"key_ID":"<uuid>"}]}' \
   https://10.0.0.12:20005/api/v1/keys/sae_1/dec_keys
 # -> la misma "key" => end-to-end OK

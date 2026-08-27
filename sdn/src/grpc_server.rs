@@ -8,10 +8,13 @@ use common::proto::{
         Topology as ProtoTopology, TopologyEvent,
     },
 };
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tonic::{
+    transport::{Certificate, Identity, Server, ServerTlsConfig},
+    Request, Response, Status, Streaming,
+};
 use tracing::{info, instrument};
 
-use crate::{routing, service::SdnService};
+use crate::{config::SdnTlsCfg, routing, service::SdnService};
 
 pub struct SdnGrpc {
     pub svc: SdnService,
@@ -194,10 +197,24 @@ impl SdnControl for SdnGrpc {
     }
 }
 
-pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
+pub async fn serve(svc: SdnService, addr: &str, tls: Option<&SdnTlsCfg>) -> anyhow::Result<()> {
     let addr = addr.parse()?;
-    info!(%addr, "sdn gRPC listening");
-    Server::builder()
+    let mut builder = Server::builder();
+    if let Some(tls) = tls {
+        // mTLS del plano de control: presentamos el cert del SDN (net-ca) y
+        // exigimos cert cliente de la misma CA de red. docs/SECURITY.md §Fase 3.
+        let cert = std::fs::read(&tls.cert_path)?;
+        let key = std::fs::read(&tls.key_path)?;
+        let ca = std::fs::read(&tls.client_ca)?;
+        let server_tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(cert, key))
+            .client_ca_root(Certificate::from_pem(ca));
+        builder = builder.tls_config(server_tls)?;
+        info!(%addr, "sdn gRPC listening (mTLS)");
+    } else {
+        info!(%addr, "sdn gRPC listening (plaintext)");
+    }
+    builder
         .add_service(SdnControlServer::new(SdnGrpc { svc }))
         .serve(addr)
         .await?;

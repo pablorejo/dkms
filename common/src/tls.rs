@@ -43,15 +43,21 @@ pub fn server_config(
     let certs = load_certs(cert_path)?;
     let key = load_key(key_path)?;
 
-    let builder = ServerConfig::builder();
+    // Provider con ML-DSA (§Fase 5/6 PQC) además de RSA/ECDSA/EdDSA: acepta
+    // certs post-cuánticos y clásicos (retrocompatible durante la migración).
+    let provider = crate::tls_pqc::pqc_crypto_provider();
+    let builder = ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(TlsError::Rustls)?;
     let mut cfg = if let Some(ca) = client_ca {
         let mut roots = RootCertStore::empty();
         for c in load_certs(ca)? {
             roots.add(c)?;
         }
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|e| TlsError::BadPem(e.to_string()))?;
+        let verifier =
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .map_err(|e| TlsError::BadPem(e.to_string()))?;
         builder
             .with_client_cert_verifier(verifier)
             .with_single_cert(certs, key)?
@@ -71,6 +77,46 @@ pub fn server_config(
 }
 
 pub fn client_config(ca_path: Option<&Path>) -> Result<Arc<ClientConfig>, TlsError> {
+    let roots = root_store(ca_path)?;
+    let provider = crate::tls_pqc::pqc_crypto_provider();
+    Ok(Arc::new(
+        ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(TlsError::Rustls)?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
+/// Igual que [`client_config`] pero presentando un **cert de cliente** —
+/// el lado cliente de un mTLS. Lo usan los módulos que se conectan al SDN
+/// (o entre planos de control) firmados por la CA de red: el servidor
+/// verifica quién llama por el SAN del cert.
+///
+/// `ca_path` = trust root del servidor (la misma CA de red); `cert_path`
+/// / `key_path` = la identidad de este cliente. Si `ca_path` es `None`,
+/// usa las raíces webpki del sistema (para servidores públicos).
+pub fn client_config_mtls(
+    ca_path: Option<&Path>,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<Arc<ClientConfig>, TlsError> {
+    let roots = root_store(ca_path)?;
+    let certs = load_certs(cert_path)?;
+    let key = load_key(key_path)?;
+    let provider = crate::tls_pqc::pqc_crypto_provider();
+    Ok(Arc::new(
+        ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(TlsError::Rustls)?
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, key)?,
+    ))
+}
+
+/// Construye un `RootCertStore` desde un PEM (que puede ser un *bundle*
+/// multi-CA) o, si `None`, desde las raíces webpki del sistema.
+fn root_store(ca_path: Option<&Path>) -> Result<RootCertStore, TlsError> {
     let mut roots = RootCertStore::empty();
     if let Some(ca) = ca_path {
         for c in load_certs(ca)? {
@@ -79,9 +125,67 @@ pub fn client_config(ca_path: Option<&Path>) -> Result<Arc<ClientConfig>, TlsErr
     } else {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    Ok(Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    ))
+    Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn openssl(args: &[&str]) -> bool {
+        Command::new("openssl")
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// La API pública (`server_config`/`client_config_mtls`) carga certificados
+    /// **ML-DSA** (firma post-cuántica) end to end — el runtime usa el provider
+    /// PQC. Se salta si openssl no soporta ML-DSA (necesita 3.5+).
+    #[test]
+    fn public_api_loads_ml_dsa_certs() {
+        let dir = std::env::temp_dir().join(format!("tls_mldsa_api_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = |f: &str| dir.join(f).to_str().unwrap().to_string();
+        let key = |f: &str| {
+            openssl(&[
+                "genpkey", "-algorithm", "ML-DSA-65",
+                "-provparam", "ml-dsa.output_formats=seed-only", "-out", &p(f),
+            ])
+        };
+        if !key("ca.key")
+            || !openssl(&[
+                "req", "-x509", "-key", &p("ca.key"), "-out", &p("ca.crt"),
+                "-days", "2", "-subj", "/CN=ca",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+            ])
+        {
+            eprintln!("openssl sin ML-DSA; salto");
+            return;
+        }
+        for (n, eku) in [("srv", "serverAuth"), ("cli", "clientAuth")] {
+            assert!(key(&format!("{n}.key")));
+            assert!(openssl(&[
+                "req", "-new", "-key", &p(&format!("{n}.key")),
+                "-out", &p(&format!("{n}.csr")), "-subj", &format!("/CN={n}"),
+            ]));
+            let ext = dir.join(format!("{n}.ext"));
+            std::fs::write(&ext, format!("subjectAltName=DNS:localhost\nextendedKeyUsage={eku}\n"))
+                .unwrap();
+            assert!(openssl(&[
+                "x509", "-req", "-in", &p(&format!("{n}.csr")), "-CA", &p("ca.crt"),
+                "-CAkey", &p("ca.key"), "-CAcreateserial", "-days", "2",
+                "-out", &p(&format!("{n}.crt")), "-extfile", ext.to_str().unwrap(),
+            ]));
+        }
+
+        // Las funciones públicas cargan y construyen las configs con certs ML-DSA.
+        server_config(&dir.join("srv.crt"), &dir.join("srv.key"), Some(&dir.join("ca.crt")))
+            .expect("server_config con cert ML-DSA");
+        client_config_mtls(Some(&dir.join("ca.crt")), &dir.join("cli.crt"), &dir.join("cli.key"))
+            .expect("client_config_mtls con cert ML-DSA");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

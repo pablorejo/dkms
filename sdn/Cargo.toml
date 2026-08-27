@@ -42,5 +42,9 @@ parking_lot        = { workspace = true }
 arc-swap           = { workspace = true }
 uuid               = { workspace = true }
 dotenvy            = { workspace = true }
-reqwest            = { version = "0.12", default-features = false, features = ["json"] }
+reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures            = { workspace = true }
+rustls             = { workspace = true }
+tokio-rustls       = { workspace = true }
+hyper-util         = { workspace = true }
+x509-parser        = "0.16"

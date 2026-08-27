@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -240,6 +241,8 @@ mod tests {
 #[derive(Debug, Default)]
 pub struct PeerIncarnations {
     seen: DashMap<String, String>,
+    /// Último wipe por peer, para rate-limitar (ver `note_at`).
+    last_wipe: DashMap<String, std::time::Instant>,
 }
 
 impl PeerIncarnations {
@@ -252,18 +255,77 @@ impl PeerIncarnations {
     /// Devuelve `Some(anterior)` **sólo** si el peer se ha reiniciado. La
     /// primera vez que se le oye no lo es: es que acabamos de arrancar
     /// nosotros, y tirar el buffer ahí sería tirar material bueno en cada
-    /// arranque.
+    /// arranque. Sin cooldown (equivale a `note_at` con cooldown 0).
     pub fn note(&self, peer: &str, incarnation: &str) -> Option<String> {
+        self.note_at(peer, incarnation, std::time::Instant::now(), Duration::ZERO)
+    }
+
+    /// Igual que [`Self::note`] pero rate-limitando los wipes: si ya hicimos
+    /// uno para este peer hace menos de `cooldown`, no devuelve `Some` aunque
+    /// la encarnación haya cambiado. `incarnation` es un id aleatorio por
+    /// proceso y llega en un header de la entrega ORR **sin autenticar** (el
+    /// salto ORR es intra-institución, §1.2): un peer que la cambie en cada
+    /// mensaje podría, si no, vaciar nuestro buffer en bucle (DoS). Un
+    /// reinicio legítimo la cambia UNA vez, así que el cooldown no lo estorba.
+    pub fn note_at(
+        &self,
+        peer: &str,
+        incarnation: &str,
+        now: std::time::Instant,
+        cooldown: Duration,
+    ) -> Option<String> {
         let previous = self
             .seen
             .insert(peer.to_string(), incarnation.to_string())?;
-        (previous != incarnation).then_some(previous)
+        if previous == incarnation {
+            return None;
+        }
+        if let Some(last) = self.last_wipe.get(peer) {
+            if now.duration_since(*last) < cooldown {
+                return None; // rate-limited: cambio demasiado frecuente
+            }
+        }
+        self.last_wipe.insert(peer.to_string(), now);
+        Some(previous)
     }
 }
 
 #[cfg(test)]
 mod incarnation_tests {
+    use std::time::{Duration, Instant};
+
     use super::PeerIncarnations;
+
+    #[test]
+    fn wipe_is_rate_limited_within_cooldown() {
+        // Un peer que cambia la incarnation en cada mensaje no puede tirar el
+        // buffer en bucle: solo el primer cambio (y luego uno por cooldown).
+        let inc = PeerIncarnations::new();
+        let t0 = Instant::now();
+        let cd = Duration::from_secs(30);
+        inc.note_at("dkms-2", "a", t0, cd); // primera vista, no wipe
+        // Ráfaga de cambios dentro del cooldown: solo el primero dispara wipe.
+        assert_eq!(
+            inc.note_at("dkms-2", "b", t0 + Duration::from_secs(1), cd),
+            Some("a".to_string()),
+            "el primer cambio sí tira el material viejo",
+        );
+        assert_eq!(
+            inc.note_at("dkms-2", "c", t0 + Duration::from_secs(2), cd),
+            None,
+            "un segundo cambio dentro del cooldown se ignora",
+        );
+        assert_eq!(
+            inc.note_at("dkms-2", "d", t0 + Duration::from_secs(3), cd),
+            None,
+        );
+        // Pasado el cooldown desde el último wipe, un cambio real vuelve a tirar.
+        assert_eq!(
+            inc.note_at("dkms-2", "e", t0 + Duration::from_secs(40), cd),
+            Some("d".to_string()),
+            "tras el cooldown un reinicio legítimo se atiende",
+        );
+    }
 
     #[test]
     fn the_first_sighting_of_a_peer_is_not_a_restart() {

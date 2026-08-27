@@ -53,6 +53,12 @@ pub mod suite {
 }
 
 /// Generated KEM key pair (bytes serializados, listos para enviar por la red).
+///
+/// Nota M-1 (audit): estos son bytes **transitorios**; los consumidores que
+/// persisten la `secret` la envuelven en `Zeroizing` en su sitio de
+/// almacenamiento (qkc `pending_sk`, orr `ephemeral_sks`, `OrrIdentity`). No se
+/// pone `Drop` aquí porque impediría mover los campos fuera del struct (varios
+/// callers destructuran `public`/`ciphertext`, que son públicos).
 #[derive(Clone, Debug)]
 pub struct KemKeypair {
     pub public: Vec<u8>,
@@ -60,7 +66,8 @@ pub struct KemKeypair {
     pub suite: String,
 }
 
-/// Salida de encapsulación.
+/// Salida de encapsulación. `ciphertext` es público; el `shared_secret` lo
+/// zeroiza el consumidor donde lo persiste (ver nota M-1 en [`KemKeypair`]).
 #[derive(Clone, Debug)]
 pub struct KemEncap {
     pub ciphertext: Vec<u8>,

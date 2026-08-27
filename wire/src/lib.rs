@@ -109,6 +109,20 @@ pub const FRAME_PQC_KEM_INIT: u8 = 0x21;
 /// headers van vacíos.
 pub const FRAME_PQC_KEM_RESP: u8 = 0x22;
 
+/// Variantes **autenticadas** del handshake PQC (docs/SECURITY.md §Fase 5).
+/// Mismo `payload = epoch_be(4) ‖ blob` que 0x21/0x22/0x20, pero con un tag
+/// HMAC-SHA256 de 32 B anexado al final (`payload ‖ tag`). El tag se calcula
+/// con `common::crypto::link_mac` sobre un PSK por enlace. Un peer viejo que
+/// no entienda estos kinds los ignora en silencio (ver `peer_server`), así
+/// que el rollout es por el flag `pqc_auth = off|prefer|require`.
+pub const FRAME_PQC_KEM_INIT_AUTH: u8 = 0x23;
+pub const FRAME_PQC_KEM_RESP_AUTH: u8 = 0x24;
+/// `FRAME_KEY_IDS_NOTIFY` autenticado (mismo payload ‖ tag de 32 B).
+pub const FRAME_KEY_IDS_NOTIFY_AUTH: u8 = 0x25;
+/// Reservados para un futuro handshake **firmado** (ML-DSA) — no usados aún.
+pub const FRAME_PQC_KEM_INIT_SIGNED: u8 = 0x26;
+pub const FRAME_PQC_KEM_RESP_SIGNED: u8 = 0x27;
+
 /// Valores del campo [`Frame::grade`] (byte RESERVED del prefijo).
 /// `0` = QKD-grade (todo el camino QKD; default), `1` = PQC-grade (≥1 salto PQC).
 pub const GRADE_QKD: u8 = 0;

@@ -55,6 +55,30 @@ pub struct SdnConfig {
     /// asignador `num` (`w = δ + peso·R/T`).
     #[serde(default = "default_num_fill_weight")]
     pub num_fill_weight: f64,
+
+    /// TLS del plano de control (docs/SECURITY.md §Fase 3). Opcional: si
+    /// falta, el SDN sirve HTTP y gRPC en claro (comportamiento actual,
+    /// para local-mesh/testbed). Si está, `http_addr` pasa a mTLS con las
+    /// rutas mutantes (registro, rebind de SAE) exigiendo cert de la CA de
+    /// red, y las rutas read-only se sirven además en claro en `http_ro_addr`
+    /// para el web frontend.
+    #[serde(default)]
+    pub tls: Option<SdnTlsCfg>,
+
+    /// Bind read-only en claro para el web UI cuando `tls` está activo.
+    /// Si `tls` es `None` se ignora (todo va por `http_addr` en claro).
+    #[serde(default)]
+    pub http_ro_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SdnTlsCfg {
+    /// Cert servidor del SDN (PEM, hoja primero), firmado por la CA de red.
+    pub cert_path: std::path::PathBuf,
+    /// Clave privada del cert servidor (PEM).
+    pub key_path: std::path::PathBuf,
+    /// CA de red: verifica los certs cliente de los módulos que se registran.
+    pub client_ca: std::path::PathBuf,
 }
 
 fn default_metrics() -> String {

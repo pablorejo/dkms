@@ -14,6 +14,7 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod http;
 pub mod ids;
 pub mod ipc;
 pub mod logging;
@@ -21,6 +22,7 @@ pub mod metrics;
 pub mod net;
 pub mod security;
 pub mod tls;
+pub mod tls_pqc;
 
 /// Auto-generated protobuf types and gRPC stubs.
 ///

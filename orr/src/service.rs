@@ -111,14 +111,24 @@ impl OrrService {
         // Identidad ML-KEM (long-term, regenerada cada vez que arranca
         // el proceso — TODO: persistir en disco si queremos pubkeys
         // estables entre reinicios).
-        let identity = Arc::new(OrrIdentity::generate(
-            cfg.orr_id.clone(),
-            &cfg.default_pqc_suite,
-        )?);
+        //
+        // Semilla ML-DSA de FIRMA (§Fase 6 PQC): de config, estable. Con ella
+        // el ORR firma su anuncio de pubkey aunque la ML-KEM sea efímera.
+        let sign_seed = match &cfg.sign_secret_seed {
+            Some(b64) => Some(BASE64.decode(b64).map_err(|e| {
+                OrrError::Relay(format!("sign_secret_seed base64 inválido: {e}"))
+            })?),
+            None => None,
+        };
+        let identity = Arc::new(
+            OrrIdentity::generate(cfg.orr_id.clone(), &cfg.default_pqc_suite)?
+                .with_sign_seed(sign_seed),
+        );
         info!(
             orr_id = %cfg.orr_id,
             suite = %identity.suite,
             pubkey_len = identity.public_key.len(),
+            signs_announcements = identity.sign_seed.is_some(),
             "orr.identity generated",
         );
 
@@ -130,13 +140,23 @@ impl OrrService {
             })?;
             peer_pubkeys.insert(orr_id.clone(), bytes);
         }
+        // Verifying keys ML-DSA de peers (§Fase 6 PQC).
+        let mut peer_verify_keys: HashMap<String, Vec<u8>> = HashMap::new();
+        for (orr_id, b64) in &cfg.peer_verify_keys {
+            let bytes = BASE64.decode(b64).map_err(|e| {
+                OrrError::Relay(format!("peer {orr_id} verify_key base64 inválido: {e}"))
+            })?;
+            peer_verify_keys.insert(orr_id.to_lowercase(), bytes);
+        }
 
         let cfg = Arc::new(cfg);
-        let peers = Arc::new(PeerRegistry::with_pubkeys(
+        let peers = Arc::new(PeerRegistry::with_all(
             cfg.peers.clone(),
             peer_pubkeys,
+            peer_verify_keys,
             cfg.orr_id.clone(),
             cfg.qkc_id,
+            cfg.bootstrap_trust,
         ));
 
         let (deliveries_tx, _) = broadcast::channel(cfg.deliver_queue_capacity.max(1));
@@ -890,7 +910,7 @@ impl OrrService {
             // actual y el encap subsiguiente produce un ciphertext que
             // la sk fresca sí puede decapsular.
             let pk = match bootstrap::try_fetch_pubkey(&addr).await {
-                Ok((fresh_pk, _suite, reported)) => {
+                Ok((fresh_pk, suite, reported, signature)) => {
                     let reported_lc = reported.to_lowercase();
                     if !reported_lc.is_empty() && reported_lc != peer_id_owned {
                         warn!(
@@ -898,6 +918,17 @@ impl OrrService {
                             reported = %reported,
                             addr = %addr,
                             "orr.passive_rebootstrap pubkey refresh reports different orr_id; aborting"
+                        );
+                        peers.clear_rebootstrap_inflight(&peer_id_owned);
+                        return;
+                    }
+                    // §Fase 6 PQC: la pubkey refrescada también se verifica.
+                    if peers.verify_announcement(&peer_id_owned, &suite, &fresh_pk, &signature)
+                        == crate::peers::SigVerdict::Reject
+                    {
+                        warn!(
+                            peer = %peer_id_owned, addr = %addr,
+                            "orr.passive_rebootstrap: firma ML-DSA inválida en el refresh; aborto"
                         );
                         peers.clear_rebootstrap_inflight(&peer_id_owned);
                         return;

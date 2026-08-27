@@ -15,10 +15,11 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use wire::{
     decode_notify_payload, read_frame, FRAME_KEY_IDS_NOTIFY, FRAME_PQC_KEM_INIT,
-    FRAME_PQC_KEM_RESP, FRAME_RECV, FRAME_RELAY,
+    FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED, FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH,
+    FRAME_PQC_KEM_RESP_SIGNED, FRAME_RECV, FRAME_RELAY,
 };
 
-use crate::{relay, service::QkcService};
+use crate::{pqc_handshake::RecvAuth, relay, service::QkcService};
 
 /// Máximo de frames `FRAME_RECV`/`FRAME_RELAY` simultáneos en vuelo
 /// por proceso. Backpressurea al peer si nos manda más rápido de lo
@@ -95,8 +96,12 @@ async fn handle_conn(
             // Handshake ML-KEM de enlaces PQC. Síncrono (encap/decap son
             // µs de CPU); los frames de un peer se procesan en orden, así
             // que no hay encap/decap concurrentes para un mismo enlace.
-            FRAME_PQC_KEM_INIT => handle_pqc(svc.clone(), frame, true),
-            FRAME_PQC_KEM_RESP => handle_pqc(svc.clone(), frame, false),
+            FRAME_PQC_KEM_INIT => handle_pqc(svc.clone(), frame, true, RecvAuth::Plain),
+            FRAME_PQC_KEM_RESP => handle_pqc(svc.clone(), frame, false, RecvAuth::Plain),
+            FRAME_PQC_KEM_INIT_AUTH => handle_pqc(svc.clone(), frame, true, RecvAuth::Hmac),
+            FRAME_PQC_KEM_RESP_AUTH => handle_pqc(svc.clone(), frame, false, RecvAuth::Hmac),
+            FRAME_PQC_KEM_INIT_SIGNED => handle_pqc(svc.clone(), frame, true, RecvAuth::Signed),
+            FRAME_PQC_KEM_RESP_SIGNED => handle_pqc(svc.clone(), frame, false, RecvAuth::Signed),
             other => {
                 debug!(kind = other, "qkc.peer_server.unknown_kind");
             }
@@ -129,7 +134,7 @@ fn handle_notify(svc: QkcService, frame: wire::Frame) {
 /// Handshake ML-KEM de un enlace PQC. `is_init = true` → el frame es un
 /// `FRAME_PQC_KEM_INIT` (somos respondedor); `false` → `FRAME_PQC_KEM_RESP`
 /// (somos iniciador). El payload lleva la pubkey o el ciphertext.
-fn handle_pqc(svc: QkcService, frame: wire::Frame, is_init: bool) {
+fn handle_pqc(svc: QkcService, frame: wire::Frame, is_init: bool, recv: RecvAuth) {
     let sender = frame.sender_id;
     let Some(link) = svc.link_to(sender) else {
         warn!(sender, "qkc.pqc: unknown neighbor");
@@ -140,8 +145,8 @@ fn handle_pqc(svc: QkcService, frame: wire::Frame, is_init: bool) {
         return;
     };
     if is_init {
-        pqc.handle_init(&frame.payload);
+        pqc.handle_init(&frame.payload, recv);
     } else {
-        pqc.handle_resp(&frame.payload);
+        pqc.handle_resp(&frame.payload, recv);
     }
 }

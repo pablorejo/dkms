@@ -49,12 +49,21 @@ impl SdnHttpClient {
     /// Construye el cliente. `base_url` debe ser un URL absoluto sin la
     /// barra final, p.ej. `http://127.0.0.1:50055`.
     pub fn new(base_url: impl Into<String>, rpc_timeout: Duration) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(rpc_timeout)
-            .build()
-            .map_err(|e| anyhow!("reqwest builder: {e}"))?;
+        Self::new_with_tls(base_url, rpc_timeout, None)
+    }
+
+    /// Igual que [`Self::new`] pero con material mTLS de cliente: se usa si el
+    /// `base_url` es `https://` (si no, se ignora y el cliente va en claro).
+    pub fn new_with_tls(
+        base_url: impl Into<String>,
+        rpc_timeout: Duration,
+        tls: Option<common::http::ClientTls<'_>>,
+    ) -> Result<Self> {
+        let base = base_url.into().trim_end_matches('/').to_string();
+        let http = common::http::announcer_client(&base, tls, rpc_timeout)
+            .map_err(|e| anyhow!("sdn http client: {e}"))?;
         Ok(Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: base,
             http,
             rpc_timeout,
         })
