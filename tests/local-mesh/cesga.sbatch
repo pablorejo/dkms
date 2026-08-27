@@ -5,6 +5,13 @@
 #SBATCH -c 32
 #SBATCH --mem=16G
 #SBATCH -t 01:30:00
+# singleton: dos de estas campañas NUNCA pueden compartir nodo — la malla usa
+# puertos fijos de 127.0.0.1, y dos jobs concurrentes se conectan a los módulos
+# del otro (medido 2026-08-25, jobs 9275360/9275361: 520k SSLCertVerificationError
+# porque los loaders de uno hablaban con los DKMS del otro, y un OOM por las dos
+# mallas en un nodo). Con singleton, jobs con este mismo nombre corren de uno en
+# uno; para paralelizar de verdad habría que parametrizar los puertos.
+#SBATCH -d singleton
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.out
 #
@@ -53,7 +60,18 @@ LINK_TYPE="${LINK_TYPE:-pqc}"
 THREADS="${THREADS:-1 4 16}"
 DURATION="${DURATION:-300}"
 
-module load gcc/12.3.0 rust/1.88.0
+# cmake: lo necesita highs-sys (backend `highs` de good-lp) para compilar HiGHS.
+# El módulo de rust puede no cargar si el montaje del árbol de módulos está
+# convaleciente (medido 2026-08-26: 40 jobs muertos en 3 s tras la avería del
+# clúster — el load moría entre binutils y gcc SOLO en los nodos de cómputo).
+# Reintentar con paciencia convierte esa muerte instantánea en una espera.
+for intento in $(seq 1 15); do
+    module load cmake gcc/12.3.0 rust/1.88.0 2>&1 || true
+    command -v rustc >/dev/null 2>&1 && rustc --version >/dev/null 2>&1 && break
+    echo "módulos incompletos (intento $intento/15); reintento en 60 s"
+    sleep 60
+done
+command -v rustc >/dev/null || { echo "FATAL: rust no cargó tras 15 intentos"; exit 1; }
 export CC=gcc CXX=g++
 export PROTOC="${PROTOC:-$HOME/opt/protoc/bin/protoc}"
 

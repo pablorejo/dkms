@@ -28,8 +28,6 @@ compitiendo por CPU con los módulos, y entonces lo que se mide es el generador
 de carga. Cada hilo mantiene un destino fijo, así que la conexión keep-alive
 sigue sirviendo para una sola ruta.
 """
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -60,9 +58,9 @@ def worker(idx: int, args, ctx: ssl.SSLContext, stop: threading.Event,
     path = f"/api/v1/keys/{slave}/enc_keys"
     body = json.dumps({"number": args.number, "size": args.size})
     hdrs = {"Content-Type": "application/json"}
-    conn: HTTPSConnection | None = None
+    conn = None  # type: ignore[var-annotated]  # HTTPSConnection|None; 3.6
     min_period = 1.0 / args.rate_cap if args.rate_cap > 0 else 0.0
-    throttled: dict[str, int] = {}
+    throttled = {}  # type: ignore[var-annotated]  # dict[str,int]; 3.6
     throttled_second = [int(time.time())]
 
     while not stop.is_set():
@@ -152,7 +150,7 @@ class KeyFiles:
 
     def __init__(self, base: str, split: bool) -> None:
         self.base, self.split = base, split
-        self.files: dict[str, object] = {}
+        self.files = {}  # type: ignore[var-annotated]  # dict[str,object]; 3.6
 
     def _fh(self, slave: str):
         key = slave if self.split else ""

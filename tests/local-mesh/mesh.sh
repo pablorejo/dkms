@@ -7,7 +7,8 @@
 # inventada para el test. No sustituye a `tests/testbed/`, que corre contra el
 # despliegue real por SSH: esto es lo que se puede repetir sin hardware.
 #
-#   mesh.sh up [N] [topo]       levanta N nodos (default 3, ring)
+#   mesh.sh up [N] [topo]       levanta N nodos (default 3, ring; custom lee
+#                              las aristas de DKMS_MESH_EDGES="1-2 2-3 ...")
 #   mesh.sh down               para todo
 #   mesh.sh topology           lo que ve la SDN
 #   mesh.sh edges              aristas + comprobación de conectividad
@@ -82,9 +83,10 @@ LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
 DIST_KM="${DKMS_MESH_DIST_KM:-5}"
-# Un quditto por arista. 21xxx no choca con los 20000+100n de los módulos ni
-# con los 19xxx de la SDN.
-qd_port() { echo $(( 21000 + $1 )); }
+# Un quditto por arista, en 28xxx: los módulos del nodo n usan 20000+(n-1)*100
+# …+9, así que con N=70 llegan a 26909 — el antiguo 21000+idx CHOCABA con los
+# puertos del nodo 11 en adelante (el modo qkd nunca había corrido con N>10).
+qd_port() { echo $(( 28000 + $1 )); }
 
 # Puertos: el nodo n ocupa el rango 20000+(n-1)*100 … +9. Con N≤10 no toca los
 # 19xxx de la SDN.
@@ -108,11 +110,19 @@ die() { echo "mesh: $*" >&2; exit 1; }
 # propiedad que sostiene todo el diseño de auto-configuración.
 build_topology() {  # build_topology <N>
     python3 - "$1" "$TOPO" "$SEED" <<'TOPO_PY' > "$DIR/topology.tsv"
-import random, sys
+import os, random, sys
 n, topo, seed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 edges = set()
 
-if topo == "star":
+if topo == "custom":
+    # Lista explicita de aristas en DKMS_MESH_EDGES: "1-2 2-3 3-10 ...".
+    # Para medir topologias concretas (Petersen, C_n puro, contraejemplos)
+    # sin inventar un generador por cada una.
+    for e in os.environ["DKMS_MESH_EDGES"].split():
+        a, b = sorted(int(x) for x in e.split("-"))
+        assert 1 <= a < b <= n, f"arista fuera de rango: {e}"
+        edges.add((a, b))
+elif topo == "star":
     edges = {(1, k) for k in range(2, n + 1)}
 elif topo == "random":
     rnd = random.Random(seed)
@@ -195,6 +205,10 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                         "$nb" "$(peer_port "$nb")"
                     printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s}\n' \
                         "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$DIST_KM"
+                elif [ -n "${DKMS_MESH_PQC_CAP:-}" ]; then
+                    # Capacidad PQC declarada; sin la variable se prueba el
+                    # default de la SDN (10 000 claves/s).
+                    echo "  - {neighbor_id: $nb, type: pqc, capacity_keys_per_s: $DKMS_MESH_PQC_CAP}"
                 else
                     echo "  - {neighbor_id: $nb, type: pqc}"
                 fi
@@ -263,7 +277,10 @@ EOF
         patch_dkms_toml "$DIR/cfg/dkms$n/default.toml"
 
         # Una sola CA para toda la malla: el mTLS entre DKMS exige raíz común.
-        bash "$GENCERTS" "dkms-$n" 127.0.0.1 "$DIR/certs" >/dev/null 2>&1
+        # DKMS_MESH_CERT_IP: IP extra en el SAN del cert de servidor (gen-certs
+        # añade siempre IP:127.0.0.1). Para clientes SAE externos a la máquina,
+        # p.ej. contenedores strongSwan que llegan por el gateway del bridge.
+        bash "$GENCERTS" "dkms-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
         bash "$GENCERTS" --sae "sae_$n" "$DIR/certs" >/dev/null 2>&1
     done
     echo "$total" > "$DIR/N"
@@ -290,7 +307,7 @@ if [ -n "\$QD_LINES" ]; then
   while read -r idx a b; do
     [ -n "\$idx" ] || continue
     mark "quditto\$idx"
-    nohup "$BIN/quditto" --listen "127.0.0.1:\$((21000 + idx))" \
+    nohup "$BIN/quditto" --listen "127.0.0.1:\$((28000 + idx))" \
         --r0 __R0__ --alpha __ALPHA__ --distance __DIST__ \
         > "$DIR/logs/quditto\$idx.log" 2>&1 &
     echo \$! > "$DIR/logs/quditto\$idx.pid"
@@ -342,7 +359,9 @@ topology_json() { curl -s --max-time 5 "http://127.0.0.1:$SDN_HTTP/topology"; }
 cmd_up() {
     local total=${1:-3}
     [ -n "${2:-}" ] && TOPO="$2"
-    case "$TOPO" in ring|star|random) ;; *) die "topología desconocida: $TOPO (ring|star|random)" ;; esac
+    case "$TOPO" in ring|star|random) ;;
+                    custom) [ -n "${DKMS_MESH_EDGES:-}" ] || die "topología custom sin DKMS_MESH_EDGES" ;;
+                    *) die "topología desconocida: $TOPO (ring|star|random|custom)" ;; esac
     case "$LINK_TYPE" in pqc|qkd) ;; *) die "DKMS_MESH_LINK_TYPE debe ser pqc o qkd" ;; esac
     # Los cinco, no sólo la SDN: faltando uno la malla arranca igual y lo que
     # se mide son once millones de ConnectionRefused.
@@ -351,7 +370,9 @@ cmd_up() {
     for b in "${needed[@]}"; do
         [ -x "$BIN/$b" ] || die "falta target/release/$b — cargo build --release"
     done
-    (( total >= 2 && total <= 10 )) || die "N entre 2 y 10 (los puertos son 20000+100n)"
+    # Tope 70: los puertos de nodo (20000+100n) deben quedar bajo los 28xxx
+    # de los quditto. El límite de verdad lo pone la memoria de la máquina.
+    (( total >= 2 && total <= 70 )) || die "N entre 2 y 70 (puertos 20000+100n < 28000)"
     echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"), enlaces $LINK_TYPE)"
     if [ "$LINK_TYPE" = qkd ]; then
         # cap = R0·10^(-alpha·d/10) es lo que la SDN usará como capacidad de
@@ -385,7 +406,7 @@ cmd_up() {
     curl -s --retry 40 --retry-delay 1 --retry-connrefused \
         "http://127.0.0.1:$SDN_HTTP/healthz" >/dev/null || die "la SDN no arrancó"
     local want=$(( total * 3 ))
-    if wait_for 180 "topology_json | python3 -c \"import sys,json;t=json.load(sys.stdin);print(str(t['qkcs']+t['orrs']+t['dkms']==$want).lower())\""; then
+    if wait_for $(( 120 + 6 * total )) "topology_json | python3 -c \"import sys,json;t=json.load(sys.stdin);print(str(t['qkcs']+t['orrs']+t['dkms']==$want).lower())\""; then
         echo "mesh: $want módulos registrados"
     else
         echo "mesh: AVISO — la topología no convergió a $want módulos" >&2
@@ -395,7 +416,7 @@ cmd_up() {
 
 cmd_down() {
     systemctl --user stop "$SCOPE.scope" >/dev/null 2>&1
-    pkill -f "$BIN/quditto --listen 127.0.0.1:21" 2>/dev/null
+    pkill -f "$BIN/quditto --listen 127.0.0.1:28" 2>/dev/null
     for p in "$DIR"/logs/*.pid; do
         [ -f "$p" ] || continue
         kill "$(cat "$p")" 2>/dev/null

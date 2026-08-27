@@ -98,6 +98,13 @@ sampler() {
                 printf -- '-- rate dkms-%s: %s\n' "$n" \
                     "$(curl -s --max-time 3 "$SDN/rate/dkms-$n" || echo '{}')"
             done
+            # Las líneas mcmcf del SDN (mcmcf.solve con la descomposición
+            # r_k = (δ−σ) + λ·R + η, y los diag). Sin esto el log del SDN
+            # muere con el scratch del nodo y la atribución de los ceros de
+            # /rate se queda sin su mitad: se vio en el job 9265640, donde
+            # hubo que hacerla solo desde el lado DKMS.
+            printf -- '-- sdn.mcmcf\n'
+            strip < "$MESH_DIR/logs/sdn.log" | grep -a 'mcmcf' | tail -4
             printf -- '-- topology: %s\n' "$(curl -s --max-time 3 "$SDN/topology")"
             printf -- '-- cpu\n'
             ps -eo pcpu,rss,comm --sort=-pcpu | head -12
@@ -179,11 +186,20 @@ run_point() {
 attribute() {
     local tag=$1
     python3 - "$OUT/$tag.samples.txt" <<'ATTR' | tee -a "$OUT/report.txt"
-import re, sys
+import json, re, sys
 rates, enc_zero, enc_tot = [], 0, 0
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if line.startswith("-- rate "):
-        rates += [float(x) for x in re.findall(r'"enc":([0-9.]+)', line)]
+        # Solo el `enc` de primer nivel de cada peer. El regex de antes
+        # tragaba tambien los sub-objetos `grades.{qkd,pqc}.enc`, y como el
+        # grade no natural del par siempre esta a 0, cada peer aportaba un
+        # cero fantasma: un suelo estructural del 33% de "muestras a cero"
+        # que no era del asignador (visto en el job 9274893).
+        try:
+            body = json.loads(line.split(": ", 1)[1])
+            rates += [float(p.get("enc", 0.0)) for p in body.get("peers", {}).values()]
+        except (ValueError, IndexError):
+            pass
     elif "generator.state" in line:
         m = re.search(r"\benc=(\d+)", line)
         if m:
