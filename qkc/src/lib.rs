@@ -29,6 +29,7 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod frame_auth;
 pub mod http_admin;
 pub mod keystore;
 pub mod kme;

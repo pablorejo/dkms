@@ -2589,6 +2589,7 @@ dependencies = [
  "hkdf",
  "hyper",
  "parking_lot",
+ "rand 0.8.6",
  "reqwest",
  "rmp-serde",
  "rustls",

@@ -149,25 +149,30 @@ def main(argv):
             # Sin meta.json la celda está en curso (scale_one.sh lo escribe al
             # final): listarla daría una fila de ceros que parece un fallo.
             if os.path.isdir(d) and os.path.exists(os.path.join(d, "meta.json")):
-                cells.append(fmt(read_cell(d)))
+                c = fmt(read_cell(d))
+                # El nombre del directorio identifica el BRAZO completo
+                # (certs + tipo de enlace + modo de firma). `key_alg` solo dice
+                # el algoritmo del certificado, y dos brazos pueden compartirlo.
+                c["alg"] = alg
+                cells.append(c)
     if not cells:
         print("sin celdas en %s" % root)
         return 1
 
     print("== ¿FUNCIONAN LOS CERTIFICADOS? ==")
-    hdr = "%-10s %-6s %8s %10s %8s %8s %8s" % (
+    hdr = "%-26s %-6s %8s %10s %8s %8s %8s" % (
         "certs", "carga", "hs_ok", "hs+auth_ko", "errs_carga", "corrupt", "claves_ML-DSA")
     print(hdr)
     for c in cells:
-        print("%-10s %-6s %8d %10d %8d %8d %8d" % (
+        print("%-26s %-6s %8d %10d %8d %8d %8d" % (
             c["alg"], c["reg"], c["hs"], c["malas"], c["err"], c["corrupt"], c["mldsa"]))
 
     print("\n== ¿BAJA EL RENDIMIENTO? ==")
-    print("%-10s %-6s %10s %10s %7s %7s %8s %8s %8s %9s %8s" % (
+    print("%-26s %-6s %10s %10s %7s %7s %8s %8s %8s %9s %8s" % (
         "certs", "carga", "200", "claves/s", "%cuota", "errs", "p50_ms", "p95_ms",
         "p99_ms", "handshake", "hs_max"))
     for c in cells:
-        print("%-10s %-6s %10d %10.1f %6.1f%% %7d %8.1f %8.1f %8.1f %8.1fms %7.1fms" % (
+        print("%-26s %-6s %10d %10.1f %6.1f%% %7d %8.1f %8.1f %8.1f %8.1fms %7.1fms" % (
             c["alg"], c["reg"], c["ok"], c["keys_s"], c["thr_pct"], c["err"],
             c["p50"], c["p95"], c["p99"], c["hs_ms"], c["hs_max"]))
 
@@ -179,8 +184,9 @@ def main(argv):
         by.setdefault(c["reg"], {})[c["alg"]] = c
     for reg in sorted(by):
         pair = by[reg]
-        base = pair.get("rsa")
-        pqc = next((v for k, v in pair.items() if k != "rsa"), None)
+        base_key = next((k for k in pair if "authoff" in k or k == "rsa"), None)
+        base = pair.get(base_key) if base_key else None
+        pqc = next((v for k, v in pair.items() if k != base_key), None)
         if not base or not pqc:
             print("  %-6s: falta un arm (%s)" % (reg, ", ".join(sorted(pair))))
             continue

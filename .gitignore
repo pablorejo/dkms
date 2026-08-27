@@ -83,3 +83,6 @@ docs/Paper_congreso/
 .results.md
 # Material TLS del testbed: se genera con tests/testbed/provision_certs.sh y
 # vive fuera del repo (~/.dkms-testbed). Nunca commitear claves privadas.
+
+# Cuaderno de trabajo de la campaña quantum-safe (local, nunca al repo)
+.progress.md

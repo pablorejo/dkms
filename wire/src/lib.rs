@@ -80,6 +80,24 @@ pub const FRAME_RELAY: u8 = 0x02;
 /// ACK aplicación (DKMS-level). Plaintext sin OTP en el wire.
 pub const FRAME_ACK: u8 = 0x03;
 
+/// Variantes **autenticadas** de `FRAME_RECV` / `FRAME_RELAY`.
+///
+/// Mismo cuerpo que 0x01/0x02, pero el `PAYLOAD` termina en un trailer de
+/// [`AUTH_TRAILER_LEN`] bytes: `session(8) ‖ counter(8) ‖ tag(32)`. El tag es un
+/// HMAC-SHA256 calculado por `common::crypto::frame_mac` sobre **todo** el frame
+/// (identidades, headers y ciphertext incluidos), con clave derivada de la raíz
+/// del enlace y de la sesión.
+///
+/// Cierran a la vez las tres cosas que el OTP no da: integridad (XOR es
+/// maleable), autenticación de origen (`sender_id` es un `u32` sin verificar) y
+/// frescura (`counter` + ventana deslizante en el receptor).
+///
+/// Un peer viejo que no conozca estos kinds los ignora en silencio (ver
+/// `peer_server`), así que el rollout va por el flag `frame_auth = off|prefer|
+/// require`, igual que el del handshake.
+pub const FRAME_RECV_AUTH: u8 = 0x04;
+pub const FRAME_RELAY_AUTH: u8 = 0x05;
+
 /// ORR → QKC: "envía este payload a `dest_final`. Tú te encargas del
 /// cifrado del payload (OTP del enlace) y del routing".
 pub const FRAME_LOCAL_SEND: u8 = 0x10;
@@ -339,6 +357,69 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+// ─── helpers para FRAME_RECV_AUTH / FRAME_RELAY_AUTH ───────────────
+
+/// Bytes que el trailer de autenticación añade al final del `PAYLOAD`:
+/// `session(8 B LE) ‖ counter(8 B LE) ‖ tag(32 B)`.
+pub const AUTH_TRAILER_LEN: usize = 8 + 8 + 32;
+
+/// `true` si el kind lleva trailer de autenticación.
+pub fn is_auth_kind(kind: u8) -> bool {
+    matches!(
+        kind,
+        FRAME_RECV_AUTH | FRAME_RELAY_AUTH | FRAME_KEY_IDS_NOTIFY_AUTH
+    )
+}
+
+/// Variante autenticada de un kind, si la tiene.
+///
+/// El NOTIFY entra aquí a propósito: comparte el mismo trailer que los frames de
+/// datos, y así comparte también el contador y la ventana anti-replay. Antes
+/// llevaba un HMAC propio sin frescura, y un NOTIFY capturado se reinyectaba sin
+/// problema.
+pub fn auth_kind_for(kind: u8) -> Option<u8> {
+    match kind {
+        FRAME_RECV => Some(FRAME_RECV_AUTH),
+        FRAME_RELAY => Some(FRAME_RELAY_AUTH),
+        FRAME_KEY_IDS_NOTIFY => Some(FRAME_KEY_IDS_NOTIFY_AUTH),
+        _ => None,
+    }
+}
+
+/// Kind base de una variante autenticada — lo que el resto del QKC espera ver
+/// una vez comprobado y quitado el trailer.
+pub fn base_kind_of(kind: u8) -> u8 {
+    match kind {
+        FRAME_RECV_AUTH => FRAME_RECV,
+        FRAME_RELAY_AUTH => FRAME_RELAY,
+        FRAME_KEY_IDS_NOTIFY_AUTH => FRAME_KEY_IDS_NOTIFY,
+        other => other,
+    }
+}
+
+/// Añade el trailer de autenticación al final del payload.
+pub fn append_auth_trailer(payload: &mut Vec<u8>, session: u64, counter: u64, tag: &[u8; 32]) {
+    payload.reserve(AUTH_TRAILER_LEN);
+    payload.extend_from_slice(&session.to_le_bytes());
+    payload.extend_from_slice(&counter.to_le_bytes());
+    payload.extend_from_slice(tag);
+}
+
+/// Separa el payload de un frame autenticado en `(body, session, counter, tag)`.
+///
+/// `body` es el ciphertext sin trailer: es lo que hay que descifrar y lo que
+/// entra en el MAC (el tag no puede cubrirse a sí mismo).
+pub fn split_auth_trailer(payload: &[u8]) -> Result<(&[u8], u64, u64, &[u8]), WireError> {
+    if payload.len() < AUTH_TRAILER_LEN {
+        return Err(WireError::Truncated("auth trailer"));
+    }
+    let cut = payload.len() - AUTH_TRAILER_LEN;
+    let (body, tr) = payload.split_at(cut);
+    let session = u64::from_le_bytes(tr[0..8].try_into().expect("8 bytes"));
+    let counter = u64::from_le_bytes(tr[8..16].try_into().expect("8 bytes"));
+    Ok((body, session, counter, &tr[16..]))
+}
+
 // ─── helpers para FRAME_KEY_IDS_NOTIFY ─────────────────────────────
 
 /// Serializa una lista de UUIDs en el formato del payload de
@@ -583,6 +664,82 @@ mod tests {
         let buf = encode_notify_payload(&ids);
         let back = decode_notify_payload(&buf).unwrap();
         assert_eq!(back, ids);
+    }
+
+    #[test]
+    fn auth_trailer_round_trip() {
+        let mut payload = b"ciphertext".to_vec();
+        let tag = [0xABu8; 32];
+        append_auth_trailer(&mut payload, 0xDEAD_BEEF_CAFE_0001, 42, &tag);
+        assert_eq!(payload.len(), 10 + AUTH_TRAILER_LEN);
+        let (body, session, counter, t) = split_auth_trailer(&payload).unwrap();
+        assert_eq!(body, b"ciphertext");
+        assert_eq!(session, 0xDEAD_BEEF_CAFE_0001);
+        assert_eq!(counter, 42);
+        assert_eq!(t, &tag);
+    }
+
+    #[test]
+    fn auth_trailer_round_trips_through_a_frame() {
+        // El trailer viaja dentro de PAYLOAD, así que tiene que sobrevivir al
+        // encode/decode del frame sin que nadie lo trate distinto.
+        let mut f = Frame::empty(FRAME_RELAY_AUTH);
+        f.sender_id = 3;
+        f.payload = b"ct".to_vec();
+        append_auth_trailer(&mut f.payload, 9, 1, &[0x5Au8; 32]);
+        let buf = f.encode();
+        let back = Frame::decode_body(&buf[FIXED_PREFIX..]).unwrap();
+        let (body, session, counter, tag) = split_auth_trailer(&back.payload).unwrap();
+        assert_eq!(body, b"ct");
+        assert_eq!((session, counter), (9, 1));
+        assert_eq!(tag, &[0x5Au8; 32]);
+    }
+
+    #[test]
+    fn auth_trailer_rejects_short_payload() {
+        assert!(split_auth_trailer(&[0u8; AUTH_TRAILER_LEN - 1]).is_err());
+        // Un payload de exactamente el tamaño del trailer es válido con body vacío.
+        let (body, _, _, _) = split_auth_trailer(&[0u8; AUTH_TRAILER_LEN]).unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn auth_kind_mapping_is_total_and_distinct() {
+        assert_eq!(auth_kind_for(FRAME_RECV), Some(FRAME_RECV_AUTH));
+        assert_eq!(auth_kind_for(FRAME_RELAY), Some(FRAME_RELAY_AUTH));
+        assert_eq!(
+            auth_kind_for(FRAME_KEY_IDS_NOTIFY),
+            Some(FRAME_KEY_IDS_NOTIFY_AUTH)
+        );
+        assert_eq!(auth_kind_for(FRAME_ACK), None);
+        assert_eq!(base_kind_of(FRAME_RECV_AUTH), FRAME_RECV);
+        assert_eq!(base_kind_of(FRAME_RELAY_AUTH), FRAME_RELAY);
+        assert_eq!(base_kind_of(FRAME_KEY_IDS_NOTIFY_AUTH), FRAME_KEY_IDS_NOTIFY);
+        // base_kind_of es identidad en todo lo demás.
+        assert_eq!(base_kind_of(FRAME_LOCAL_SEND), FRAME_LOCAL_SEND);
+        assert!(is_auth_kind(FRAME_RECV_AUTH) && is_auth_kind(FRAME_RELAY_AUTH));
+        assert!(is_auth_kind(FRAME_KEY_IDS_NOTIFY_AUTH));
+        assert!(!is_auth_kind(FRAME_RECV) && !is_auth_kind(FRAME_KEY_IDS_NOTIFY));
+        // Los kinds nuevos no chocan con ninguno de los ya asignados.
+        for k in [
+            FRAME_RECV,
+            FRAME_RELAY,
+            FRAME_ACK,
+            FRAME_LOCAL_SEND,
+            FRAME_LOCAL_DELIVER,
+            FRAME_KEY_IDS_NOTIFY,
+            FRAME_PQC_KEM_INIT,
+            FRAME_PQC_KEM_RESP,
+            FRAME_PQC_KEM_INIT_AUTH,
+            FRAME_PQC_KEM_RESP_AUTH,
+            FRAME_KEY_IDS_NOTIFY_AUTH,
+            FRAME_ACK,
+            FRAME_PQC_KEM_INIT_SIGNED,
+            FRAME_PQC_KEM_RESP_SIGNED,
+        ] {
+            assert_ne!(FRAME_RECV_AUTH, k);
+            assert_ne!(FRAME_RELAY_AUTH, k);
+        }
     }
 
     #[test]

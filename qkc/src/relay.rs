@@ -80,10 +80,15 @@ pub async fn handle_incoming(svc: QkcService, frame: Frame) -> Result<()> {
     result
 }
 
-async fn handle_incoming_inner(svc: &QkcService, frame: Frame) -> Result<()> {
+async fn handle_incoming_inner(svc: &QkcService, mut frame: Frame) -> Result<()> {
     let in_link = svc
         .link_to(frame.sender_id)
         .ok_or(QkcError::UnknownNeighbor(frame.sender_id))?;
+    // Autenticación del frame ANTES de tocar nada: `sender_id` todavía no está
+    // verificado, así que hasta aquí sólo se ha usado para elegir el enlace (y
+    // por tanto la clave con la que se comprueba). Un `open` correcto es lo que
+    // ata el frame a ese enlace.
+    crate::frame_auth::authenticate(in_link.frame_auth.as_ref(), &mut frame)?;
     let in_chunk_bytes = (in_link.cfg.key_size_bits / 8) as usize;
     let key_ids: Vec<Uuid> = parse_key_ids(&frame.key_ids)?;
 
@@ -228,6 +233,13 @@ fn send_frame_to_peer(
     out.header_orr_mp = header_orr_mp;
     out.header_dkms_mp = header_dkms_mp;
     out.payload = ciphertext;
+
+    // El MAC va sobre el frame ya montado: cubre el ciphertext, las identidades
+    // y los dos headers que el QKC propaga sin mirar. Después de esto el kind
+    // pasa a su variante `_AUTH` y el payload lleva `session ‖ counter ‖ tag`.
+    if let Some(fa) = &out_link.frame_auth {
+        fa.seal(&mut out);
+    }
 
     let addr = svc
         .neighbor_peer_addr(next_hop)

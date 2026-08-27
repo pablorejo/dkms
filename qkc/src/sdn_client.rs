@@ -226,6 +226,7 @@ impl SdnAnnouncer {
                 link_psk: None,
                 pqc_auth: crate::config::PqcAuth::Off,
                 peer_verify_key: None,
+                frame_auth: crate::config::FrameAuth::Off,
             }),
         })
     }

@@ -72,6 +72,10 @@ pub struct LinkRuntime {
     /// Lo consulta `peer_server` al recibir frames de handshake y lo
     /// arranca `bootstrap_keystores`.
     pub pqc: Option<Arc<PqcHandshake>>,
+    /// MAC de los frames de datos: integridad, autenticación de origen y
+    /// frescura. `None` si el enlace no lo tiene activado o no hay `link_psk`.
+    /// Aplica igual a QKD y a PQC — el OTP no da ninguna de las tres.
+    pub frame_auth: Option<Arc<crate::frame_auth::LinkFrameAuth>>,
 }
 
 #[derive(Clone)]
@@ -225,6 +229,28 @@ impl QkcService {
             let notify_psk = link.link_psk.as_deref().and_then(|b64| {
                 base64::engine::general_purpose::STANDARD.decode(b64).ok()
             });
+            // Los frames de datos usan la misma raíz que el handshake y los
+            // NOTIFY. En `require` sin PSK se falla el arranque: seguir
+            // adelante sería correr sin autenticar creyendo que sí, que es
+            // exactamente lo que el flag existe para impedir.
+            if link.frame_auth.rejects_plaintext() && notify_psk.is_none() {
+                return Err(QkcError::BadRequest(format!(
+                    "enlace {}: frame_auth = require exige link_psk",
+                    link.neighbor_id
+                )));
+            }
+            let frame_auth = crate::frame_auth::LinkFrameAuth::new(
+                link.frame_auth,
+                link.neighbor_id,
+                notify_psk,
+            )
+            .map(Arc::new);
+            if link.frame_auth.signs() && frame_auth.is_none() {
+                warn!(
+                    peer = link.neighbor_id,
+                    "qkc.frame_auth: modo prefer sin link_psk; los frames van sin MAC"
+                );
+            }
             let keys = KeyStore::new(
                 Arc::clone(&kme),
                 Arc::clone(peer_out),
@@ -232,13 +258,14 @@ impl QkcService {
                 link.neighbor_peer_addr.clone(),
                 cfg.qkc_id,
                 link.key_size_bits,
-                notify_psk,
+                frame_auth.clone(),
             );
             Ok(LinkRuntime {
                 cfg: link.clone(),
                 kme,
                 keys,
                 pqc,
+                frame_auth,
             })
         }
     }
@@ -301,6 +328,30 @@ impl QkcService {
                     waiting = ?waiting,
                     "qkc.links",
                 );
+                // Una línea por enlace que autentica frames. Es lo que permite
+                // ver desde fuera si el MAC está realmente activo (`signed`/
+                // `verified` subiendo) y si algo lo está rechazando. Un enlace
+                // sano tiene bad_mac = replayed = plain_rej = 0; que `plain_ok`
+                // no baje a 0 tras el arranque significa que el otro extremo no
+                // está firmando, que es la avería típica de config asimétrica.
+                for peer in &live {
+                    let Some(link) = snap.get(peer) else { continue };
+                    let Some(fa) = &link.frame_auth else { continue };
+                    let s = &fa.stats;
+                    info!(
+                        me = cfg.qkc_id,
+                        peer,
+                        mode = ?fa.mode(),
+                        session = fa.session(),
+                        signed = s.signed.load(Ordering::Relaxed),
+                        verified = s.verified.load(Ordering::Relaxed),
+                        bad_mac = s.bad_mac.load(Ordering::Relaxed),
+                        replayed = s.replayed.load(Ordering::Relaxed),
+                        plain_ok = s.plaintext_accepted.load(Ordering::Relaxed),
+                        plain_rej = s.plaintext_rejected.load(Ordering::Relaxed),
+                        "qkc.frame_auth",
+                    );
+                }
             }
         });
     }
@@ -459,6 +510,7 @@ mod tests {
             link_psk: None,
             pqc_auth: crate::config::PqcAuth::Off,
             peer_verify_key: None,
+            frame_auth: crate::config::FrameAuth::Off,
         }
     }
 

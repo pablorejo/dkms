@@ -14,6 +14,11 @@ pub enum QkcError {
     #[error("no link/quditto for neighbor {0}")]
     UnknownNeighbor(u32),
 
+    /// El frame no pasó la autenticación del enlace: MAC inválido, replay, o
+    /// llegó en claro a un enlace en `frame_auth = require`.
+    #[error("frame auth: {0}")]
+    FrameAuth(#[from] crate::frame_auth::FrameAuthError),
+
     #[error("quditto returned not-enough-keys: requested {requested}, got {received}")]
     NotEnoughKeys { requested: u32, received: u32 },
 

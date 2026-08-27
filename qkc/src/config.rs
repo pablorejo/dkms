@@ -211,6 +211,47 @@ pub struct LinkConfig {
     /// handshake cuando `pqc_auth = sign`. Solo config local. Ver §Fase 5.
     #[serde(default)]
     pub peer_verify_key: Option<String>,
+
+    /// Política de autenticación de los **frames de datos** de este enlace.
+    /// Ver [`FrameAuth`]. Usa la misma raíz que el handshake (`link_psk`), pero
+    /// es un flag aparte porque protege otra cosa: el handshake da autenticación
+    /// de *entidad*, y esto da integridad, autenticación de *origen de datos* y
+    /// frescura de cada frame.
+    #[serde(default)]
+    pub frame_auth: FrameAuth,
+}
+
+/// Política de autenticación de los frames de datos (`FRAME_RECV`/`FRAME_RELAY`).
+///
+/// El payload va cifrado con OTP, que es maleable: sin MAC, un atacante en el
+/// cable puede modificar el ciphertext y reinyectar frames viejos sin que nada
+/// lo note. Con MAC (`common::crypto::frame_mac`) cada frame lleva
+/// `session ‖ counter ‖ tag` y el receptor mantiene una ventana anti-replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrameAuth {
+    /// Sin autenticar (comportamiento histórico). Frames 0x01/0x02.
+    #[default]
+    Off,
+    /// Firma los frames salientes si hay `link_psk`, y acepta tanto los
+    /// autenticados (0x04/0x05) como los que llegan en claro. Es el escalón de
+    /// migración: despliega en `prefer`, reparte PSKs, sube a `require`.
+    Prefer,
+    /// Exige frames autenticados: los que lleguen en claro se descartan. Sin
+    /// `link_psk` el arranque falla, en vez de correr sin autenticar creyendo
+    /// que sí.
+    Require,
+}
+
+impl FrameAuth {
+    /// `true` si hay que poner MAC a los frames salientes.
+    pub fn signs(&self) -> bool {
+        matches!(self, FrameAuth::Prefer | FrameAuth::Require)
+    }
+    /// `true` si hay que descartar los frames que lleguen sin MAC.
+    pub fn rejects_plaintext(&self) -> bool {
+        matches!(self, FrameAuth::Require)
+    }
 }
 
 /// Política de autenticación del handshake PQC por enlace.
