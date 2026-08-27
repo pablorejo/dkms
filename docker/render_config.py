@@ -144,6 +144,19 @@ def render_qkc(n, out):
         if lk.get("capacity_keys_per_s") is not None:
             lines.append("capacity_keys_per_s = "
                          + str(float(lk["capacity_keys_per_s"])))
+        # Raíz de autenticación del enlace, y política del MAC de los frames de
+        # datos. Van FUERA de la bifurcación qkd/pqc a propósito: el OTP no da
+        # integridad ni frescura venga el material de un KME o de ML-KEM, y el
+        # NOTIFY tampoco lo protege el propio QKD. Estuvieron dentro de la rama
+        # pqc y el resultado fue que un enlace qkd con `link_psk` en su node.yml
+        # lo perdía al renderizar, sin decir nada (medido 2026-08-28).
+        if lk.get("link_psk") is not None:
+            lines.append("link_psk = " + q(str(lk["link_psk"])))
+        # frame_auth = off|prefer|require: MAC de los frames de DATOS
+        # (integridad + autenticación de origen + anti-replay). Comparte raíz
+        # con el handshake, pero es un flag aparte porque protege otra cosa.
+        if lk.get("frame_auth") is not None:
+            lines.append("frame_auth = " + q(str(lk["frame_auth"])))
         if typ == "qkd":
             kme = str(req(lk, "kme_url", "qkc.link(qkd)"))
             if "//" not in kme:
@@ -160,8 +173,6 @@ def render_qkc(n, out):
             # ML-DSA). Default off. Para `sign`: peer_verify_key es la clave
             # pública ML-DSA del vecino (base64); el seed propio va a nivel de
             # nodo (sign_secret_seed, abajo).
-            if lk.get("link_psk") is not None:
-                lines.append("link_psk = " + q(str(lk["link_psk"])))
             if lk.get("pqc_auth") is not None:
                 lines.append("pqc_auth = " + q(str(lk["pqc_auth"])))
             if lk.get("peer_verify_key") is not None:

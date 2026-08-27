@@ -85,6 +85,11 @@ LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
 # firmar, como han ido siempre. Las identidades las genera `pqc_keygen` en
 # $DIR/signkeys y son efímeras como la malla.
 PQC_AUTH="${DKMS_MESH_PQC_AUTH:-off}"
+# DKMS_MESH_FRAME_AUTH=prefer|require pone MAC a los frames de DATOS del enlace
+# QKC<->QKC (integridad + autenticacion de origen + anti-replay). Necesita una
+# `link_psk` identica en los dos extremos: se deriva del indice de arista, que
+# es el mismo mirado desde cualquiera de los dos lados.
+FRAME_AUTH="${DKMS_MESH_FRAME_AUTH:-off}"
 SIGNDIR=""
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
@@ -93,6 +98,15 @@ DIST_KM="${DKMS_MESH_DIST_KM:-5}"
 # …+9, así que con N=70 llegan a 26909 — el antiguo 21000+idx CHOCABA con los
 # puertos del nodo 11 en adelante (el modo qkd nunca había corrido con N>10).
 qd_port() { echo $(( 28000 + $1 )); }
+
+# PSK del enlace (a,b), en base64. Determinista y simetrica: `edge_idx` ordena
+# los extremos, asi que los dos lados calculan el mismo valor sin coordinarse.
+# Es material de prueba, efimero como la malla -- en produccion lo reparte el
+# operador fuera de banda.
+link_psk() {
+    printf 'dkms-mesh-link-psk/%s/%s' "$SEED" "$(edge_idx "$1" "$2")" \
+        | sha256sum | cut -d" " -f1 | xxd -r -p | base64 -w0
+}
 
 # Puertos: el nodo n ocupa el rango 20000+(n-1)*100 … +9. Con N≤10 no toca los
 # 19xxx de la SDN.
@@ -214,8 +228,13 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                     # SDN, que dimensiona la arista con r0·10^(-alpha·d/10).
                     printf '  - {neighbor_id: %s, neighbor_addr: "127.0.0.1:%s", type: qkd, ' \
                         "$nb" "$(peer_port "$nb")"
-                    printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s}\n' \
+                    printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s' \
                         "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$DIST_KM"
+                    if [ "$FRAME_AUTH" != off ]; then
+                        printf ', link_psk: "%s", frame_auth: %s' \
+                            "$(link_psk "$n" "$nb")" "$FRAME_AUTH"
+                    fi
+                    printf '}\n'
                 else
                     # Firma ML-DSA del handshake (solo enlaces PQC: los QKD no
                     # negocian ML-KEM, su material lo da el KME). Cada extremo
@@ -224,6 +243,9 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                     local auth=""
                     if [ "$PQC_AUTH" = sign ]; then
                         auth=", pqc_auth: sign, peer_verify_key: \"$(cat "$SIGNDIR/qkc-$nb.vk")\""
+                    fi
+                    if [ "$FRAME_AUTH" != off ]; then
+                        auth="$auth, link_psk: \"$(link_psk "$n" "$nb")\", frame_auth: $FRAME_AUTH"
                     fi
                     if [ -n "${DKMS_MESH_PQC_CAP:-}" ]; then
                         # Capacidad PQC declarada; sin la variable se prueba el
@@ -276,7 +298,7 @@ generate() {        # generate <N>
     for n in $(seq 1 "$total"); do
         mkdir -p "$DIR/cfg/qkc$n" "$DIR/cfg/orr$n" "$DIR/cfg/dkms$n"
         # shellcheck disable=SC2046
-        if [ "$LINK_TYPE" = qkd ] || [ "$PQC_AUTH" = sign ]; then
+        if [ "$LINK_TYPE" = qkd ] || [ "$PQC_AUTH" = sign ] || [ "$FRAME_AUTH" != off ]; then
             # Con firma ML-DSA los declaran los DOS extremos, por la misma razón
             # que en qkd: la SDN no puede suministrar la clave de verificación
             # del vecino (no la conoce, y no debe repartir material de
@@ -284,6 +306,13 @@ generate() {        # generate <N>
             # al otro extremo sin con qué verificar — medido: 423 descartes por
             # "sin peer_verify_key" y 436 por "firma inválida" (el enlace que
             # crea la SDN heredaba la clave de OTRO vecino).
+            #
+            # `frame_auth` está en el mismo saco y por el mismo motivo: la raíz
+            # del MAC es la `link_psk`, que es config local. Declarado por un
+            # solo lado, el extremo que recibe el enlace de la SDN se queda sin
+            # PSK y descarta todo lo que llega — medido aquí el 2026-08-28, el
+            # nodo 4 tirando todos los frames del 1 y del 3 con "frame sin MAC
+            # en un enlace autenticado".
             write_qkc_yml "$n" $(incident_of "$n" | awk '{print $2}')
         else
             write_qkc_yml "$n" $(neighbours_of "$n")
