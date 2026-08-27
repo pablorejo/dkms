@@ -199,6 +199,10 @@ fi
 # le robe el resultado a un job de 40 minutos.
 for intento in $(seq 1 12); do
     cp "$DKMS_MESH_DIR"/logs/dkms*.log "$DKMS_MESH_DIR"/logs/sdn.log "$OUT/" 2>/dev/null
+    # qkc y orr también: son los que registran el handshake firmado y el
+    # bootstrap. Sin ellos, un fallo de firma solo se ve como "no llenó".
+    cp "$DKMS_MESH_DIR"/logs/qkc1.log "$DKMS_MESH_DIR"/logs/qkc2.log \
+       "$DKMS_MESH_DIR"/logs/orr1.log "$DKMS_MESH_DIR"/logs/orr2.log "$OUT/" 2>/dev/null
     cp "$DKMS_MESH_DIR"/edges.tsv "$OUT/" 2>/dev/null
     n_src=$(ls "$DKMS_MESH_DIR"/logs/dkms*.log 2>/dev/null | wc -l)
     n_dst=$(ls "$OUT"/dkms*.log 2>/dev/null | wc -l)

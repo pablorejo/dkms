@@ -57,7 +57,13 @@ export PROTOC="${PROTOC:-$HOME/opt/protoc/bin/protoc}"
 cd "$HOME/dkms_rust" || exit 1
 
 export DKMS_MESH_DIR="${TMPDIR:-/tmp}/dkms-certs-$SLURM_JOB_ID"
-export DKMS_SCALE_OUT="$HOME/dkms_rust/certs-results/$KEY_ALG"
+# La ruta lleva TAMBIÉN el modo de firma: si no, una corrida con las firmas
+# del QKC/ORR activas sobrescribe la de solo-certificados del mismo algoritmo
+# y se pierde el término de comparación (pasado el 2026-08-27). Se puede pisar
+# con DKMS_SCALE_OUT desde fuera.
+PQC_AUTH_MODE="${DKMS_MESH_PQC_AUTH:-off}"
+LINKS="${DKMS_MESH_LINK_TYPE:-qkd}"
+export DKMS_SCALE_OUT="${DKMS_SCALE_OUT:-$HOME/dkms_rust/certs-results/$KEY_ALG-$LINKS-auth$PQC_AUTH_MODE}"
 mkdir -p "$DKMS_SCALE_OUT"
 
 # Certs pre-generados. Para rsa es opcional (el openssl de aquí los hace); para
