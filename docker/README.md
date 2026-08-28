@@ -316,6 +316,8 @@ links:
 | `links[].r0` / `alpha` / `distance_km` | modelo físico del enlace `qkd`. El QKC no los usa: se los pasa a la SDN, que dimensiona la arista con `r0·10^(−alpha·d/10)`. |
 | `links[].capacity_keys_per_s` | capacidad declarada de un enlace `pqc` en claves/s (ignorada en `qkd`). Sin declarar, la SDN aplica 10 000 — un default finito con el que la señal de rates significa algo también en despliegues solo-PQC (antes llevaban un centinela de 1e9 y `/rate` era ruido). |
 | `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
+| `links[].link_psk` | **secreto pre-compartido del enlace**, base64 de 32 bytes, IDÉNTICO en los dos extremos. Es la raíz de la autenticación del enlace: con él se firma el handshake, el NOTIFY y —si `frame_auth` lo pide— cada frame de datos. Solo config local: la SDN no transporta secretos, ni debe. Sin él no hay autenticación de enlace ninguna. |
+| `links[].frame_auth` | `off` (default) \| `prefer` \| `require`: MAC por frame de datos. Ver la sección de abajo. |
 
 **Sobre el auto-registro.** Una arista necesita a sus dos extremos dados de
 alta, así que el QKC que arranque primero la verá `pending` hasta que su vecino
@@ -325,6 +327,63 @@ reanuncio sin cambios no toca la topología, así que no dispara recálculos.
 Si los dos extremos declaran `r0`/`alpha`/`distance_km` **distintos**, la SDN se
 queda con el primero que llegó y lo avisa por log; corrige el `node.yml` que
 esté mal, porque de ese número sale la capacidad del enlace.
+
+### Autenticar el enlace (`link_psk` + `frame_auth`)
+
+El payload del enlace va cifrado con OTP, que da confidencialidad y **cero
+integridad**: XOR es maleable, así que quien pueda tocar el cable puede
+aplicarle un delta al ciphertext y el receptor descifra un mensaje modificado
+sin enterarse. Y `sender_id` viaja en claro sin comprobar. Esto lo cierra un
+HMAC-SHA256 por frame, con contador y ventana anti-replay
+(`docs/SECURITY.md` §Fase 8).
+
+**Hace falta una `link_psk` por enlace**, de 32 bytes, idéntica en los dos
+extremos y repartida fuera de banda — es la misma suposición que hace el propio
+QKD para su canal clásico autenticado. Es simétrica y de 256 bits, así que es
+quantum-safe (Grover deja 128 efectivos):
+
+```bash
+openssl rand -base64 32     # una por ENLACE, no por nodo
+```
+
+```yaml
+links:
+  - neighbor_id: 2
+    neighbor_addr: "10.0.0.12"
+    type: pqc
+    link_psk: "aJUINhXK1WJhWEoelgeo9ZrtCNQv8xQGLPJdMhNWV6g="   # la MISMA en el vecino
+    frame_auth: require
+```
+
+Tres cosas que hay que saber antes de activarlo:
+
+1. **Un enlace con `frame_auth` hay que declararlo en los DOS extremos**, con la
+   misma PSK. La raíz es config local y la SDN no la reparte, así que el extremo
+   que aprende el enlace por anuncio se queda sin ella y **descarta todo lo que
+   le llega** de ese vecino. Es el mismo caso que `pqc_auth: sign`.
+2. **Despliega en `prefer` antes de subir a `require`.** Un peer que aún no
+   entienda los frames autenticados los ignora en silencio, así que pasar
+   directamente a `require` con un extremo sin actualizar deja el enlace muerto.
+   El orden seguro es: reparte PSKs → `prefer` en todos → comprueba → `require`.
+3. **`require` sin `link_psk` no arranca**, a propósito: correr sin autenticar
+   creyendo que sí es justo lo que el flag existe para impedir.
+
+Con la PSK puesta, el NOTIFY se autentica siempre —incluso en `frame_auth: off`—
+porque es el plano de control del enlace: decide qué `key_ID` le pide este QKC a
+su KME, y eso el material QKD no lo protege.
+
+Para verlo funcionando, cada 5 s y por enlace:
+
+```
+qkc::service: qkc.frame_auth me=1 peer=2 mode=Require signed=544746 verified=428948
+              bad_mac=0 replayed=0 plain_ok=0 plain_rej=0
+```
+
+`bad_mac`, `replayed` y `plain_rej` deben quedarse en 0. `plain_ok` subiendo con
+`prefer` significa que el otro extremo todavía no firma — es lo normal a mitad
+del despliegue, y lo que tiene que llegar a 0 antes de subir a `require`.
+`plain_rej` subiendo con `require` es config asimétrica: a alguien le falta la
+PSK. Coste medido en CESGA (n=10, enlaces QKD, régimen medio): −0,04 %.
 
 **Paso 3 — arrancar y verificar:**
 
