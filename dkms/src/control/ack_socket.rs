@@ -168,9 +168,30 @@ impl AckClient {
 /// Agrupa ACKs en cola y los flushea cada `interval` o cuando se acumulan
 /// `max_keys` para un mismo peer_addr. Reduce el coste de TCP open/close
 /// bajo carga sostenida.
+/// Transporte ETSI-020 para los ACK salientes: la variante autenticada.
+///
+/// El socket TCP heredado acepta de cualquiera y se cree el `from` del cuerpo,
+/// así que un ACK forjado saca entradas de `ack_pending` y descuadra el
+/// generador. Por mTLS la identidad la pone el certificado de cliente, y el
+/// receptor (`handle_ext_keys_ack` → `handle_incoming_ack`) ya la usaba: lo que
+/// faltaba era este lado.
+///
+/// No se enruta por el ORR a propósito: eso metería los ACK dentro del OTP del
+/// enlace, que trocea en bloques de 32 B y gasta una clave QKD por bloque — un
+/// lote de 32 `key_id` son ~38 claves, y a 13 000 claves/s eso multiplica el
+/// consumo. mTLS no cuesta material.
+#[derive(Clone)]
+pub struct Etsi020AckTransport {
+    pub client: Arc<crate::peer_client::PeerHttpClient>,
+    pub peers: Arc<crate::peers::PeerRegistry>,
+}
+
 #[derive(Clone)]
 pub struct BatchedAckClient {
     inner: Arc<AckClient>,
+    /// Si está, los ACK salen por aquí y el socket queda de respaldo para los
+    /// peers que no tengan endpoint HTTP.
+    etsi020: Option<Etsi020AckTransport>,
     /// `peer_dkms_id → (ack_endpoint, key_ids en cola)`. Indexado por peer
     /// y no por dirección para que los contadores de
     /// [`crate::control::flow_stats`] hablen el mismo idioma que el resto
@@ -187,8 +208,19 @@ impl BatchedAckClient {
         flush_interval: Duration,
         stats: Arc<FlowStats>,
     ) -> Self {
+        Self::with_transport(client, max_keys, flush_interval, stats, None)
+    }
+
+    pub fn with_transport(
+        client: AckClient,
+        max_keys: usize,
+        flush_interval: Duration,
+        stats: Arc<FlowStats>,
+        etsi020: Option<Etsi020AckTransport>,
+    ) -> Self {
         let b = Self {
             inner: Arc::new(client),
+            etsi020,
             pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             stats,
             max_keys,
@@ -243,6 +275,34 @@ impl BatchedAckClient {
     /// ACK lo marca la carga o el temporizador.
     async fn send_and_count(&self, peer_id: &str, addr: &str, batch: Vec<String>, why: &str) {
         let n = batch.len() as u64;
+        // Camino autenticado si está configurado Y el peer tiene endpoint HTTP.
+        // Si no, el socket: un despliegue ORR-only no tiene `peer_client`, y
+        // dejar el ACK sin mandar sería peor que mandarlo sin autenticar.
+        if let Some(t) = &self.etsi020 {
+            if let Some(cfg) = t.peers.get(peer_id) {
+                if !cfg.endpoint.is_empty() {
+                    match t.client.send_ext_keys_ack(peer_id, &cfg, &batch).await {
+                        Ok(matched) => {
+                            self.stats
+                                .peer(peer_id)
+                                .ack_sent
+                                .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                            debug!(peer = peer_id, n, matched, why, "ack etsi020 enviado");
+                            return;
+                        }
+                        Err(e) => {
+                            // No se cae al socket: si el operador pidió ACK
+                            // autenticado, mandarlo en claro por detrás
+                            // anularía en silencio lo que pidió.
+                            self.stats.ack_send_failed(peer_id, n);
+                            warn!(peer = peer_id, error = %e, n, why,
+                                  "ack etsi020 falló; NO caigo al socket sin autenticar");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         match self.inner.send_batch(addr, &batch).await {
             Ok(()) => {
                 let before = self

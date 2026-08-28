@@ -384,11 +384,32 @@ async fn main() -> Result<()> {
             // ACK client batched (envía ACKs hacia los `ack_endpoint` que
             // viajan en el header de los DKMS_BUFFER entrantes).
             let ack_client = AckClient::new(cfg.node_id.clone());
-            let batched = Arc::new(BatchedAckClient::new(
+            // ACK autenticado si el operador lo pide Y hay cliente mTLS. En un
+            // despliegue ORR-only `peer_client` es None: ahí no hay por dónde,
+            // y se avisa en vez de callar y seguir con el socket como si nada.
+            let quiere_etsi020 = cfg.generator.ack_transport.eq_ignore_ascii_case("etsi020");
+            let ack_etsi020 = match (quiere_etsi020, svc.peer_client.as_ref()) {
+                (true, Some(pc)) => {
+                    info!("dkms.ack: los ACK salen autenticados por ETSI-020 (mTLS)");
+                    Some(dkms::control::Etsi020AckTransport {
+                        client: pc.clone(),
+                        peers: svc.peers.clone(),
+                    })
+                }
+                (true, None) => {
+                    warn!(
+                        "dkms.ack: ack_transport = etsi020 pero no hay peer_client                          (¿todos los peers por ORR?); los ACK siguen por el socket SIN AUTENTICAR"
+                    );
+                    None
+                }
+                (false, _) => None,
+            };
+            let batched = Arc::new(BatchedAckClient::with_transport(
                 ack_client,
                 32,
                 std::time::Duration::from_millis(50),
                 svc.flow.clone(),
+                ack_etsi020,
             ));
 
             // Servidor TCP de ACKs entrantes.

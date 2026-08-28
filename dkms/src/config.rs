@@ -361,6 +361,21 @@ pub struct GeneratorCfg {
     /// DKMS-BUFFER. Si no se configura, el Generator usa `listen.peer_addr`
     /// con un puerto offset definido por `ack_socket_port_offset`.
     pub ack_socket_addr: Option<SocketAddr>,
+
+    /// Transporte de los ACK **salientes**: `"socket"` (default, TCP plano
+    /// heredado) o `"etsi020"` (POST mTLS a `/kmapi/v1/ext_keys/ack`).
+    ///
+    /// El socket acepta conexiones de cualquiera y se cree el `from` que le
+    /// mandan, así que un ACK forjado saca entradas de `ack_pending` y
+    /// descuadra el generador (docs/SECURITY.md §Fase 4). Con `etsi020` la
+    /// identidad la pone el certificado de cliente.
+    ///
+    /// Sigue en `socket` por defecto: el receptor autenticado ya existía
+    /// (`handle_ext_keys_ack`), pero migrar la salida y retirar el socket está
+    /// pendiente de verificación en testbed. Hay que ponerlo en los DOS
+    /// extremos y comprobar que `generator.state` sigue moviendo `acked`.
+    #[serde(default = "default_ack_transport")]
+    pub ack_transport: String,
     /// Override del valor textual que se ANUNCIA a peers en el header
     /// ``ack_endpoint``. Cuando ``ack_socket_addr`` binda en ``0.0.0.0``
     /// (despliegues K8s), su ``to_string()`` produce ``0.0.0.0:PORT`` que
@@ -431,6 +446,7 @@ impl Default for GeneratorCfg {
             ack_timeout_ms: 30_000,
             ack_reaper_ms: 1_000,
             ack_socket_addr: None,
+            ack_transport: default_ack_transport(),
             ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
             max_emits_in_flight: 128,
@@ -451,6 +467,10 @@ fn default_connect_timeout_ms() -> u64 {
 fn default_rpc_timeout_ms() -> u64 {
     3_000
 }
+fn default_ack_transport() -> String {
+    "socket".to_string()
+}
+
 fn default_max_hops() -> i32 {
     1
 }

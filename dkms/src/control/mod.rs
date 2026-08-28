@@ -18,7 +18,7 @@ pub mod generator;
 pub mod sae_buffer_bucket;
 
 pub use ack_pending::{AckPendingEntry, AckPendingStore};
-pub use ack_socket::{AckClient, AckFrame, BatchedAckClient};
+pub use ack_socket::{AckClient, AckFrame, BatchedAckClient, Etsi020AckTransport};
 pub use flow_stats::FlowStats;
 pub use generator::Generator;
 pub use sae_buffer_bucket::{AdmitFailure, SaeBufferBuckets};

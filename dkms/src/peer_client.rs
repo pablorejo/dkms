@@ -23,7 +23,10 @@ use anyhow::anyhow;
 use reqwest::{Certificate, Client, Identity};
 use tracing::debug;
 
-use etsi::v020::{Etsi020ExtKeyAckContainer, Etsi020ExtKeyContainer};
+use etsi::v020::{
+    ack_status::Etsi020AckStatus, Etsi020ExtKeyAckContainer, Etsi020ExtKeyContainer,
+    Etsi020KeyID,
+};
 
 use crate::{
     config::{PeerCfg, RequestCfg},
@@ -135,6 +138,61 @@ impl PeerHttpClient {
                 body: format!("ack parse: {e}"),
             })?;
         Ok(ack)
+    }
+
+    /// POST de un ACK por el plano ETSI-020 (mTLS). Devuelve cuántos `key_ids`
+    /// dice el peer que casaron.
+    ///
+    /// Es la variante **autenticada** del ACK: la identidad del emisor la pone
+    /// el certificado de cliente, no un campo del cuerpo. El socket TCP heredado
+    /// acepta conexiones de cualquiera y se cree el `from` que le manden, así
+    /// que un ACK forjado saca entradas de `ack_pending` y descuadra el
+    /// generador (docs/SECURITY.md §Fase 4).
+    ///
+    /// El receptor ya estaba: `handle_ext_keys_ack` → `handle_incoming_ack`.
+    /// Esto es sólo el lado emisor, que faltaba.
+    pub async fn send_ext_keys_ack(
+        &self,
+        peer_node: &str,
+        peer: &PeerCfg,
+        key_ids: &[String],
+    ) -> Result<usize> {
+        let url = format!(
+            "{}/kmapi/v1/ext_keys/ack",
+            peer.endpoint.trim_end_matches('/')
+        );
+        let body = Etsi020ExtKeyAckContainer {
+            key_ids: key_ids
+                .iter()
+                .filter_map(|k| k.parse().ok().map(Etsi020KeyID::new))
+                .collect(),
+            ack_status: Etsi020AckStatus::Relayed,
+            initiator_sae_id: Default::default(),
+            target_sae_id: Default::default(),
+            message: None,
+            extension: None,
+        };
+        let resp = self
+            .inner
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| DkmsError::PeerUnreachable {
+                peer: peer_node.to_owned(),
+                source: anyhow!(e),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let b = resp.text().await.unwrap_or_default();
+            return Err(DkmsError::PeerRejected {
+                peer: peer_node.to_owned(),
+                status: status.as_u16(),
+                body: b,
+            });
+        }
+        let v: serde_json::Value = resp.json().await.unwrap_or_default();
+        Ok(v.get("matched").and_then(|m| m.as_u64()).unwrap_or(0) as usize)
     }
 
     pub fn request_cfg(&self) -> &RequestCfg {
