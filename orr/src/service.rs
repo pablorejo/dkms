@@ -450,7 +450,11 @@ impl OrrService {
             epoch_id,
         }];
         let (session, counter) = self.next_onion_freshness();
-        let onion = onion::build_onion(&path, payload, session, counter)?;
+        // Forma CANÓNICA del header DKMS: `encode` de un BTreeMap es
+        // determinista, y quien reenvía hace `encode(decode(...))`, así que los
+        // dos extremos calculan los mismos bytes. Va al AAD de todas las capas.
+        let hdr_canon = dkms_header::encode(&app_header)?;
+        let onion = onion::build_onion(&path, payload, session, counter, &hdr_canon)?;
         self.send_onion_frame(dest_orr, dest_qkc, onion, app_header, grade)
             .await?;
         debug!(dest = %dest_orr, dest_qkc, "orr.send pqc_e2e");
@@ -562,7 +566,8 @@ impl OrrService {
             });
         }
         let (session, counter) = self.next_onion_freshness();
-        let onion = onion::build_onion(&hops, payload, session, counter)?;
+        let hdr_canon = dkms_header::encode(&app_header)?;
+        let onion = onion::build_onion(&hops, payload, session, counter, &hdr_canon)?;
         let first_qkc = self.peers.qkc_id(&onion.first_hop_orr).ok_or_else(|| {
             OrrError::Relay(format!(
                 "first hop {} sin qkc_id en peers config",
@@ -709,6 +714,7 @@ impl OrrService {
             epoch_id,
             header.session,
             header.counter,
+            &dkms_header::encode(&dkms_map)?,
         )
         .inspect_err(|_| {
             OrrStats::bump(&self.stats.peel_failed);
