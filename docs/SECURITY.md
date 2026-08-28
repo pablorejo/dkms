@@ -40,7 +40,8 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | DKMS↔DKMS ACK socket | `peer_addr`+1000 (auto) | **sí** | **ninguna** (TCP plano, identidad = campo JSON) | eliminado — ACKs por ETSI-020 | 4 |
 | todos↔SDN (HTTP admin) | SDN `http_addr` :8081 | **sí** | **ninguna** (decisión explícita, `sdn/src/http_api.rs:22-23`) | mTLS + identity binding | 3 |
 | todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
-| QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | payload OTP, **handshake PQC sin autenticar** | HMAC-PSK en INIT/RESP/NOTIFY | 5 |
+| QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
+| ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
 | ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | ninguna (pubkey sin firmar, overwrite anónimo) | pinning + challenge-response | 6 |
 | DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) | ninguna | ninguna — red interna obligatoria (§1.2) | — |
 | ORR↔QKC (gRPC) | interno | no | ninguna | ninguna — red interna obligatoria | — |
@@ -666,6 +667,85 @@ Notas de diseño originales:
 
 ---
 
+### Fase 8 — Integridad, origen de datos y frescura del plano de datos (HECHA 2026-08-28)
+
+Las fases 1-7 son **autenticación de entidad**: quién habla. Esta es la otra
+mitad, y se resuelve distinto: que **cada mensaje** venga de quien dice, no haya
+sido modificado, y no sea uno de ayer reinyectado hoy. Autenticar la conexión no
+basta si luego los frames van sin MAC.
+
+**De qué se partía.** El payload del enlace QKC↔QKC va cifrado con OTP y las
+capas del ORR iban con `plaintext ⊕ HKDF(master_secret, key_id, len)`. Los dos
+son maleables: quien pudiera tocar el ciphertext podía aplicarle un delta
+arbitrario y el receptor descifraba un plaintext modificado sin enterarse. Lo
+único que había enfrente era el `key_digest` del DKMS, un SHA-256 **sin clave**
+que funciona sólo porque viaja dentro del cifrado —integridad apoyada en la
+confidencialidad— y que además sólo cubre el camino del `DKMS_BUFFER`. Y
+`frame.sender_id` era un `u32` en claro que nadie comprobaba.
+
+**Dos capas, porque protegen cosas distintas.**
+
+1. **Salto a salto, en el enlace** (`common/src/crypto/frame_mac.rs`,
+   `qkc/src/frame_auth.rs`). HMAC-SHA256 sobre el frame entero —identidades,
+   `key_ids` con longitud explícita, los dos headers que el QKC propaga sin
+   mirar, y el ciphertext—, con clave `HKDF(link_psk, salt = session)`. Kinds
+   `0x04`/`0x05` y `0x25`; el `PAYLOAD` acaba en `session ‖ counter ‖ tag`.
+   Política por enlace: `frame_auth = off | prefer | require`.
+2. **Extremo a extremo, en la cebolla** (`orr/src/onion.rs`). AES-256-GCM por
+   capa con `key_id ‖ epoch_id ‖ max_hops ‖ session ‖ counter` como AAD. Hace
+   falta *además* del MAC de enlace porque éste es salto a salto: el QKC
+   descifra, recifra y **recalcula el MAC**, así que un QKC del camino podría
+   alterar la carga sin que nada lo notase. El tag AEAD lleva la clave del par
+   de ORRs, que el QKC no tiene.
+
+**La frescura va dentro del mensaje autenticado, por diseño.** Un MAC que sólo
+cubre el contenido deja el frame repetido igual de válido. En las dos capas la
+pareja es `(session, counter)`: `session` es una encarnación aleatoria por
+arranque de proceso —sin ella, un emisor que reinicia vuelve al contador 1 y sus
+mensajes legítimos son indistinguibles de un replay— y `counter` un monotónico.
+El receptor lleva una ventana deslizante (1024) y un conjunto de sesiones
+retiradas. En la cebolla, `(session, counter)` los pone el ORR de **origen** y
+entran en el AAD de todas las capas: el que reenvía tiene que copiarlos tal
+cual, porque si los cambia el peel del salto siguiente falla.
+
+**Tres invariantes que no hay que romper.**
+
+- **Verificar el MAC ANTES de tocar la ventana**, en las dos capas. Al revés,
+  cualquiera tira la ventana del receptor mandando basura con una `session`
+  inventada; con el MAC delante hace falta la clave para siquiera proponer una
+  sesión nueva.
+- **Un enlace con MAC se declara en los DOS extremos**, igual que `pqc_auth =
+  sign`: la raíz es `link_psk`, config local que la SDN no transporta ni debe,
+  así que el extremo que recibe el enlace por anuncio se queda sin PSK y
+  descarta todo. `render_config.py` emite `link_psk`/`frame_auth` **fuera** de
+  la bifurcación qkd/pqc — estuvieron dentro de la rama pqc y un enlace QKD los
+  perdía al renderizar, en silencio.
+- **La raíz es simétrica y de 256 bits**, así que es quantum-safe (Grover deja
+  128 efectivos) y no hace falta firma por frame: una ML-DSA son 3309 B por
+  mensaje, inviable a este ritmo. Upgrade documentado: derivar la raíz del
+  secreto ML-KEM del enlace, o hacer *key growing* con bits QKD.
+
+**Diagnóstico.** Línea `qkc.frame_auth` cada 5 s por enlace con
+`signed/verified/bad_mac/replayed/plain_ok/plain_rej`; en un enlace sano lo que
+un extremo firma coincide con lo que el otro verifica y los cuatro últimos son
+0. En el ORR, `replay_dropped` en `orr.state`, separado de `peel_failed`: uno es
+"tag válido, mensaje repetido" y el otro "tag que no cuadra".
+
+**Verificación.** 439 tests en verde. Malla local N=4 en anillo, enlaces QKD y
+PQC, con `frame_auth = require`: simetría exacta signed/verified en las ocho
+direcciones, `bad_mac = replayed = peel_failed = replay_dropped = 0`, 12 288
+mensajes por nodo entregados y 12/12 pares ETSI-014 byte-idénticos. Coste en
+CESGA: campaña `ringchords n=10`, brazos `frameoff`/`framerequire`, tres
+regímenes.
+
+**Lo que sigue sin cubrir.** Un QKC intermedio malicioso ya no puede alterar la
+carga (lo impide el tag AEAD de la cebolla) pero sigue viendo el `header_orr_mp`
+en claro y puede descartar frames: la disponibilidad no es objetivo de esta
+fase. Y las claves de sesión SAE siguen sin comprobación propia extremo a
+extremo — van envueltas con una clave de transporte y entregadas por ETSI-020;
+las capas de esta fase lo hacen inalcanzable en la práctica, no imposible en
+principio.
+
 ## 4. Decisions log
 
 **4.1 PKI: dos raíces offline por plano (elegido) vs una CA única vs CA
@@ -752,3 +832,4 @@ URL `https://` falla en runtime y bloquearía el rollout en silencio.
 | 5 | t40/t41, mesh mixto off/prefer | INIT forjado bajo `require` |
 | 6 | orr unit tests, bootstrap_times.py | EstablishSecret rogue vs peer establecido |
 | 7 | barrido completo t00–t50 | Drain desde no-localhost |
+| 8 | unit (frame_mac, frame_auth, onion, onion_replay), mesh.sh N=4 qkd+pqc, CESGA n=10 | ciphertext manipulado; emisor suplantado; frame redirigido; headers reescritos; replay de frame y de NOTIFY; capa movida de época o de max_hops; reinicio del peer |
