@@ -671,6 +671,35 @@ impl DkmsService {
 
             let plaintext = unwrap_session_key(tk.bytes.as_slice(), k.value.as_ref())
                 .map_err(DkmsError::Crypto)?;
+
+            // Comprobar la huella ANTES de guardar y de acusar recibo. Sin esto
+            // una clave de transporte divergente entrega a los dos SAE claves
+            // distintas sin un solo error. Un emisor viejo no manda la huella:
+            // se acepta como antes, para no romper un despliegue mezclado.
+            if let Some(expected) = k
+                .extension
+                .as_ref()
+                .and_then(|m| m.get("session_key_digest"))
+                .and_then(|v| v.as_str())
+            {
+                let actual = crate::southbound::orr::key_digest(&k.key_id.to_string(), &plaintext);
+                if actual != expected {
+                    self.flow.recv_corrupt(peer.as_str(), 1);
+                    warn!(
+                        %peer,
+                        key_id = %k.key_id,
+                        transport_key_id = %tk_id,
+                        esperado = %expected,
+                        obtenido = %actual,
+                        "dkms.ext_keys: la clave de sesión no cuadra con su huella; \
+                         la descarto y NO la acuso. Casi seguro la clave de transporte \
+                         difiere entre los dos extremos: sin esto, los dos SAE de esta \
+                         petición se habrían llevado claves DISTINTAS",
+                    );
+                    continue;
+                }
+            }
+
             self.pending.insert(
                 KeyId::new(k.key_id.to_string()),
                 initiator.clone(),
@@ -825,6 +854,27 @@ impl DkmsService {
             ext.insert(
                 "transport_key_id".to_owned(),
                 Value::String(tk.id.to_string()),
+            );
+            // Huella de la clave de SESIÓN, para que el peer compruebe que la
+            // ha desenvuelto bien antes de guardarla.
+            //
+            // Es la única comprobación de este camino. La clave va envuelta en
+            // OTP con una clave de transporte, y si esa clave difiere entre los
+            // dos extremos —épocas desincronizadas, un buffer que no se limpió—
+            // el peer desenvuelve otra cosa, la guarda tan tranquilo, y los dos
+            // SAE de la misma petición ETSI-014 acaban con claves DISTINTAS sin
+            // un solo error por ningún lado. Es el mismo patrón que el
+            // `key_digest` del camino del generador.
+            //
+            // Publicarla no filtra nada: esto viaja dentro de mTLS DKMS↔DKMS, y
+            // la clave son 256 bits de entropía, así que la preimagen no es
+            // atacable. Va ligada al `key_id` para que no valga en otra entrada.
+            ext.insert(
+                "session_key_digest".to_owned(),
+                Value::String(crate::southbound::orr::key_digest(
+                    &uuid.to_string(),
+                    k_bytes.as_slice(),
+                )),
             );
             etsi_keys.push(Etsi020Key {
                 key_id: *uuid,
@@ -1150,6 +1200,42 @@ mod tests {
             .iter()
             .map(|(s, n)| (s.to_string(), n.to_string()))
             .collect()
+    }
+
+    /// La huella de la clave de sesión: lo que impide que dos SAE de la misma
+    /// petición se lleven claves distintas cuando la clave de transporte
+    /// diverge entre los dos extremos.
+    #[test]
+    fn session_key_digest_catches_a_diverged_transport_key() {
+        use crate::southbound::orr::key_digest;
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let session_key = vec![0xA5u8; TRANSPORT_KEY_BYTES];
+        let transport_ok = vec![0x11u8; TRANSPORT_KEY_BYTES];
+        let wire = wrap_session_key(&transport_ok, &session_key).unwrap();
+        let expected = key_digest(&key_id, &session_key);
+
+        // Con la MISMA clave de transporte, la huella cuadra.
+        let pt = unwrap_session_key(&transport_ok, &wire).unwrap();
+        assert_eq!(key_digest(&key_id, &pt), expected);
+
+        // Con una clave de transporte que difiere en UN bit, el desenvuelto da
+        // otra cosa — y con OTP nada más abajo lo nota. La huella sí.
+        let mut transport_bad = transport_ok.clone();
+        transport_bad[0] ^= 0x01;
+        let pt_bad = unwrap_session_key(&transport_bad, &wire).unwrap();
+        assert_ne!(pt_bad, session_key);
+        assert_ne!(key_digest(&key_id, &pt_bad), expected);
+    }
+
+    /// La huella va ligada al `key_id`, así que una clave buena no vale para
+    /// otra entrada.
+    #[test]
+    fn session_key_digest_is_bound_to_its_key_id() {
+        use crate::southbound::orr::key_digest;
+        let session_key = vec![0x5Au8; TRANSPORT_KEY_BYTES];
+        let a = key_digest(&uuid::Uuid::new_v4().to_string(), &session_key);
+        let b = key_digest(&uuid::Uuid::new_v4().to_string(), &session_key);
+        assert_ne!(a, b);
     }
 
     #[test]
