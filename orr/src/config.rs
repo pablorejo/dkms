@@ -69,8 +69,20 @@ pub struct OrrConfig {
 
     /// TLS de cliente para el anuncio al SDN (docs/SECURITY.md §Fase 3).
     /// Solo se usa si `sdn_http_url` es `https://`; en claro se ignora.
+    /// Con `grpc_tls = true` es además la identidad del servidor gRPC.
     #[serde(default)]
     pub tls: Option<common::http::ControlTlsCfg>,
+
+    /// mTLS en el gRPC de este ORR: lo que le habla su DKMS (`SendMessage`,
+    /// `StreamDeliveries`) y lo que le hablan los ORR pares (bootstrap y
+    /// rotación). Exige `tls`. Con `false` (default) va en claro, y por ese
+    /// canal viaja el material de transporte SIN cifrar: es el enlace
+    /// DKMS↔ORR que "tiene que estar en red interna". Si DKMS y ORR no
+    /// comparten máquina o la red interna no es de fiar, ponlo a `true` — en
+    /// los DOS extremos: el DKMS pasa a `orr_endpoint = https://…` y los pares
+    /// dialan `https://`. Los certificados son los de nodo (CA de red).
+    #[serde(default)]
+    pub grpc_tls: bool,
 
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,

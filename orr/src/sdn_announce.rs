@@ -75,6 +75,10 @@ pub struct SdnAnnouncer {
     /// todavía a un par, su lista llega vacía; borrarlos entonces tiraría
     /// abajo su `master_secret` por un simple retraso.
     local_peers: HashSet<String>,
+    /// Con `grpc_tls`, los pares se dialan por `https://`. La SDN entrega las
+    /// URLs como `http://` porque no sabe (ni debe) de TLS: el esquema es una
+    /// decisión de despliegue, y tiene que ser la misma en todos los ORR.
+    grpc_tls: bool,
 }
 
 impl SdnAnnouncer {
@@ -143,6 +147,7 @@ impl SdnAnnouncer {
             // Lo del node.yml ya lo arrancó `bootstrap::spawn_all`.
             spawned: cfg.peer_grpc_addrs.keys().cloned().collect(),
             local_peers: cfg.peer_grpc_addrs.keys().cloned().collect(),
+            grpc_tls: cfg.grpc_tls,
         })
     }
 
@@ -173,15 +178,19 @@ impl SdnAnnouncer {
             // Refrescamos la URL en cada latido, no sólo al darlo de alta:
             // un peer redesplegado con otra IP debe seguir siendo
             // alcanzable para el re-bootstrap pasivo.
-            self.peers
-                .put_grpc_addr(p.orr_id.clone(), p.grpc_url.clone());
+            let url = if self.grpc_tls {
+                p.grpc_url.replacen("http://", "https://", 1)
+            } else {
+                p.grpc_url.clone()
+            };
+            self.peers.put_grpc_addr(p.orr_id.clone(), url.clone());
             if self.spawned.insert(p.orr_id.clone()) {
-                info!(orr = %p.orr_id, url = %p.grpc_url, "par nuevo: arranco su bootstrap");
+                info!(orr = %p.orr_id, url = %url, "par nuevo: arranco su bootstrap");
                 bootstrap::spawn_one(
                     self.identity.clone(),
                     self.peers.clone(),
                     p.orr_id.clone(),
-                    p.grpc_url.clone(),
+                    url.clone(),
                     self.suite.clone(),
                     self.rotation_period_ms,
                     self.epoch_history_keep,

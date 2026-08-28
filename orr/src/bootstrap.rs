@@ -32,7 +32,6 @@ use common::proto::common::v1::NodeId;
 use common::proto::orr::v1::{
     orr_control_client::OrrControlClient, EstablishSecretRequest, GetPublicKeyRequest,
 };
-use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use crate::{handshake, identity::OrrIdentity, peers::PeerRegistry};
@@ -359,11 +358,7 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
 pub(crate) async fn try_fetch_pubkey(
     addr: &str,
 ) -> std::result::Result<(Vec<u8>, String, String, Vec<u8>), String> {
-    let ch = Channel::from_shared(addr.to_string())
-        .map_err(|e| format!("addr inválido: {e}"))?
-        .connect()
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let ch = crate::grpc_tls::channel(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .get_public_key(GetPublicKeyRequest {})
@@ -399,11 +394,7 @@ pub async fn attempt_establish(
     }
     secret.copy_from_slice(&encap.shared_secret);
 
-    let ch = Channel::from_shared(addr.to_string())
-        .map_err(|e| format!("addr inválido: {e}"))?
-        .connect()
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let ch = crate::grpc_tls::channel(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .establish_secret(EstablishSecretRequest {

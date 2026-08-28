@@ -65,7 +65,29 @@ fn derive_sdn_http_url(grpc_url: &str) -> String {
 /// presenta el cert de este DKMS y verifica al SDN con `control_plane_ca`
 /// (fallback a `peer_dkms_ca`, la misma CA de red). `None` si es http (claro).
 fn build_control_plane_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::ClientTlsConfig>> {
-    if !cfg.southbound.sdn_endpoint.trim_start().to_ascii_lowercase().starts_with("https://") {
+    client_tls_for(cfg, &cfg.southbound.sdn_endpoint)
+}
+
+/// `ClientTlsConfig` para el gRPC dkms→ORR si `orr_endpoint` es https. El
+/// enlace DKMS↔ORR lleva el material de transporte en claro, así que si los
+/// dos no comparten máquina hay que cifrarlo: `grpc_tls = true` en el ORR y
+/// `https://` aquí. Misma identidad de nodo y misma CA de red que hacia el SDN.
+fn build_orr_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::ClientTlsConfig>> {
+    match cfg.southbound.orr_endpoint.as_deref() {
+        Some(ep) => client_tls_for(cfg, ep),
+        None => Ok(None),
+    }
+}
+
+fn client_tls_for(
+    cfg: &DkmsConfig,
+    url: &str,
+) -> Result<Option<tonic::transport::ClientTlsConfig>> {
+    if !url
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
         return Ok(None);
     }
     use tonic::transport::{Certificate, ClientTlsConfig, Identity};
@@ -74,7 +96,8 @@ fn build_control_plane_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::
         .control_plane_ca
         .as_deref()
         .unwrap_or(&cfg.tls.peer_dkms_ca);
-    let ca = std::fs::read(ca_path).with_context(|| format!("read control_plane_ca {ca_path:?}"))?;
+    let ca =
+        std::fs::read(ca_path).with_context(|| format!("read control_plane_ca {ca_path:?}"))?;
     let cert = std::fs::read(&cfg.tls.cert_path).context("read tls.cert_path")?;
     let key = std::fs::read(&cfg.tls.key_path).context("read tls.key_path")?;
     Ok(Some(
@@ -296,7 +319,7 @@ async fn main() -> Result<()> {
         let mut last_err: Option<String> = None;
         let mut connected: Option<std::sync::Arc<OrrClient>> = None;
         for attempt in 0..20 {
-            match OrrClient::connect_opt(&cfg.southbound, None).await {
+            match OrrClient::connect_opt(&cfg.southbound, build_orr_tls(&cfg)?).await {
                 Ok(Some(c)) => {
                     info!(
                         endpoint = %cfg.southbound.orr_endpoint.as_deref().unwrap_or(""),
@@ -339,104 +362,105 @@ async fn main() -> Result<()> {
     // (http_admin del SDN expone GET /rate/{dkms_id}) y rellenará los
     // buffers ENC compartidos contra cada peer.
     let mut ack_socket_addr: Option<std::net::SocketAddr> = cfg.generator.ack_socket_addr;
-    let (generator_arc, ack_client_arc, sae_buf_buckets_arc) =
-        if let (Some(orr_client), true) = (orr.as_ref(), cfg.generator.enabled) {
-            // Derivar dirección de ACK socket: si no está explícita, usar
-            // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
-            if ack_socket_addr.is_none() {
-                let mut a = cfg.listen.peer_addr;
-                a.set_port(a.port().wrapping_add(1000));
-                ack_socket_addr = Some(a);
-            }
-            let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
-            let ctrl_ca = cfg
-                .tls
-                .control_plane_ca
-                .as_deref()
-                .unwrap_or(&cfg.tls.peer_dkms_ca);
-            let sdn_http = Arc::new(
-                SdnHttpClient::new_with_tls(
-                    sdn_http_url,
-                    std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
-                    Some(common::http::ClientTls {
-                        ca_path: ctrl_ca,
-                        cert_path: &cfg.tls.cert_path,
-                        key_path: &cfg.tls.key_path,
-                    }),
-                )
-                .context("sdn http client")?,
-            );
-            let mut cfg_with_addr = (*cfg).clone();
-            cfg_with_addr.generator.ack_socket_addr = ack_socket_addr;
-            let ack_pending = Arc::new(AckPendingStore::new());
-            let gen = Generator::new(
-                &cfg_with_addr,
-                peers.clone(),
-                orr_client.clone(),
-                sdn_http,
-                pool.clone(),
-                ack_pending.clone(),
-                svc.demand_tracker.clone(),
-                svc.flow.clone(),
-            );
-            let gen_arc = gen.spawn_background();
+    let (generator_arc, ack_client_arc, sae_buf_buckets_arc) = if let (Some(orr_client), true) =
+        (orr.as_ref(), cfg.generator.enabled)
+    {
+        // Derivar dirección de ACK socket: si no está explícita, usar
+        // (peer_addr.host, peer_addr.port+1000) — convención local-dev.
+        if ack_socket_addr.is_none() {
+            let mut a = cfg.listen.peer_addr;
+            a.set_port(a.port().wrapping_add(1000));
+            ack_socket_addr = Some(a);
+        }
+        let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
+        let ctrl_ca = cfg
+            .tls
+            .control_plane_ca
+            .as_deref()
+            .unwrap_or(&cfg.tls.peer_dkms_ca);
+        let sdn_http = Arc::new(
+            SdnHttpClient::new_with_tls(
+                sdn_http_url,
+                std::time::Duration::from_millis(cfg.southbound.rpc_timeout_ms),
+                Some(common::http::ClientTls {
+                    ca_path: ctrl_ca,
+                    cert_path: &cfg.tls.cert_path,
+                    key_path: &cfg.tls.key_path,
+                }),
+            )
+            .context("sdn http client")?,
+        );
+        let mut cfg_with_addr = (*cfg).clone();
+        cfg_with_addr.generator.ack_socket_addr = ack_socket_addr;
+        let ack_pending = Arc::new(AckPendingStore::new());
+        let gen = Generator::new(
+            &cfg_with_addr,
+            peers.clone(),
+            orr_client.clone(),
+            sdn_http,
+            pool.clone(),
+            ack_pending.clone(),
+            svc.demand_tracker.clone(),
+            svc.flow.clone(),
+        );
+        let gen_arc = gen.spawn_background();
 
-            // ACK client batched (envía ACKs hacia los `ack_endpoint` que
-            // viajan en el header de los DKMS_BUFFER entrantes).
-            let ack_client = AckClient::new(cfg.node_id.clone());
-            // ACK autenticado si el operador lo pide Y hay cliente mTLS. En un
-            // despliegue ORR-only `peer_client` es None: ahí no hay por dónde,
-            // y se avisa en vez de callar y seguir con el socket como si nada.
-            let quiere_etsi020 = cfg.generator.ack_transport.eq_ignore_ascii_case("etsi020");
-            let ack_etsi020 = match (quiere_etsi020, svc.peer_client.as_ref()) {
-                (true, Some(pc)) => {
-                    info!("dkms.ack: los ACK salen autenticados por ETSI-020 (mTLS)");
-                    Some(dkms::control::Etsi020AckTransport {
-                        client: pc.clone(),
-                        peers: svc.peers.clone(),
-                    })
-                }
-                (true, None) => {
-                    warn!(
+        // ACK client batched (envía ACKs hacia los `ack_endpoint` que
+        // viajan en el header de los DKMS_BUFFER entrantes).
+        let ack_client = AckClient::new(cfg.node_id.clone());
+        // ACK autenticado si el operador lo pide Y hay cliente mTLS. En un
+        // despliegue ORR-only `peer_client` es None: ahí no hay por dónde,
+        // y se avisa en vez de callar y seguir con el socket como si nada.
+        let quiere_etsi020 = cfg.generator.ack_transport.eq_ignore_ascii_case("etsi020");
+        let ack_etsi020 = match (quiere_etsi020, svc.peer_client.as_ref()) {
+            (true, Some(pc)) => {
+                info!("dkms.ack: los ACK salen autenticados por ETSI-020 (mTLS)");
+                Some(dkms::control::Etsi020AckTransport {
+                    client: pc.clone(),
+                    peers: svc.peers.clone(),
+                })
+            }
+            (true, None) => {
+                warn!(
                         "dkms.ack: ack_transport = etsi020 pero no hay peer_client                          (¿todos los peers por ORR?); los ACK siguen por el socket SIN AUTENTICAR"
                     );
-                    None
-                }
-                (false, _) => None,
-            };
-            let batched = Arc::new(BatchedAckClient::with_transport(
-                ack_client,
-                32,
-                std::time::Duration::from_millis(50),
-                svc.flow.clone(),
-                ack_etsi020,
-            ));
-
-            // Servidor TCP de ACKs entrantes.
-            if let Some(addr) = ack_socket_addr {
-                let gen_for_socket = gen_arc.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
-                        warn!(error = %e, "ack_socket server exited");
-                    }
-                });
-                info!(%addr, "dkms.ack_socket configured");
+                None
             }
-
-            // SAE buffer buckets dinámicos: comparten el handle de rates SDN
-            // con el Generator para calcular refill = link_capacity / N_SAEs.
-            let sae_buf_buckets = Arc::new(SaeBufferBuckets::new(
-                pool.clone(),
-                gen_arc.rates_handle(),
-                cfg.sae.observation_window_secs,
-                cfg.sae.min_capacity_tokens,
-            ));
-
-            (Some(gen_arc), Some(batched), Some(sae_buf_buckets))
-        } else {
-            info!("generator disabled (no ORR or generator.enabled=false)");
-            (None, None, None)
+            (false, _) => None,
         };
+        let batched = Arc::new(BatchedAckClient::with_transport(
+            ack_client,
+            32,
+            std::time::Duration::from_millis(50),
+            svc.flow.clone(),
+            ack_etsi020,
+        ));
+
+        // Servidor TCP de ACKs entrantes.
+        if let Some(addr) = ack_socket_addr {
+            let gen_for_socket = gen_arc.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
+                    warn!(error = %e, "ack_socket server exited");
+                }
+            });
+            info!(%addr, "dkms.ack_socket configured");
+        }
+
+        // SAE buffer buckets dinámicos: comparten el handle de rates SDN
+        // con el Generator para calcular refill = link_capacity / N_SAEs.
+        let sae_buf_buckets = Arc::new(SaeBufferBuckets::new(
+            pool.clone(),
+            gen_arc.rates_handle(),
+            cfg.sae.observation_window_secs,
+            cfg.sae.min_capacity_tokens,
+        ));
+
+        (Some(gen_arc), Some(batched), Some(sae_buf_buckets))
+    } else {
+        info!("generator disabled (no ORR or generator.enabled=false)");
+        (None, None, None)
+    };
     svc.set_control(generator_arc, ack_client_arc, sae_buf_buckets_arc);
     let _ = ack_socket_addr; // silencia warning si no se usa
 

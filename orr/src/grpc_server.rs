@@ -318,12 +318,22 @@ fn map_err(e: OrrError) -> Status {
     }
 }
 
-pub async fn serve(svc: OrrService, addr: &str) -> anyhow::Result<()> {
+pub async fn serve(svc: OrrService, addr: &str, mtls: bool) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = addr.parse()?;
-    info!(%addr, "orr gRPC listening");
     let listener = common::net::bind_reuse_addr(addr).await?;
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    Server::builder()
+    let mut builder = Server::builder();
+    if mtls {
+        // Identidad de nodo + cert de cliente obligatorio de la CA de red:
+        // cubre al DKMS que nos habla y a los ORR pares. Ver `grpc_tls`.
+        let tls = crate::grpc_tls::server()?
+            .ok_or_else(|| anyhow::anyhow!("grpc_tls = true pero no hay [tls] configurado"))?;
+        builder = builder.tls_config(tls)?;
+        info!(%addr, "orr gRPC listening (mTLS)");
+    } else {
+        info!(%addr, "orr gRPC listening (plaintext)");
+    }
+    builder
         .add_service(OrrControlServer::new(OrrGrpc { svc }))
         .serve_with_incoming(incoming)
         .await?;

@@ -225,6 +225,16 @@ def render_orr(n, out):
     peers = n.get("peers") or {}           # orr_id -> qkc_id
     if peers:
         lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
+    # grpc_tls: mTLS en el gRPC del ORR (DKMS↔ORR y ORR↔ORR). Exige el bloque
+    # [tls], que sale de control_tls; sin él el ORR no arrancaría, así que
+    # mejor decirlo aquí, al renderizar. Y va ANTES del bloque [tls]: en TOML
+    # una clave suelta después de una tabla pertenece a la tabla, y
+    # `tls.grpc_tls` no es lo mismo que `grpc_tls` (pasó: el ORR arrancaba en
+    # claro con la opción "puesta").
+    if n.get("grpc_tls"):
+        if not n.get("control_tls"):
+            die("[orr] grpc_tls: true necesita control_tls: true (es la identidad que presenta)")
+        lines.append("grpc_tls = true")
     orr_cert = n.get("cert_name", req(n, "orr_id", "orr"))
     lines += control_tls_lines(n, orr_cert, "client")
     pvk = n.get("peer_verify_keys") or {}  # orr_id -> base64(ML-DSA verify key)
@@ -272,7 +282,8 @@ def render_dkms(n, out):
         "[southbound]",
         "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
         "qkc_endpoint = " + q("http://127.0.0.1:1"),   # dead by design (transport=orr)
-        "orr_endpoint = " + q("http://" + orr_addr),
+        # orr_tls: true → el ORR corre con grpc_tls y hay que dialarlo por https.
+        "orr_endpoint = " + q(("https://" if n.get("orr_tls") else "http://") + orr_addr),
         # Self-registration: the SDN places this DKMS under its ORR, so it
         # needs the ORR's *id*, not just its address. sdn_endpoint is gRPC;
         # the registration endpoint is on the SDN's HTTP admin.

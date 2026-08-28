@@ -404,6 +404,27 @@ este enlace, o el 20000 está filtrado entre ambas máquinas.
 
 ---
 
+### Cifrar el gRPC DKMS↔ORR y ORR↔ORR (`grpc_tls`)
+
+Ese gRPC va **en claro** por defecto, y por él pasa el material de transporte
+sin cifrar: está bien mientras DKMS y ORR compartan máquina o una red interna
+de confianza, y no en otro caso. Para cifrarlo con mTLS, con los mismos
+certificados de nodo de la CA de red:
+
+```yaml
+# node.orr.yml
+control_tls: true          # identidad del ORR: certs/<orr_id>.crt/.key + net-ca.crt
+grpc_tls: true             # el gRPC exige cert de cliente de la CA de red
+# node.dkms.yml
+orr_tls: true              # dial https:// al ORR
+```
+
+Es un ajuste de despliegue: en los **dos** extremos, y en **todos** los ORR a la
+vez, porque las direcciones de los pares que reparte la SDN llegan como
+`http://` y cada ORR les cambia el esquema según su propio `grpc_tls`. Hace
+falta un certificado de nodo por ORR (`gen-certs.sh <orr_id> <ip>`). El ORR
+lo dice al arrancar: `orr gRPC listening (mTLS)`.
+
 ## 3. ORR
 
 **Qué es**: el transporte E2E de material entre nodos. Coge claves del QKC de

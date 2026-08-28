@@ -90,6 +90,11 @@ PQC_AUTH="${DKMS_MESH_PQC_AUTH:-off}"
 # `link_psk` identica en los dos extremos: se deriva del indice de arista, que
 # es el mismo mirado desde cualquiera de los dos lados.
 FRAME_AUTH="${DKMS_MESH_FRAME_AUTH:-off}"
+# DKMS_MESH_GRPC_TLS=1 cifra con mTLS el gRPC del ORR: lo que le habla su DKMS
+# (material de transporte, que si no va en claro) y lo que le hablan los ORR
+# pares. Necesita un cert de nodo por ORR (orr_N, CA de red), que se genera
+# aquí o viene en DKMS_MESH_CERTS_SRC.
+GRPC_TLS="${DKMS_MESH_GRPC_TLS:-0}"
 SIGNDIR=""
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
@@ -327,6 +332,9 @@ advertise_ip: "127.0.0.1"
 sdn_announce_secs: 5
 ports: {grpc: $(orr_port "$n"), metrics: $(port "$n" 20004)}
 EOF
+        if [ "$GRPC_TLS" = 1 ]; then
+            printf 'control_tls: true\ngrpc_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node$n.orr.yml"
+        fi
         # Firma ML-DSA del bootstrap: el ORR firma la pubkey ML-KEM que anuncia
         # en GetPublicKey, y sus pares la verifican con la clave pública de
         # aquí. Cierra el MITM del bootstrap aunque la identidad ML-KEM siga
@@ -350,6 +358,7 @@ advertise_ip: "127.0.0.1"
 orr_addr: "127.0.0.1:$(orr_port "$n")"
 sdn_endpoint: "http://127.0.0.1:$SDN_GRPC"
 orr_id: "orr_$n"
+orr_tls: $([ "$GRPC_TLS" = 1 ] && echo true || echo false)
 sdn_announce_secs: 5
 certs_dir: "$DIR/certs"
 ports: {sae: $(sae_port "$n"), peer: $(port "$n" 20006), grpc: $(port "$n" 20007), metrics: $(port "$n" 20008), ack: $(port "$n" 20009)}
@@ -371,6 +380,7 @@ EOF
         if [ -z "${DKMS_MESH_CERTS_SRC:-}" ]; then
             bash "$GENCERTS" "dkms-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
             bash "$GENCERTS" --sae "sae_$n" "$DIR/certs" >/dev/null 2>&1
+            [ "$GRPC_TLS" = 1 ] && bash "$GENCERTS" "orr_$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
         fi
     done
     # Certs pre-generados: se copian enteros (CAs + hojas). Se valida que estén

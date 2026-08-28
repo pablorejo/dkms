@@ -42,8 +42,8 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
 | QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
 | ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
-| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | ninguna (pubkey sin firmar, overwrite anónimo) | pinning + challenge-response | 6 |
-| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) | ninguna | ninguna — red interna obligatoria (§1.2) | — |
+| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | pubkey firmada ML-DSA; **mTLS opcional** con `grpc_tls` (misma identidad de nodo) | hecho (6, 8) | 6, 8 |
+| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) — o sí, si se separan | ninguna por defecto; **mTLS opcional** (`grpc_tls` en el ORR + `https://` en el DKMS) | mTLS cuando DKMS y ORR no comparten red de confianza | 8 |
 | ORR↔QKC (gRPC) | interno | no | ninguna | ninguna — red interna obligatoria | — |
 | QKC↔KME/quditto (ETSI-014) | `quditto_url` | no (KME propio) | ninguna | ninguna — red interna obligatoria | — |
 | DKMS gRPC `DkmsControl` | `listen.grpc_addr` :50054 | no (operador) | **ninguna** (`Drain` borra buffers con 1 RPC) | bind localhost por defecto | 7 |
@@ -786,6 +786,13 @@ Ver la gotcha del troceado en CLAUDE.md.
   queda el MAC de enlace, salto a salto. El default es `1` en el Rust y en
   `render_config.py`, así que hay que ponerlo a mano para perderlo; pero si
   alguien lo hace, que sepa lo que apaga.
+- **El gRPC DKMS↔ORR va en claro por defecto**, y por él viaja el material de
+  transporte. Es la suposición «misma máquina o red interna de confianza».
+  Desde 2026-08-28 se puede cerrar con `grpc_tls = true` en el ORR (que pasa a
+  exigir cert de cliente de la CA de red, y cubre también a sus pares ORR) y
+  `orr_endpoint = https://…` en el DKMS. Es un ajuste de despliegue, en los
+  dos extremos y en todos los ORR a la vez, porque las URLs de los pares que
+  reparte la SDN vienen como `http://` y el ORR les cambia el esquema.
 - **El socket de ACK del DKMS sigue sin autenticar** (`ack_socket.rs`, Fase 4):
   acepta TCP plano de cualquiera y saca el `from` del cuerpo. No compromete
   material —es contabilidad del generador— pero sí es autenticación de origen

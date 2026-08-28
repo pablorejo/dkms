@@ -26,6 +26,7 @@ pub mod config;
 pub mod dkms_header;
 pub mod error;
 pub mod grpc_server;
+pub mod grpc_tls;
 pub mod handshake;
 pub mod header;
 pub mod identity;

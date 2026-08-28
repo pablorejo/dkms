@@ -86,3 +86,7 @@ docs/Paper_congreso/
 
 # Cuaderno de trabajo de la campaña quantum-safe (local, nunca al repo)
 .progress.md
+
+# Certificados pregenerados para CESGA (claves privadas) y target de la VM bookworm
+certs-pregen/
+target-bookworm/

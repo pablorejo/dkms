@@ -62,7 +62,6 @@ use common::proto::orr::v1::{
 };
 use thiserror::Error;
 use tokio::time::MissedTickBehavior;
-use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use crate::macs::{
@@ -126,10 +125,9 @@ pub async fn run_one_rotation(
 
     // 3. mac_req + RPC RequestEphemeralKey.
     let mac1 = mac_req(&bootstrap, epoch, local_orr_id, peer_id);
-    let channel = Channel::from_shared(peer_addr.to_string())
-        .map_err(|e| RotationError::BadUrl(e.to_string()))?
-        .connect()
-        .await?;
+    let channel = crate::grpc_tls::channel(peer_addr)
+        .await
+        .map_err(RotationError::BadUrl)?;
     let mut client = OrrControlClient::new(channel);
 
     let resp1 = client

@@ -24,6 +24,14 @@ async fn main() -> Result<()> {
 
     let cfg: OrrConfig = common::config::load_config("orr")?;
     info!(?cfg, "orr starting");
+    // Identidad TLS del proceso, para el servidor gRPC (si `grpc_tls`) y para
+    // los canales hacia pares que anuncien `https://`.
+    orr::grpc_tls::install(cfg.tls.clone());
+    if cfg.grpc_tls && cfg.tls.is_none() {
+        anyhow::bail!(
+            "grpc_tls = true exige la sección [tls] (cert_path, key_path, control_plane_ca)"
+        );
+    }
 
     let metrics = Metrics::new("orr");
     metrics.serve(cfg.metrics_addr.clone()).await?;
@@ -50,7 +58,7 @@ async fn main() -> Result<()> {
 
     let grpc = tokio::spawn({
         let svc = service.clone();
-        async move { orr::grpc_server::serve(svc, &cfg.grpc_addr).await }
+        async move { orr::grpc_server::serve(svc, &cfg.grpc_addr, cfg.grpc_tls).await }
     });
 
     tokio::select! {
