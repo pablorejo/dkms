@@ -42,7 +42,14 @@ def read_cell(d):
     cell = {"dir": d, "meta": {}, "status": {}, "keys": 0, "lat": [],
             "hs": 0, "hs_failed": 0, "hs_ms_sum": 0.0, "hs_ms_max": 0.0,
             "auth_reject": 0, "tls_fail": 0, "mldsa_keys": 0, "corrupt": 0,
-            "t_min": None, "t_max": None}
+            "t_min": None, "t_max": None,
+            # MAC de frame del enlace QKC↔QKC (docs/SECURITY.md §Fase 8). Sale
+            # de la línea `qkc.frame_auth`, no de los CSV: el cliente SAE no ve
+            # nada de esto. `signed`/`verified` son acumulados, así que se toma
+            # el máximo por enlace y se suma; los rechazos se acumulan igual.
+            "fa_mode": "", "fa_signed": 0, "fa_verified": 0,
+            "fa_bad_mac": 0, "fa_replayed": 0, "fa_plain_ok": 0,
+            "fa_plain_rej": 0, "orr_replay_dropped": 0, "orr_peel_failed": 0}
     try:
         with open(os.path.join(d, "meta.json")) as fh:
             cell["meta"] = json.load(fh)
@@ -104,6 +111,52 @@ def read_cell(d):
                     m2 = re.search(r"recv_corrupt=(\d+)", line)
                     if m2:
                         cell["corrupt"] = max(cell["corrupt"], int(m2.group(1)))
+
+    # `qkc.frame_auth`: una línea cada 5 s por enlace, con contadores
+    # acumulados. Se queda el ÚLTIMO valor de cada (nodo, peer) y se suma;
+    # sumar todas las líneas contaría el mismo frame ~una vez por tick.
+    re_fa = re.compile(
+        r"qkc\.frame_auth me=(\d+) peer=(\d+) mode=(\w+) session=\d+ "
+        r"signed=(\d+) verified=(\d+) bad_mac=(\d+) replayed=(\d+) "
+        r"plain_ok=(\d+) plain_rej=(\d+)")
+    last = {}
+    for name in sorted(os.listdir(d)):
+        if not (name.startswith("qkc") and name.endswith(".log")):
+            continue
+        with open(os.path.join(d, name), errors="replace") as fh:
+            for raw in fh:
+                if "qkc.frame_auth me=" not in raw:
+                    continue
+                m = re_fa.search(ANSI.sub("", raw))
+                if m:
+                    last[(m.group(1), m.group(2))] = m
+    for m in last.values():
+        cell["fa_mode"] = m.group(3)
+        cell["fa_signed"] += int(m.group(4))
+        cell["fa_verified"] += int(m.group(5))
+        cell["fa_bad_mac"] += int(m.group(6))
+        cell["fa_replayed"] += int(m.group(7))
+        cell["fa_plain_ok"] += int(m.group(8))
+        cell["fa_plain_rej"] += int(m.group(9))
+
+    # `orr.state`: el plano extremo a extremo. Acumulados, último por fichero.
+    for name in sorted(os.listdir(d)):
+        if not (name.startswith("orr") and name.endswith(".log")):
+            continue
+        pf = rd = 0
+        with open(os.path.join(d, name), errors="replace") as fh:
+            for raw in fh:
+                if "orr.state" not in raw:
+                    continue
+                line = ANSI.sub("", raw)
+                m1 = re.search(r"peel_failed=(\d+)", line)
+                m2 = re.search(r"replay_dropped=(\d+)", line)
+                if m1:
+                    pf = int(m1.group(1))
+                if m2:
+                    rd = int(m2.group(1))
+        cell["orr_peel_failed"] += pf
+        cell["orr_replay_dropped"] += rd
     return cell
 
 
@@ -134,6 +187,12 @@ def fmt(cell):
         "malas": cell["hs_failed"] + cell["tls_fail"] + cell["auth_reject"],
         "mldsa": cell["mldsa_keys"],
         "corrupt": cell["corrupt"],
+        "fa_mode": cell["fa_mode"] or "-",
+        "fa_signed": cell["fa_signed"],
+        "fa_verified": cell["fa_verified"],
+        "fa_ko": cell["fa_bad_mac"] + cell["fa_replayed"] + cell["fa_plain_rej"],
+        "fa_plain_ok": cell["fa_plain_ok"],
+        "orr_ko": cell["orr_peel_failed"] + cell["orr_replay_dropped"],
     }
 
 
@@ -158,6 +217,19 @@ def main(argv):
     if not cells:
         print("sin celdas en %s" % root)
         return 1
+
+    print("== ¿FUNCIONA LA AUTENTICACIÓN DEL PLANO DE DATOS? ==")
+    print("(docs/SECURITY.md §Fase 8. En un brazo sano: firmados == verificados,")
+    print(" y los tres contadores de rechazo a 0. `en_claro` > 0 con modo Require")
+    print(" significaría config asimétrica.)")
+    print("%-34s %-6s %-8s %12s %12s %8s %10s %8s" % (
+        "brazo", "carga", "modo", "firmados", "verificados", "rechaz", "en_claro",
+        "orr_ko"))
+    for c in cells:
+        print("%-34s %-6s %-8s %12d %12d %8d %10d %8d" % (
+            c["alg"], c["reg"], c["fa_mode"], c["fa_signed"], c["fa_verified"],
+            c["fa_ko"], c["fa_plain_ok"], c["orr_ko"]))
+    print("")
 
     print("== ¿FUNCIONAN LOS CERTIFICADOS? ==")
     hdr = "%-26s %-6s %8s %10s %8s %8s %8s" % (
