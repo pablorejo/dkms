@@ -65,6 +65,11 @@ pub struct DkmsConfig {
     #[serde(default)]
     pub generator: GeneratorCfg,
 
+    /// Capa extremo a extremo DKMS↔DKMS sobre el material de transporte.
+    /// Ver [`crate::e2e`]. Siempre activa: no hay modo "en claro".
+    #[serde(default)]
+    pub transport_e2e: TransportE2eCfg,
+
     /// Nivel de seguridad por defecto cuando una petición no especifica uno
     /// (vía extensions ETSI 014) y el peer destino no tiene override. Default
     /// `qkd_prefer`: usar QKD si hay camino QKD, si no PQC. Ver
@@ -160,10 +165,55 @@ pub struct SouthboundCfg {
     #[serde(default = "default_rpc_timeout_ms")]
     pub rpc_timeout_ms: u64,
     /// `max_hops` por defecto al mandar vía ORR cuando un peer no lo
-    /// fija explícitamente. `1` = PQC E2E (default seguro: una capa
-    /// onion entre origen y destino, intermedios solo ven xor_ct).
+    /// fija explícitamente. `0` = passthrough: el ORR sólo transporta,
+    /// porque desde 2026-08-28 el material va sellado extremo a extremo por
+    /// el propio DKMS ([`crate::e2e`]) y la cebolla del ORR ya no aporta
+    /// confidencialidad que no tenga. `1`, `≥2` o `-1` añaden encima las
+    /// capas onion del ORR (privacidad de camino), a coste de CPU y del
+    /// bootstrap ORR↔ORR en el camino crítico.
     #[serde(default = "default_max_hops")]
     pub default_max_hops: i32,
+}
+
+/// Capa extremo a extremo DKMS↔DKMS ([`crate::e2e`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportE2eCfg {
+    /// Suite ML-KEM del acuerdo de clave por par (`ml-kem-512|768|1024`).
+    #[serde(default = "default_e2e_suite")]
+    pub suite: String,
+    /// Cada cuánto rota la época con cada peer (lo dispara el lex-menor).
+    #[serde(default = "default_e2e_rekey_secs")]
+    pub rekey_secs: u64,
+    /// Épocas que se guardan por peer para abrir lo que aún esté en vuelo.
+    #[serde(default = "default_e2e_history")]
+    pub epoch_history_keep: usize,
+    /// Anchura de la ventana anti-replay por peer emisor, en contadores.
+    #[serde(default = "default_e2e_window")]
+    pub replay_window: u64,
+}
+
+impl Default for TransportE2eCfg {
+    fn default() -> Self {
+        Self {
+            suite: default_e2e_suite(),
+            rekey_secs: default_e2e_rekey_secs(),
+            epoch_history_keep: default_e2e_history(),
+            replay_window: default_e2e_window(),
+        }
+    }
+}
+
+fn default_e2e_suite() -> String {
+    common::crypto::pqc::suite::ML_KEM_768.to_owned()
+}
+fn default_e2e_rekey_secs() -> u64 {
+    3600
+}
+fn default_e2e_history() -> usize {
+    4
+}
+fn default_e2e_window() -> u64 {
+    common::crypto::frame_mac::DEFAULT_WINDOW
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,9 +258,10 @@ pub struct PeerCfg {
 ///   Comportamiento original; AEAD-wrap con clave de transporte del
 ///   pool QKC.
 /// * `Orr` — gRPC al ORR co-localizado (`southbound::orr::OrrClient`)
-///   con body = K raw y `header_dkms` en `app_header`. El ORR aplica
-///   onion según `max_hops` y el QKC OTP-cifra por enlace. NO se hace
-///   AEAD-wrap encima.
+///   con body = K sellada extremo a extremo por [`crate::e2e`] (tag en
+///   `header_dkms`) y `header_dkms` en `app_header`. El ORR aplica onion
+///   según `max_hops` (0 por defecto: sólo transporta) y el QKC OTP-cifra
+///   por enlace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PeerTransport {
@@ -485,5 +536,5 @@ fn default_ack_transport() -> String {
 }
 
 fn default_max_hops() -> i32 {
-    1
+    0
 }

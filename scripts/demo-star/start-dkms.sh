@@ -7,12 +7,12 @@
 #   * gen-tls.sh ya ejecutado (idempotente).
 #
 # Argumentos:
-#   $1 = max_hops por defecto (default 1 = PQC E2E). Se sustituye en
+#   $1 = max_hops por defecto (default 0 = passthrough; el DKMS sella e2e). Se sustituye en
 #        el template como `southbound.default_max_hops` para todos
 #        los DKMSs de esta corrida.
 
 set -euo pipefail
-MAX_HOPS=${1:-1}
+MAX_HOPS=${1:-0}
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOGS=/tmp/dkms-star-demo

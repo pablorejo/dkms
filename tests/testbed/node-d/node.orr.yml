@@ -1,7 +1,7 @@
 # Nodo D — ORR. SIN `peers` ni `peer_grpc_addrs`.
 #
-# `Topology::orr_peers` devuelve TODOS los demás ORR (el transporte ORR es E2E,
-# max_hops = 1), así que orr_4 debe recibir orr_1, orr_2 y orr_3 en la
+# `Topology::orr_peers` devuelve TODOS los demás ORR (cualquier ORR entrega a
+# cualquier otro), así que orr_4 debe recibir orr_1, orr_2 y orr_3 en la
 # respuesta al anuncio y arrancar su bootstrap con los tres sin que nadie se
 # los escriba aquí.
 orr_id: "orr_4"

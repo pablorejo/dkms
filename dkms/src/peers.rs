@@ -304,7 +304,7 @@ mod incarnation_tests {
         let t0 = Instant::now();
         let cd = Duration::from_secs(30);
         inc.note_at("dkms-2", "a", t0, cd); // primera vista, no wipe
-        // Ráfaga de cambios dentro del cooldown: solo el primero dispara wipe.
+                                            // Ráfaga de cambios dentro del cooldown: solo el primero dispara wipe.
         assert_eq!(
             inc.note_at("dkms-2", "b", t0 + Duration::from_secs(1), cd),
             Some("a".to_string()),

@@ -367,6 +367,9 @@ async fn main() -> Result<()> {
         peer_client,
     );
 
+    // Rotación por tiempo de las épocas e2e con cada peer (`crate::e2e`).
+    svc.e2e.clone().spawn_rekey_loop();
+
     // ─── Control plane: Generator + AckSocket ────────────────────────
     // Solo arranca si tenemos ORR conectado (para enviar) y al menos un
     // peer con transport=orr. El Generator pollerá rates al SDN HTTP
@@ -409,6 +412,7 @@ async fn main() -> Result<()> {
             peers.clone(),
             orr_client.clone(),
             sdn_http,
+            svc.e2e.clone(),
             pool.clone(),
             ack_pending.clone(),
             svc.demand_tracker.clone(),

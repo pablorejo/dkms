@@ -167,11 +167,11 @@ impl OrrClient {
     ///
     /// * `dest_orr_id`: id lógico del ORR destino (el ORR resuelve a
     ///   `qkc_id` por su tabla de peers).
-    /// * `body`: bytes crudos de la clave QKD (lo que entrará en
-    ///   `dec[key_id]` en el DKMS destino).
+    /// * `body`: la clave ya sellada por [`crate::e2e`] (el DKMS destino
+    ///   la abre antes de meterla en `dec[key_id]`).
     /// * `header_dkms`: `BTreeMap<String, String>` con las claves
     ///   canónicas (`HDR_*`). Va al `app_header` del proto.
-    /// * `max_hops`: routing mode (0 = passthrough, 1 = PQC E2E,
+    /// * `max_hops`: routing mode (0 = passthrough, el default; 1 = cebolla ORR E2E,
     ///   -1 = onion completo, N >= 2 = onion truncado con N hops
     ///   aleatorios elegidos por el ORR origen).
     pub async fn send_key(

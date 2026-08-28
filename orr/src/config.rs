@@ -90,6 +90,12 @@ pub struct OrrConfig {
     pub metrics_addr: String,
 
     /// Modo por defecto cuando un `SendMessage` no especifica `max_hops`.
+    /// `0` (passthrough): el ORR sólo transporta. Es el default porque desde
+    /// 2026-08-28 el DKMS sella el material extremo a extremo por su cuenta
+    /// (`dkms/src/e2e.rs`); `1`, `≥2` y `-1` añaden cebolla ORR↔ORR encima
+    /// como privacidad de camino, y meten el bootstrap ORR↔ORR en el camino
+    /// crítico. El DKMS manda siempre el suyo (`has_max_hops = true`), así
+    /// que esto sólo aplica a otros clientes.
     #[serde(default)]
     pub default_max_hops: i32,
 

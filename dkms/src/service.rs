@@ -79,8 +79,8 @@ use crate::{
     sae_binding::SaeBindingCache,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS,
-            HDR_MSG_TYPE, HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
+            HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, QkcClient, SdnClient,
     },
@@ -213,6 +213,11 @@ pub struct DkmsService {
     /// [`crate::peers::PeerIncarnations`] y
     /// [`DkmsService::forget_material_of_previous_incarnation`].
     peer_incarnations: Arc<PeerIncarnations>,
+
+    /// Capa extremo a extremo DKMS↔DKMS del material de transporte. La
+    /// comparten el generador (sella), el pump de entregas (abre) y el
+    /// servidor del plano peer (responde acuerdos). Ver [`crate::e2e`].
+    pub e2e: Arc<crate::e2e::E2e>,
 }
 
 impl DkmsService {
@@ -230,8 +235,15 @@ impl DkmsService {
         orr: Option<Arc<OrrClient>>,
         peer_client: Option<Arc<PeerHttpClient>>,
     ) -> Self {
+        let e2e = Arc::new(crate::e2e::E2e::new(
+            cfg.node_id.clone(),
+            cfg.transport_e2e.clone(),
+            peer_client.clone(),
+            peers.clone(),
+        ));
         Self {
             peer_incarnations: Arc::new(PeerIncarnations::new()),
+            e2e,
             cfg,
             metrics,
             pool,
@@ -1007,11 +1019,6 @@ impl DkmsService {
             .clone();
         let ack_endpoint = app.get(HDR_ACK_ENDPOINT).cloned();
 
-        // Antes de guardar nada: ¿sigue siendo la misma ejecución del peer?
-        if let Some(inc) = app.get(HDR_INCARNATION) {
-            self.note_peer_incarnation(&source_dkms, inc);
-        }
-
         let bits = app
             .get(HDR_KEY_SIZE_BITS)
             .and_then(|v| v.parse::<u32>().ok());
@@ -1025,37 +1032,62 @@ impl DkmsService {
             }
         }
 
-        // Integridad del material ANTES de guardarlo y de acusar recibo.
-        //
-        // Es la única comprobación de todo el camino: el OTP del enlace QKC no
-        // lleva MAC, así que una corrupción por debajo (secretos de época
-        // desincronizados tras reiniciar un nodo, un bit cambiado) llegaba
-        // aquí como clave buena. Se guardaba, se acusaba recibo, el emisor la
-        // daba por compartida — y semanas después los dos SAEs de una petición
-        // ETSI-014 recibían claves DISTINTAS sin que nada fallara.
-        //
-        // No acusamos recibo: el emisor la verá expirar y emitirá otra.
-        if let Some(expected) = app.get(HDR_KEY_DIGEST) {
-            let actual = crate::southbound::orr::key_digest(&key_id_str, &msg.payload);
-            if &actual != expected {
+        // Abrir ANTES de tocar nada. El payload llega sellado por el DKMS
+        // origen (`crate::e2e`): el tag cubre el material y la cabecera
+        // entera, así que hasta aquí no nos fiamos ni de `incarnation` —
+        // que borra buffers— ni de `ack_endpoint`. Un tag que no cuadra es
+        // corrupción, alteración o un secreto divergente: se descarta sin
+        // acusar recibo y el emisor la verá expirar. Una época que no
+        // tenemos es que alguien reinició: se pide un acuerdo (con su
+        // rate-limit) y mientras tanto lo que llegue se descarta igual.
+        let plaintext = match self.e2e.open(&source_dkms, app, &key_id_str, &msg.payload) {
+            Ok(pt) => pt,
+            Err(crate::e2e::E2eError::UnknownEpoch { epoch, .. }) => {
+                let n = self
+                    .flow
+                    .peer(&source_dkms)
+                    .recv_no_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.e2e.request_agreement(&source_dkms);
+                if n == 0 || n.is_multiple_of(1000) {
+                    warn!(
+                        source = %source_dkms,
+                        epoch,
+                        dropped = n + 1,
+                        "e2e: clave sellada con una época que no tengo; pido acuerdo y descarto",
+                    );
+                }
+                return Ok(());
+            }
+            Err(crate::e2e::E2eError::Replay(e)) => {
+                self.flow.recv_replayed(&source_dkms, 1);
+                warn!(source = %source_dkms, key_id = %key_id_str, error = %e,
+                      "e2e: clave repetida, descartada");
+                return Ok(());
+            }
+            Err(e) => {
                 self.flow.recv_corrupt(&source_dkms, 1);
                 warn!(
                     source = %source_dkms,
                     key_id = %key_id_str,
-                    esperado = %expected,
-                    obtenido = %actual,
-                    "clave de transporte CORRUPTA en tránsito: la descarto sin acusar recibo. \
-                     Revisa el enlace QKC hacia este peer (¿se reinició un extremo?)",
+                    error = %e,
+                    "e2e: clave de transporte NO verificable: la descarto sin acusar recibo. \
+                     Alterada en tránsito, cabecera manipulada o secreto e2e divergente",
                 );
                 return Ok(());
             }
+        };
+
+        // Ya autenticada la cabecera: ¿sigue siendo la misma ejecución del peer?
+        if let Some(inc) = app.get(HDR_INCARNATION) {
+            self.note_peer_incarnation(&source_dkms, inc);
         }
 
         let key_id = KeyId::new(&key_id_str);
         let buf = self.pool.for_peer(&source_dkms);
         let key = TransportKey {
             id: key_id.clone(),
-            bytes: zeroize::Zeroizing::new(msg.payload),
+            bytes: zeroize::Zeroizing::new(plaintext),
         };
         // `try_push` ahora es soft-hint en capacidad (nunca rechaza).
         // El cap antiguo provocaba un deadlock cuando el dec se llenaba:

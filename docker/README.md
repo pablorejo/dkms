@@ -434,9 +434,11 @@ orr_tls: false             # dial http:// al ORR
 
 ## 3. ORR
 
-**Qué es**: el transporte E2E de material entre nodos. Coge claves del QKC de
-su nodo, las envuelve (cebolla, PQC E2E con el ORR destino) y las entrega al
-DKMS remoto vía su ORR. Habla con: **su** QKC (20001), la SDN (19000) y los
+**Qué es**: el relay de material entre nodos. Recibe de su DKMS cada clave ya
+sellada extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`), la mete al
+QKC de su nodo y, en el otro extremo, la entrega al DKMS remoto. Con
+`default_max_hops` ≠ 0 añade además capas de cebolla ORR↔ORR (privacidad de
+camino), que ya no son necesarias para la confidencialidad. Habla con: **su** QKC (20001), la SDN (19000) y los
 ORR de los demás nodos (20003).
 
 **Paso 1 — certificado.** El gRPC del ORR va con **mTLS por defecto** (por él
@@ -480,7 +482,7 @@ peer_grpc_addrs:
 | `advertise_ip` | IP por la que la SDN alcanza a este ORR. Ponla y el ORR se da de alta solo en la topología; sin ella hay que darlo de alta a mano, y el ORR lo dice por log al arrancar (`no sé con qué IP anunciarme`). |
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `peers` / `peer_grpc_addrs` | **semilla, opcional**: los ORR con los que arrancar el bootstrap antes de que la SDN conteste. La lista viva la manda la SDN en la respuesta al anuncio, y un ORR nuevo aparece solo. Lo que pongas aquí es además un suelo que la SDN no puede borrar. Ojo a que no son solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
-| `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |
+| `default_max_hops` | default 0 (passthrough): el material ya va sellado por el DKMS. `1`, `≥2` o `-1` añaden cebolla ORR↔ORR encima (privacidad de camino) y meten el bootstrap ORR↔ORR en el camino crítico. |
 | `grpc_tls` | default `true`: mTLS en su gRPC con `certs/<orr_id>.crt/.key` + `net-ca.crt`. `false` sólo si DKMS y ORR comparten máquina o red interna (y entonces `orr_tls: false` en el DKMS). |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 
@@ -575,6 +577,7 @@ peers:
 | `peers.<id>` | **semilla, opcional**: con qué DKMS trabajar mientras la SDN no conteste, y suelo que la SDN no puede borrar. `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Cuando la SDN responde manda ella el `endpoint` y el `orr_id`; `max_hops`, `security_level` y `sni` se quedan siempre en local. |
 | `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
+| `transport_e2e` | **no hace falta tocarlo**. El material de transporte sale sellado extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`): ML-KEM-768 acordado por el mismo mTLS del ETSI-020 (20006), AES-256-GCM por clave, rotación cada 3600 s. Lo único que exige es lo que ya exigía el ETSI-020: que los DKMS se alcancen entre sí en 20006 con certs de `net-ca`. En `generator.state`, `e2e_epoch=none` sostenido es que ese acuerdo no llega. |
 | `sae_bindings` | mapeo local `sae→dkms` de respaldo si la SDN no responde. Opcional. |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 

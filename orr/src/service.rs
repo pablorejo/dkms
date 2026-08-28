@@ -403,11 +403,12 @@ impl OrrService {
         })
     }
 
-    /// `max_hops = 1`: una sola capa onion contra el ORR destino. El
-    /// `orr_crypt{body}` es `body XOR K` donde K se deriva de un
-    /// ML-KEM encap contra la pubkey del destino. El frame viaja por
-    /// el QKC substrate; el ORR destino pela la capa antes de
-    /// entregar.
+    /// `max_hops = 1`: una sola capa onion contra el ORR destino
+    /// (AES-256-GCM con `HKDF(master_secret, key_id)`, ver `onion.rs`). El
+    /// frame viaja por el QKC substrate; el ORR destino pela la capa antes
+    /// de entregar. Desde 2026-08-28 el DKMS ya sella el material extremo a
+    /// extremo por su cuenta y el default es `0`; este modo queda como
+    /// capa adicional opcional.
     async fn send_onion_e2e(
         &self,
         dest_orr: &str,

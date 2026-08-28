@@ -197,7 +197,10 @@ def render_orr(n, out):
         "grpc_addr = " + q(grpc_l),
         "sdn_url = " + q(n.get("sdn_url", "")),
         "metrics_addr = " + q(metrics_l),
-        "default_max_hops = " + str(int(n.get("default_max_hops", 1))),
+        # 0 = passthrough: el material ya va sellado extremo a extremo por el
+        # DKMS (dkms/src/e2e.rs); la cebolla del ORR es privacidad de camino
+        # opcional (1, >=2, -1).
+        "default_max_hops = " + str(int(n.get("default_max_hops", 0))),
     ]
     # Firma ML-DSA del bootstrap (docs/SECURITY.md §Fase 6 PQC): seed de firma
     # de este ORR (escalar, seguro antes de cualquier tabla). Las verifying

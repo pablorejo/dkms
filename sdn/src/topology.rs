@@ -584,9 +584,10 @@ impl Topology {
         out
     }
 
-    /// Todos los demás ORR de la red. No se filtra por adyacencia: el
-    /// transporte ORR es E2E (`max_hops = 1` por defecto), así que cualquier
-    /// par puede necesitar hablar con cualquier otro.
+    /// Todos los demás ORR de la red. No se filtra por adyacencia: un ORR
+    /// entrega a cualquier otro a través del sustrato QKC, y los modos onion
+    /// necesitan el `master_secret` de cada destino, así que cualquier par
+    /// puede necesitar hablar con cualquier otro.
     pub fn orr_peers(&self, orr_id: &str) -> Vec<OrrPeer> {
         let mut out: Vec<OrrPeer> = self
             .orrs

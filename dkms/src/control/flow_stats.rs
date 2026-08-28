@@ -63,6 +63,12 @@ pub struct PeerFlow {
     /// Se descartan sin acusar recibo. Cualquier valor > 0 aquí significa
     /// que el enlace QKC hacia ese peer está entregando basura.
     pub recv_corrupt: AtomicU64,
+    /// Claves selladas con una época que no tenemos. Transitorio tras un
+    /// reinicio (nuestro o suyo) mientras se acuerda otra; sostenido, es que
+    /// el acuerdo no llega (¿endpoint HTTP del peer? ¿su CA?).
+    pub recv_no_epoch: AtomicU64,
+    /// Claves con tag válido pero ya vistas: alguien en el camino reinyecta.
+    pub recv_replayed: AtomicU64,
 }
 
 macro_rules! bump {
@@ -112,6 +118,8 @@ impl FlowStats {
     bump!(ack_send_failed);
     bump!(ack_no_endpoint);
     bump!(recv_corrupt);
+    bump!(recv_no_epoch);
+    bump!(recv_replayed);
 
     /// Registra el `ack_endpoint` que anuncia un peer. Devuelve `true` si
     /// es la primera vez que lo vemos o si cambió — el caller lo usa para

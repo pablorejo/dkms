@@ -12,8 +12,9 @@
 //!   key_id    = uuid4()
 //!     ↓ insert
 //!   ack_pending[peer][key_id] = (bytes, deadline)
+//!     ↓ e2e.seal  (AES-GCM con el secreto del par; tag y época en el header)
 //!     ↓ send via ORR
-//!   orr.send_key(peer, bytes, header={msg_type=DKMS_BUFFER, key_id, ack_endpoint, …}, max_hops=1)
+//!   orr.send_key(peer, ct, header={msg_type=DKMS_BUFFER, key_id, e2e_*, ack_endpoint, …}, max_hops=0)
 //! ```
 //!
 //! Cuando el peer recibe la clave (handle_orr_delivery), la guarda en su
@@ -39,11 +40,12 @@ use crate::{
     config::{DkmsConfig, GeneratorCfg, PeerTransport},
     control::ack_pending::{AckPendingEntry, AckPendingStore, TakeOutcome},
     control::flow_stats::{classify_endpoint, EndpointVerdict, FlowStats},
+    e2e::{E2e, E2eError},
     peers::PeerRegistry,
     southbound::{
         orr::{
-            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_DIGEST, HDR_KEY_ID, HDR_KEY_SIZE_BITS,
-            HDR_MSG_TYPE, HDR_REQUEST_ID, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
+            HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
+            HDR_REQUEST_ID, HDR_SAE_ORIGIN, HDR_TIMESTAMP_MS, MSG_TYPE_DKMS_BUFFER,
         },
         OrrClient, SdnHttpClient,
     },
@@ -113,6 +115,8 @@ pub struct Generator {
     pub ack_pending: Arc<AckPendingStore>,
     orr: Arc<OrrClient>,
     sdn_http: Arc<SdnHttpClient>,
+    /// Capa extremo a extremo: sella cada clave antes de que salga del DKMS.
+    e2e: Arc<E2e>,
     /// EWMA tracker shared with [`crate::service::DkmsService`].
     /// The service updates it on every SAE request; the demand loop
     /// here reads it to build the `POST /demand` payload sent to
@@ -129,11 +133,13 @@ pub struct Generator {
 impl Generator {
     /// Construye el Generator. No lanza ningún task — para arrancar los
     /// loops llamar a [`Generator::spawn_background`].
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: &DkmsConfig,
         peers: Arc<PeerRegistry>,
         orr: Arc<OrrClient>,
         sdn_http: Arc<SdnHttpClient>,
+        e2e: Arc<E2e>,
         pool: Arc<BufferPool>,
         ack_pending: Arc<AckPendingStore>,
         demand_tracker: crate::demand_tracker::SharedDemandTracker,
@@ -169,6 +175,7 @@ impl Generator {
             ack_pending,
             orr,
             sdn_http,
+            e2e,
             demand_tracker,
             buffer_capacity_per_peer: cfg.buffer.capacity_per_peer,
             ack_endpoint,
@@ -421,6 +428,15 @@ impl Generator {
                     ack_send_failed = g(&f.ack_send_failed),
                     ack_no_endpoint = g(&f.ack_no_endpoint),
                     recv_corrupt = g(&f.recv_corrupt),
+                    recv_no_epoch = g(&f.recv_no_epoch),
+                    recv_replayed = g(&f.recv_replayed),
+                    // Época e2e con la que le sellamos, y cuántas guardamos de
+                    // él. `none` sostenido = el acuerdo de clave no cuaja.
+                    e2e_epoch = self
+                        .e2e
+                        .snapshot(&peer)
+                        .0
+                        .map_or_else(|| "none".to_owned(), |e| e.to_string()),
                     peer_ack_endpoint = self
                         .stats
                         .endpoint_of(&peer)
@@ -849,13 +865,6 @@ impl Generator {
             HDR_KEY_SIZE_BITS.into(),
             (self.cfg.key_size_bytes * 8).to_string(),
         );
-        // Integridad extremo a extremo del material: el enlace QKC cifra con
-        // OTP sin MAC, así que sin esto una corrupción por debajo se guarda
-        // como clave buena y las dos puntas acaban con claves distintas.
-        header.insert(
-            HDR_KEY_DIGEST.into(),
-            crate::southbound::orr::key_digest(&key_id_str, &bytes),
-        );
         header.insert(
             HDR_TIMESTAMP_MS.into(),
             SystemTime::now()
@@ -876,11 +885,32 @@ impl Generator {
         if let Some(ep) = &self.ack_endpoint {
             header.insert(HDR_ACK_ENDPOINT.into(), ep.clone());
         }
+        // Sellado extremo a extremo, con la cabecera ya completa (entra en el
+        // AAD). Sale del DKMS cifrado y autenticado para el DKMS destino: ni
+        // el ORR ni ningún QKC del camino ven ni pueden alterar el material.
+        // Sin época acordada no se manda nada: se pide una (en background,
+        // con su propio rate-limit) y este tick falla como fallaría con el
+        // ORR sin master_secret; el siguiente reintenta.
+        let sealed = match self
+            .e2e
+            .seal(peer_dkms_id, &key_id_str, &mut header, &bytes)
+        {
+            Ok(ct) => ct,
+            Err(e) => {
+                if matches!(e, E2eError::NoEpoch { .. }) {
+                    self.e2e.request_agreement(peer_dkms_id);
+                }
+                let _ = self.ack_pending.take(peer_dkms_id, &key_id);
+                self.stats.emit_failed(peer_dkms_id, 1);
+                return Err(anyhow::anyhow!("e2e: {e}"));
+            }
+        };
+        drop(bytes);
         if let Err(e) = self
             .orr
             .send_key(
                 &dest_orr_id,
-                bytes,
+                sealed,
                 header,
                 self.default_max_hops,
                 grade.wire_byte(),

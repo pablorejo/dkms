@@ -783,13 +783,28 @@ Ver la gotcha del troceado en CLAUDE.md.
   al rotar SA). Persistirla exigiría meter estado en disco en un sistema
   diseñado sin él, y el ataque necesita capturar y reinyectar en el hueco de un
   reinicio concreto.
-- **`default_max_hops = 0` (passthrough) apaga la protección extremo a extremo**
-  sin decir nada. En ese modo no hay capa de cebolla: el payload va en claro
-  hasta el QKC, que lo cifra con el OTP del enlace, y el frame ni siquiera pasa
-  por `handle_onion_in`, así que no hay tag AEAD ni ventana anti-replay — sólo
-  queda el MAC de enlace, salto a salto. El default es `1` en el Rust y en
-  `render_config.py`, así que hay que ponerlo a mano para perderlo; pero si
-  alguien lo hace, que sepa lo que apaga.
+- **La capa extremo a extremo del material la pone el DKMS, no el ORR, desde
+  2026-08-28** (`dkms/src/e2e.rs`; ver el módulo para el diseño). La cebolla
+  del ORR sellaba ORR_A↔ORR_B: el ORR destino entregaba a su DKMS la clave en
+  claro, un salto antes de donde vive la relación — y en multi-host ese salto
+  es otro proceso. Ahora cada `DKMS_BUFFER` sale del DKMS origen como
+  AES-256-GCM con el secreto ML-KEM del par DKMS↔DKMS (acordado sobre el
+  mTLS ETSI-020, que ya autentica a ambos por certificado ML-DSA), **tag y
+  época en `header_dkms`** (payload de 32 B exactos: cero material QKD extra)
+  y `(incarnation, e2e_ctr)` como frescura. El AAD cubre la cabecera entera,
+  así que el receptor **abre antes de actuar** sobre `incarnation` (que borra
+  buffers) o `ack_endpoint`. `default_max_hops` pasa a `0`: el ORR sólo
+  transporta y su bootstrap sale del camino crítico; los modos onion siguen
+  disponibles como privacidad de camino y envuelven un payload ya sellado.
+  Consecuencia sobre el punto siguiente: `max_hops = 0` ya no apaga nada.
+  Dos decisiones que evitan por construcción los dos bugs abiertos del
+  bootstrap ORR↔ORR: la **época la asigna al azar el que responde y viaja en
+  cada clave** (dos acuerdos concurrentes son dos épocas, nunca una con dos
+  secretos) y **pide el que no tiene clave** (un DKMS reiniciado pide al
+  emitir; un receptor que ve una época que no tiene, también; el que responde
+  pasa a emitir con la nueva, así que los dos sentidos sanan solos).
+  `key_digest` desaparece del camino del generador —el tag lo cubre con
+  clave— y queda sólo como `session_key_digest` del camino SAE.
 - **El gRPC DKMS↔ORR y ORR↔ORR va con mTLS por defecto** desde 2026-08-28
   (`grpc_tls = true` en el ORR, que exige cert de cliente de la CA de red y
   cubre a su DKMS y a sus pares; `orr_tls = true` en el DKMS, que sube el

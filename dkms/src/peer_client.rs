@@ -24,8 +24,7 @@ use reqwest::{Certificate, Client, Identity};
 use tracing::debug;
 
 use etsi::v020::{
-    ack_status::Etsi020AckStatus, Etsi020ExtKeyAckContainer, Etsi020ExtKeyContainer,
-    Etsi020KeyID,
+    ack_status::Etsi020AckStatus, Etsi020ExtKeyAckContainer, Etsi020ExtKeyContainer, Etsi020KeyID,
 };
 
 use crate::{
@@ -193,6 +192,43 @@ impl PeerHttpClient {
         }
         let v: serde_json::Value = resp.json().await.unwrap_or_default();
         Ok(v.get("matched").and_then(|m| m.as_u64()).unwrap_or(0) as usize)
+    }
+
+    /// Acuerdo de clave de la capa extremo a extremo ([`crate::e2e`]):
+    /// manda nuestra pública efímera y devuelve la época y el ct del peer.
+    /// Va por el mismo mTLS que el ETSI-020, así que el peer sabe quién pide
+    /// por el certificado.
+    pub async fn post_e2e_kem(
+        &self,
+        peer_node: &str,
+        peer: &PeerCfg,
+        req: &crate::e2e::KemRequest,
+    ) -> Result<crate::e2e::KemResponse> {
+        let url = format!(
+            "{}{}",
+            peer.endpoint.trim_end_matches('/'),
+            crate::e2e::KEM_PATH
+        );
+        let resp = self.inner.post(&url).json(req).send().await.map_err(|e| {
+            DkmsError::PeerUnreachable {
+                peer: peer_node.to_owned(),
+                source: anyhow!(e),
+            }
+        })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DkmsError::PeerRejected {
+                peer: peer_node.to_owned(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        resp.json().await.map_err(|e| DkmsError::PeerRejected {
+            peer: peer_node.to_owned(),
+            status: status.as_u16(),
+            body: format!("kem parse: {e}"),
+        })
     }
 
     pub fn request_cfg(&self) -> &RequestCfg {

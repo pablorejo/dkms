@@ -7,6 +7,9 @@
 //!   peer responde con `ack_callback_url`). Por ahora solo loggea, el
 //!   flujo síncrono cubre la entrega y el reembolso de tokens.
 //! * `GET  /kmapi/v1/versions`     — versión del API ETSI 020.
+//! * `POST /kmapi/v1/e2e/kem`      — acuerdo de clave de la capa extremo a
+//!   extremo DKMS↔DKMS ([`crate::e2e`]). No es ETSI: es nuestro, pero vive
+//!   en este plano porque es el que ya autentica a los DKMS entre sí.
 
 use axum::{
     extract::{Json, State},
@@ -25,6 +28,7 @@ pub fn router(svc: DkmsService) -> Router {
         .route("/kmapi/v1/ext_keys", post(handle_ext_keys))
         .route("/kmapi/v1/ext_keys/ack", post(handle_ext_keys_ack))
         .route("/kmapi/v1/versions", get(handle_versions))
+        .route(crate::e2e::KEM_PATH, post(handle_e2e_kem))
         .with_state(svc)
 }
 
@@ -60,6 +64,21 @@ async fn handle_ext_keys_ack(
         "received ETSI 020 ack"
     );
     Json(serde_json::json!({"status": "ok", "matched": matched})).into_response()
+}
+
+/// El peer que pide es el del certificado (`peer.node_id`); el cuerpo sólo
+/// lleva su pública efímera. Respondemos con la época que le asignamos y
+/// pasamos a emitirle con ella.
+#[instrument(skip(svc, peer, req))]
+async fn handle_e2e_kem(
+    State(svc): State<DkmsService>,
+    peer: DkmsPeer,
+    Json(req): Json<crate::e2e::KemRequest>,
+) -> Response {
+    match svc.e2e.respond(peer.node_id.as_str(), &req) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => super::error_to_response(crate::error::DkmsError::BadRequest(e.to_string())),
+    }
 }
 
 #[instrument(skip(_svc))]
