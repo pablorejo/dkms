@@ -1,9 +1,10 @@
 //! TLS del gRPC del ORR: identidad de servidor (mTLS con la CA de red) y
 //! canales de cliente hacia los pares.
 //!
-//! Sin esto, el gRPC DKMS↔ORR y ORR↔ORR va en claro, y por el primero viaja
-//! el material de transporte sin cifrar. Es correcto solo si los dos módulos
-//! comparten máquina o red interna de confianza; si no, `grpc_tls = true`.
+//! Por ese gRPC viaja el material de transporte del DKMS, así que va con mTLS
+//! **por defecto** (`grpc_tls`). En claro sólo si alguien lo escribe
+//! (`grpc_tls = false`), y eso vale únicamente cuando DKMS y ORR comparten
+//! máquina o red interna de confianza.
 //!
 //! La configuración se guarda una vez en un `OnceLock`: los tres sitios que
 //! abren canales hacia pares (bootstrap ×2, rotación) están lejos del `main`
@@ -14,15 +15,33 @@ use std::sync::OnceLock;
 use common::http::ControlTlsCfg;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity, ServerTlsConfig};
 
-static TLS: OnceLock<Option<ControlTlsCfg>> = OnceLock::new();
+/// (identidad, `grpc_tls`).
+static TLS: OnceLock<(Option<ControlTlsCfg>, bool)> = OnceLock::new();
 
-/// Fija la identidad TLS del proceso. Llamar una vez, desde `main`.
-pub fn install(cfg: Option<ControlTlsCfg>) {
-    let _ = TLS.set(cfg);
+/// Fija la identidad TLS del proceso y si el gRPC va con mTLS. Llamar una
+/// vez, desde `main`.
+pub fn install(cfg: Option<ControlTlsCfg>, enabled: bool) {
+    let _ = TLS.set((cfg, enabled));
 }
 
 fn cfg() -> Option<&'static ControlTlsCfg> {
-    TLS.get().and_then(|o| o.as_ref())
+    TLS.get().and_then(|(c, _)| c.as_ref())
+}
+
+/// `true` si el gRPC de este ORR va con mTLS (y por tanto los pares también).
+pub fn enabled() -> bool {
+    TLS.get().map(|(_, e)| *e).unwrap_or(false)
+}
+
+/// URL con la que se diala a un par. Con `grpc_tls`, `https://` diga lo que
+/// diga la SDN o el TOML —ninguno de los dos sabe de TLS, y el esquema es
+/// una decisión de despliegue, la misma en todos los ORR—; si no, tal cual.
+pub fn peer_url(url: &str) -> String {
+    let u = url.trim();
+    if enabled() && u.len() >= 7 && u[..7].eq_ignore_ascii_case("http://") {
+        return format!("https://{}", &u[7..]);
+    }
+    u.to_string()
 }
 
 /// `ServerTlsConfig` para el gRPC de este ORR: presenta su cert y **exige**
@@ -39,18 +58,15 @@ pub fn server() -> anyhow::Result<Option<ServerTlsConfig>> {
     ))
 }
 
-/// Canal hacia un par. Si la URL es `https://` presenta la identidad de este
-/// ORR y verifica al par con la CA de red; si es `http://` va en claro, como
-/// siempre. Una URL `https://` sin identidad configurada es un error, no un
-/// silencio: es exactamente la config asimétrica que hay que ver.
+/// Canal hacia un par. Con `grpc_tls` (o una URL `https://` explícita)
+/// presenta la identidad de este ORR y verifica al par con la CA de red; en
+/// claro sólo si `grpc_tls = false` y la URL es `http://`. Una URL `https://`
+/// sin identidad configurada es un error, no un silencio: es exactamente la
+/// config asimétrica que hay que ver.
 pub async fn channel(url: &str) -> Result<Channel, String> {
-    let mut ep =
-        Channel::from_shared(url.to_string()).map_err(|e| format!("addr inválido: {e}"))?;
-    if url
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("https://")
-    {
+    let url = peer_url(url);
+    let mut ep = Channel::from_shared(url.clone()).map_err(|e| format!("addr inválido: {e}"))?;
+    if url.to_ascii_lowercase().starts_with("https://") {
         let t = cfg().ok_or_else(|| {
             format!("{url}: el par exige TLS pero este ORR no tiene [tls] configurado")
         })?;
@@ -67,4 +83,16 @@ pub async fn channel(url: &str) -> Result<Channel, String> {
             .map_err(|e| format!("tls: {e}"))?;
     }
     ep.connect().await.map_err(|e| format!("connect: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_url;
+
+    #[test]
+    fn peer_url_keeps_scheme_when_plaintext() {
+        // Sin `install`, `enabled()` es false: la URL se respeta tal cual.
+        assert_eq!(peer_url("http://10.0.0.2:20003"), "http://10.0.0.2:20003");
+        assert_eq!(peer_url("https://10.0.0.2:20003"), "https://10.0.0.2:20003");
+    }
 }

@@ -23,6 +23,11 @@ MAX_HOPS=${3:-0}
 USE_SDN=${USE_SDN:-0}
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLIENT="$ROOT/target/release/orr-test-client"
+# El gRPC del ORR va con mTLS por defecto: el cliente presenta el cert de un
+# DKMS de la demo (gen-tls.sh) y sube http→https él solo (ver orr-test-client).
+export ORR_TLS_CERT="$ROOT/scripts/demo-star/tls/dkms-11.crt"
+export ORR_TLS_KEY="$ROOT/scripts/demo-star/tls/dkms-11.key"
+export ORR_TLS_CA="$ROOT/scripts/demo-star/tls/net-ca.crt"
 TMP=/tmp/dkms-star-demo/saturate-orr
 mkdir -p "$TMP"
 

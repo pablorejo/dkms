@@ -75,13 +75,15 @@ pub struct OrrConfig {
 
     /// mTLS en el gRPC de este ORR: lo que le habla su DKMS (`SendMessage`,
     /// `StreamDeliveries`) y lo que le hablan los ORR pares (bootstrap y
-    /// rotación). Exige `tls`. Con `false` (default) va en claro, y por ese
-    /// canal viaja el material de transporte SIN cifrar: es el enlace
-    /// DKMS↔ORR que "tiene que estar en red interna". Si DKMS y ORR no
-    /// comparten máquina o la red interna no es de fiar, ponlo a `true` — en
-    /// los DOS extremos: el DKMS pasa a `orr_endpoint = https://…` y los pares
-    /// dialan `https://`. Los certificados son los de nodo (CA de red).
-    #[serde(default)]
+    /// rotación). **Activado por defecto**: por ese gRPC viaja el material de
+    /// transporte, y en claro lo lee cualquiera que toque el cable. Exige
+    /// `tls` (la identidad de nodo, CA de red): sin ella el ORR no arranca, y
+    /// lo dice. `grpc_tls = false` lo deja en claro, y es una decisión que hay
+    /// que escribir: sólo vale si DKMS y ORR comparten máquina o red interna
+    /// de confianza. Sea cual sea, en los DOS extremos y en todos los ORR a
+    /// la vez: el DKMS diala `https://` (`southbound.orr_tls`) y los pares
+    /// también, diga lo que diga la URL que reparte la SDN.
+    #[serde(default = "default_true")]
     pub grpc_tls: bool,
 
     #[serde(default = "default_metrics")]
@@ -190,6 +192,10 @@ pub enum BootstrapTrust {
 
 fn default_announce_secs() -> u64 {
     30
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_metrics() -> String {

@@ -42,8 +42,8 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
 | QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
 | ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
-| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | pubkey firmada ML-DSA; **mTLS opcional** con `grpc_tls` (misma identidad de nodo) | hecho (6, 8) | 6, 8 |
-| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) — o sí, si se separan | ninguna por defecto; **mTLS opcional** (`grpc_tls` en el ORR + `https://` en el DKMS) | mTLS cuando DKMS y ORR no comparten red de confianza | 8 |
+| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | pubkey firmada ML-DSA + **mTLS por defecto** (`grpc_tls`, identidad de nodo, CA de red) | hecho (6, 8) | 6, 8 |
+| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) — o sí, si se separan | **mTLS por defecto** (`grpc_tls` en el ORR, `orr_tls` en el DKMS; certs de nodo ML-DSA-65, CA de red). En claro sólo con opt-out explícito en los dos extremos | hecho (8) | 8 |
 | ORR↔QKC (gRPC) | interno | no | ninguna | ninguna — red interna obligatoria | — |
 | QKC↔KME/quditto (ETSI-014) | `quditto_url` | no (KME propio) | ninguna | ninguna — red interna obligatoria | — |
 | DKMS gRPC `DkmsControl` | `listen.grpc_addr` :50054 | no (operador) | **ninguna** (`Drain` borra buffers con 1 RPC) | bind localhost por defecto | 7 |
@@ -55,11 +55,13 @@ La decisión de diseño es **auth fuerte solo donde cruza instituciones + el
 plano SAE**. Los enlaces intra-institución quedan sin auth **a condición de**
 que el operador cumpla esto (va también en `docker/README.md`):
 
-- `DKMS↔ORR` transporta **material de clave en claro** en ese salto (el ORR lo
-  cifra E2E hacia el ORR remoto, el salto local va desnudo:
-  `dkms/src/southbound/orr.rs:173-200`). DKMS y ORR **deben** compartir host o
-  red L2 confiable. Si algún día se separan en máquinas, ese enlace pasa a
-  necesitar TLS — hoy no.
+- `DKMS↔ORR` transporta el **material de transporte** en ese salto (el ORR lo
+  cifra E2E hacia el ORR remoto; el salto local lo protege el gRPC). Desde
+  2026-08-28 ese gRPC va con **mTLS por defecto** (Fase 8: `grpc_tls` en el
+  ORR, `orr_tls` en el DKMS, certificados de nodo de la CA de red), así que ya
+  no es un no-objetivo: DKMS y ORR pueden estar en máquinas distintas. Sólo
+  con el opt-out explícito en los dos extremos vuelve a ir en claro, y
+  entonces **deben** compartir host o red L2 confiable.
 - Los puertos gRPC internos (ORR, QKC, `DkmsControl` :50054) y los `/metrics`
   **no se publican** fuera de la red compose/institucional.
 - El cliente KME (`qkc/src/kme.rs:82-104`, reqwest sin TLS) habla con el KME
@@ -590,9 +592,11 @@ Implementado (opt-in, tofu default = comportamiento actual):
    una clave de identidad long-term es distinta de los buffers de sesión.
 2. **Auth del caller de `EstablishSecret`** (cerrar el overwrite anónimo del
    `bootstrap_secret`): mTLS ORR↔ORR o challenge-response mutuo. El gRPC del
-   ORR sirve **en el mismo puerto** el tráfico intra-institución (DKMS→ORR,
-   §1.2 sin auth) y el cross-institución (ORR→ORR bootstrap); ponerle mTLS
-   rompería el primero sin separar puertos. El challenge (patrón `macs.rs`,
+   ORR sirve **en el mismo puerto** el tráfico intra-institución (DKMS→ORR)
+   y el cross-institución (ORR→ORR bootstrap); en su día se descartó el mTLS
+   por no romper el primero sin separar puertos — resuelto en la Fase 8: el
+   DKMS presenta también su cert de nodo, y el mismo puerto sirve a los dos
+   con mTLS por defecto. El challenge (patrón `macs.rs`,
    como las RPCs de rotación ya HMAC-authed) es un cambio de protocolo no
    verificable en local.
 
@@ -643,7 +647,7 @@ peer establecido → rechazado.
   Los despliegues que lo necesiten remoto lo abren y firewalean.
 - **`/metrics`**: comentario de que va sin auth y responde a cualquier path.
 - **Checklist de operador**: sección "Seguridad y firewall" en `docker/README.md`
-  (qué puertos deben quedar en red interna; DKMS↔ORR lleva material en claro).
+  (qué puertos deben quedar en red interna; DKMS↔ORR va con mTLS por defecto desde la Fase 8).
 - Verificado: common 31 / orr 62 / dkms 71 tests, clippy limpio, workspace compila.
 - Follow-on documentado (no bloqueante): CA por institución con bundles (el
   código ya soporta bundles multi-PEM); cierre formal de H-5/H-6 del audit.
@@ -786,13 +790,14 @@ Ver la gotcha del troceado en CLAUDE.md.
   queda el MAC de enlace, salto a salto. El default es `1` en el Rust y en
   `render_config.py`, así que hay que ponerlo a mano para perderlo; pero si
   alguien lo hace, que sepa lo que apaga.
-- **El gRPC DKMS↔ORR va en claro por defecto**, y por él viaja el material de
-  transporte. Es la suposición «misma máquina o red interna de confianza».
-  Desde 2026-08-28 se puede cerrar con `grpc_tls = true` en el ORR (que pasa a
-  exigir cert de cliente de la CA de red, y cubre también a sus pares ORR) y
-  `orr_endpoint = https://…` en el DKMS. Es un ajuste de despliegue, en los
-  dos extremos y en todos los ORR a la vez, porque las URLs de los pares que
-  reparte la SDN vienen como `http://` y el ORR les cambia el esquema.
+- **El gRPC DKMS↔ORR y ORR↔ORR va con mTLS por defecto** desde 2026-08-28
+  (`grpc_tls = true` en el ORR, que exige cert de cliente de la CA de red y
+  cubre a su DKMS y a sus pares; `orr_tls = true` en el DKMS, que sube el
+  esquema a `https://`). Un ORR sin `[tls]` no arranca en claro: se para y
+  dice qué le falta. El opt-out (`false` en los dos extremos, en todos los ORR
+  a la vez porque el esquema de los pares lo decide cada ORR) es la
+  suposición «misma máquina o red interna de confianza», y hay que escribirla.
+  Lo que queda en claro de verdad: ORR↔QKC y QKC↔KME, dentro del nodo.
 - **El socket de ACK del DKMS sigue sin autenticar** (`ack_socket.rs`, Fase 4):
   acepta TCP plano de cualquiera y saca el `from` del cuerpo. No compromete
   material —es contabilidad del generador— pero sí es autenticación de origen

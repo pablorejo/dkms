@@ -7,6 +7,8 @@ advertise_ip: "10.0.0.11"
 
 # Dónde está SU ORR (localhost si co-locado; IP si en otra máquina).
 orr_addr: "127.0.0.1:20003"
+# orr_tls: true                # habla https:// al ORR con el cert de nodo (default);
+                               # false SÓLO con grpc_tls: false en el ORR
 
 sdn_endpoint: "http://10.0.0.100:19000"
 orr_id: "orr_1"                # id del ORR del que cuelgo. La SDN me coloca

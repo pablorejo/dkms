@@ -16,6 +16,14 @@ metrics_addr    = "0.0.0.0:9101"
 # 0 = passthrough (sin cebolla). 1 = PQC E2E. -1 = onion full. >=2 = onion truncada.
 default_max_hops = 0
 
+# El gRPC de este ORR (lo que le habla su DKMS y lo que le hablan los ORR
+# pares) va con mTLS POR DEFECTO: por él viaja el material de transporte.
+# Exige la identidad de nodo en [tls] (al final del fichero, porque es una
+# tabla); sin ella el ORR no arranca y dice qué le falta. Para ir en claro
+# —sólo si DKMS y ORR comparten máquina o red interna de confianza— hay que
+# escribirlo: `grpc_tls = false` aquí y `orr_tls = false` en el DKMS.
+# grpc_tls = true
+
 default_pqc_suite       = "kyber1024+dilithium5"
 deliver_queue_capacity  = 4096
 
@@ -31,3 +39,9 @@ deliver_queue_capacity  = 4096
 [peer_pubkeys]
 # ORR_2 = "AAA...base64..."
 # ORR_3 = "BBB...base64..."
+
+# Identidad de nodo (CA de red): docker/gen-certs.sh ORR_1 <ip> ./certs
+# [tls]
+# cert_path        = "certs/ORR_1.crt"
+# key_path         = "certs/ORR_1.key"
+# control_plane_ca = "certs/net-ca.crt"

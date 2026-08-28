@@ -10,6 +10,10 @@
 //! `send` llama a `OrrControl::SendMessage` con `max_hops=0` (passthrough)
 //! por defecto. `listen` se suscribe a `StreamDeliveries` e imprime cada
 //! `DeliveredMessage` que recibe.
+//!
+//! El gRPC del ORR va con mTLS por defecto: exporta `ORR_TLS_CERT`,
+//! `ORR_TLS_KEY` y `ORR_TLS_CA` (un cert de nodo de la CA de red, p. ej. el
+//! del DKMS de esa hoja) y el cliente diala `https://` él solo.
 
 use std::collections::HashMap;
 
@@ -25,6 +29,36 @@ use common::proto::{
 };
 use std::time::Instant;
 use tonic::transport::Channel;
+
+/// Canal al ORR. Su gRPC va con mTLS por defecto, así que el cliente tiene
+/// que presentar un certificado de nodo de la CA de red: `ORR_TLS_CERT`,
+/// `ORR_TLS_KEY` y `ORR_TLS_CA` (rutas PEM). Con las tres puestas se diala
+/// `https://` aunque la dirección diga `http://`; sin ellas, en claro, que
+/// sólo vale contra un ORR con `grpc_tls = false`.
+async fn connect(addr: &str) -> Result<Channel> {
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+    let tls = match (
+        std::env::var("ORR_TLS_CERT"),
+        std::env::var("ORR_TLS_KEY"),
+        std::env::var("ORR_TLS_CA"),
+    ) {
+        (Ok(c), Ok(k), Ok(ca)) => Some((c, k, ca)),
+        _ => None,
+    };
+    let url = match (&tls, addr.strip_prefix("http://")) {
+        (Some(_), Some(rest)) => format!("https://{rest}"),
+        _ => addr.to_string(),
+    };
+    let mut ep = Channel::from_shared(url)?;
+    if let Some((c, k, ca)) = tls {
+        ep = ep.tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(std::fs::read(ca)?))
+                .identity(Identity::from_pem(std::fs::read(c)?, std::fs::read(k)?)),
+        )?;
+    }
+    Ok(ep.connect().await?)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "orr-test-client", version, about)]
@@ -83,6 +117,8 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Certificados ML-DSA en el mTLS del ORR: hace falta el proveedor PQC.
+    let _ = common::tls_pqc::install_process_default();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Send {
@@ -117,7 +153,7 @@ async fn do_stress(
     max_hops: i32,
     orr_path: &str,
 ) -> Result<()> {
-    let ch = Channel::from_shared(addr.to_string())?.connect().await?;
+    let ch = connect(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let payload_template = vec![0xabu8; bytes];
 
@@ -161,7 +197,7 @@ async fn do_stress(
 }
 
 async fn do_get_pubkey(addr: &str) -> Result<()> {
-    let ch = Channel::from_shared(addr.to_string())?.connect().await?;
+    let ch = connect(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .get_public_key(GetPublicKeyRequest {})
@@ -191,7 +227,7 @@ async fn do_send(
         app_header.insert(k.to_string(), v.to_string());
     }
 
-    let ch = Channel::from_shared(addr.to_string())?.connect().await?;
+    let ch = connect(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let resp = client
         .send_message(SendMessageRequest {
@@ -219,7 +255,7 @@ async fn do_send(
 }
 
 async fn do_listen(addr: &str, subscriber_id: &str, count: Option<u64>) -> Result<()> {
-    let ch = Channel::from_shared(addr.to_string())?.connect().await?;
+    let ch = connect(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let mut stream = client
         .stream_deliveries(StreamDeliveriesRequest {

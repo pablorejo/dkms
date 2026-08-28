@@ -24,12 +24,17 @@ async fn main() -> Result<()> {
 
     let cfg: OrrConfig = common::config::load_config("orr")?;
     info!(?cfg, "orr starting");
-    // Identidad TLS del proceso, para el servidor gRPC (si `grpc_tls`) y para
-    // los canales hacia pares que anuncien `https://`.
-    orr::grpc_tls::install(cfg.tls.clone());
+    // Identidad TLS del proceso: el servidor gRPC (mTLS por defecto) y los
+    // canales hacia los pares. Sin identidad no se arranca en claro a
+    // escondidas: apagarlo es una decisión, y se escribe.
+    orr::grpc_tls::install(cfg.tls.clone(), cfg.grpc_tls);
     if cfg.grpc_tls && cfg.tls.is_none() {
         anyhow::bail!(
-            "grpc_tls = true exige la sección [tls] (cert_path, key_path, control_plane_ca)"
+            "grpc_tls está activado (por defecto) y exige la sección [tls] \
+             (cert_path, key_path, control_plane_ca): el certificado de nodo de \
+             este ORR, firmado por la CA de red (docker/gen-certs.sh <orr_id> <ip>). \
+             Para ir en claro —sólo si DKMS y ORR comparten máquina o red interna \
+             de confianza— pon grpc_tls = false explícitamente."
         );
     }
 

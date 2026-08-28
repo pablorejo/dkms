@@ -6,3 +6,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
+      # Certificado de nodo del ORR + net-ca.crt: su gRPC va con mTLS por
+      # defecto (gen-certs.sh <orr_id> <ip> ./certs).
+      - ./certs:/config/certs:ro

@@ -9,6 +9,16 @@ metrics_addr    = "0.0.0.0:9544"
 default_max_hops = 0
 deliver_queue_capacity = 65536
 
+# El gRPC de este ORR va con mTLS por defecto (grpc_tls = true): lo que le
+# habla su DKMS y lo que le hablan los otros ORR. Identidad de nodo de
+# gen-tls.sh (rutas relativas a la raíz del repo, desde donde arranca
+# start-orrs.sh). Los peer_grpc_addrs de abajo dicen http:// y el ORR los sube
+# a https:// él solo.
+[tls]
+cert_path        = "scripts/demo-star/tls/orr_44.crt"
+key_path         = "scripts/demo-star/tls/orr_44.key"
+control_plane_ca = "scripts/demo-star/tls/net-ca.crt"
+
 [peers]
 orr_11 = 11
 orr_22 = 22

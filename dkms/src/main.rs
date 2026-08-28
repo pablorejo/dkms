@@ -68,10 +68,10 @@ fn build_control_plane_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::
     client_tls_for(cfg, &cfg.southbound.sdn_endpoint)
 }
 
-/// `ClientTlsConfig` para el gRPC dkms→ORR si `orr_endpoint` es https. El
-/// enlace DKMS↔ORR lleva el material de transporte en claro, así que si los
-/// dos no comparten máquina hay que cifrarlo: `grpc_tls = true` en el ORR y
-/// `https://` aquí. Misma identidad de nodo y misma CA de red que hacia el SDN.
+/// `ClientTlsConfig` para el gRPC dkms→ORR. Va con mTLS por defecto
+/// (`southbound.orr_tls`, que sube el esquema a `https://` al cargar la
+/// config): el DKMS presenta su certificado de nodo y verifica el del ORR con
+/// `control_plane_ca`. Sólo con `orr_tls = false` y `http://` va en claro.
 fn build_orr_tls(cfg: &DkmsConfig) -> Result<Option<tonic::transport::ClientTlsConfig>> {
     match cfg.southbound.orr_endpoint.as_deref() {
         Some(ep) => client_tls_for(cfg, ep),
@@ -121,7 +121,18 @@ async fn main() -> Result<()> {
     // no solo `common::tls`. Idempotente. Ver common::tls_pqc.
     let _ = common::tls_pqc::install_process_default();
 
-    let cfg: DkmsConfig = common::config::load_config("dkms")?;
+    let mut cfg: DkmsConfig = common::config::load_config("dkms")?;
+    // El gRPC hacia el ORR va con mTLS por defecto (`southbound.orr_tls`):
+    // el esquema del endpoint se sube a https aquí, una vez, y todo lo que
+    // venga detrás (cliente, TLS de cliente) se guía por él.
+    if cfg.southbound.orr_tls {
+        if let Some(ep) = cfg.southbound.orr_endpoint.as_mut() {
+            let t = ep.trim();
+            if t.len() >= 7 && t[..7].eq_ignore_ascii_case("http://") {
+                *ep = format!("https://{}", &t[7..]);
+            }
+        }
+    }
     info!(node_id = %cfg.node_id, "dkms starting");
 
     // Los peers del node.yml son la semilla; a partir de aquí manda la SDN

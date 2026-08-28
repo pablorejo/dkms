@@ -146,6 +146,15 @@ pub struct SouthboundCfg {
     /// ORR↔QKC se usa este endpoint.
     #[serde(default)]
     pub orr_endpoint: Option<String>,
+    /// TLS hacia el ORR. **`true` por defecto**: por ese gRPC viaja el material
+    /// de transporte, así que va con mTLS —este DKMS presenta su certificado
+    /// de nodo y verifica el del ORR con la CA de red— aunque `orr_endpoint`
+    /// diga `http://`: el esquema se sube a `https://` al arrancar. `false`
+    /// respeta el esquema escrito (en claro con `http://`), y sólo vale si
+    /// DKMS y ORR comparten máquina o red interna de confianza; el ORR tiene
+    /// que llevar entonces `grpc_tls = false`, o no se entienden.
+    #[serde(default = "default_true")]
+    pub orr_tls: bool,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_rpc_timeout_ms")]
@@ -459,6 +468,10 @@ impl Default for GeneratorCfg {
 
 fn default_announce_secs() -> u64 {
     30
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_connect_timeout_ms() -> u64 {

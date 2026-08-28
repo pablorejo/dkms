@@ -225,18 +225,19 @@ def render_orr(n, out):
     peers = n.get("peers") or {}           # orr_id -> qkc_id
     if peers:
         lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
-    # grpc_tls: mTLS en el gRPC del ORR (DKMS↔ORR y ORR↔ORR). Exige el bloque
-    # [tls], que sale de control_tls; sin él el ORR no arrancaría, así que
-    # mejor decirlo aquí, al renderizar. Y va ANTES del bloque [tls]: en TOML
-    # una clave suelta después de una tabla pertenece a la tabla, y
-    # `tls.grpc_tls` no es lo mismo que `grpc_tls` (pasó: el ORR arrancaba en
-    # claro con la opción "puesta").
-    if n.get("grpc_tls"):
-        if not n.get("control_tls"):
-            die("[orr] grpc_tls: true necesita control_tls: true (es la identidad que presenta)")
-        lines.append("grpc_tls = true")
+    # grpc_tls: mTLS en el gRPC del ORR (DKMS↔ORR y ORR↔ORR). ACTIVADO por
+    # defecto: por ese gRPC viaja el material de transporte. Exige la identidad
+    # de nodo del ORR —certs/<orr_id>.crt/.key + net-ca.crt—, así que el bloque
+    # [tls] sale siempre que grpc_tls esté puesto, haya o no control_tls.
+    # `grpc_tls: false` lo deja en claro (sólo DKMS y ORR en la misma máquina o
+    # red interna de confianza) y entonces [tls] sólo sale con control_tls.
+    # Va ANTES del bloque [tls]: en TOML una clave suelta después de una tabla
+    # pertenece a la tabla, y `tls.grpc_tls` no es lo mismo que `grpc_tls`
+    # (pasó: el ORR arrancaba en claro con la opción "puesta").
+    grpc_tls = n.get("grpc_tls", True)
+    lines.append("grpc_tls = " + ("true" if grpc_tls else "false"))
     orr_cert = n.get("cert_name", req(n, "orr_id", "orr"))
-    lines += control_tls_lines(n, orr_cert, "client")
+    lines += control_tls_lines(n, orr_cert, "client", force=bool(grpc_tls))
     pvk = n.get("peer_verify_keys") or {}  # orr_id -> base64(ML-DSA verify key)
     if pvk:
         lines += ["", "[peer_verify_keys]"] + [q(str(k)) + " = " + q(str(v)) for k, v in pvk.items()]
@@ -282,8 +283,12 @@ def render_dkms(n, out):
         "[southbound]",
         "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
         "qkc_endpoint = " + q("http://127.0.0.1:1"),   # dead by design (transport=orr)
-        # orr_tls: true → el ORR corre con grpc_tls y hay que dialarlo por https.
-        "orr_endpoint = " + q(("https://" if n.get("orr_tls") else "http://") + orr_addr),
+        # orr_tls (default true): el ORR corre con grpc_tls y se le habla por
+        # https con el cert de nodo de este DKMS. `orr_tls: false` va en claro,
+        # y hay que escribirlo también en el TOML: el binario sube http→https
+        # por su cuenta salvo que se le diga que no.
+        "orr_tls = " + ("true" if n.get("orr_tls", True) else "false"),
+        "orr_endpoint = " + q(("https://" if n.get("orr_tls", True) else "http://") + orr_addr),
         # Self-registration: the SDN places this DKMS under its ORR, so it
         # needs the ORR's *id*, not just its address. sdn_endpoint is gRPC;
         # the registration endpoint is on the SDN's HTTP admin.
@@ -313,13 +318,13 @@ def render_dkms(n, out):
 
 
 # ─────────────────────────────── SDN ────────────────────────────────────────
-def control_tls_lines(n, node_id, kind):
-    """Optional [tls] block for control-plane mTLS (docs/SECURITY.md §Fase 3).
-    Emitted only when node.yml sets `control_tls: true` — default is plaintext,
-    so existing local-mesh/testbed deployments are unaffected. `kind` selects
-    the field shape: the SDN is a server (cert/key/client_ca), orr/qkc are
-    clients (cert/key/control_plane_ca)."""
-    if not n.get("control_tls"):
+def control_tls_lines(n, node_id, kind, force=False):
+    """[tls] block for control-plane mTLS (docs/SECURITY.md §Fase 3).
+    Emitted when node.yml sets `control_tls: true`, or when the caller needs
+    the identity anyway (`force`: the ORR's gRPC runs mTLS by default). `kind`
+    selects the field shape: the SDN is a server (cert/key/client_ca), orr/qkc
+    are clients (cert/key/control_plane_ca)."""
+    if not (n.get("control_tls") or force):
         return []
     certs = n.get("certs_dir", "/config/certs")
     lines = ["", "[tls]",

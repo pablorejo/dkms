@@ -37,7 +37,7 @@ set -e
 TOPO="${TOPO:?falta TOPO (ringchords|cn|bridge2)}"
 N="${N:?falta N}"
 REG="${REG:?falta REG (poca|media|mucha)}"
-KEY_ALG="${KEY_ALG:-rsa}"
+KEY_ALG="${KEY_ALG:-ml-dsa-65}"
 export KEY_ALG
 
 # cmake: highs-sys. gcc 12.3: aws-lc-sys (el gcc 10.1 del sistema arrastra el
@@ -66,7 +66,9 @@ PQC_AUTH_MODE="${DKMS_MESH_PQC_AUTH:-off}"
 # referencia tienen que poder convivir en disco o no hay con qué comparar.
 FRAME_AUTH_MODE="${DKMS_MESH_FRAME_AUTH:-off}"
 LINKS="${DKMS_MESH_LINK_TYPE:-qkd}"
-export DKMS_SCALE_OUT="${DKMS_SCALE_OUT:-$HOME/dkms_rust/certs-results/$KEY_ALG-$LINKS-auth$PQC_AUTH_MODE-frame$FRAME_AUTH_MODE}"
+# Y si el gRPC del ORR va con mTLS (default 1) o en claro (el brazo viejo).
+GRPC_TLS_MODE="${DKMS_MESH_GRPC_TLS:-1}"
+export DKMS_SCALE_OUT="${DKMS_SCALE_OUT:-$HOME/dkms_rust/certs-results/$KEY_ALG-$LINKS-auth$PQC_AUTH_MODE-frame$FRAME_AUTH_MODE-grpctls$GRPC_TLS_MODE}"
 mkdir -p "$DKMS_SCALE_OUT"
 
 # Certs pre-generados. Para rsa es opcional (el openssl de aquí los hace); para
@@ -80,6 +82,13 @@ if [ "$KEY_ALG" != rsa ]; then
     }
     [ -s "$CERTS_DIR/dkms-$N.crt" ] || {
         echo "FATAL: $CERTS_DIR no llega a N=$N (falta dkms-$N.crt)"; exit 1; }
+    # El gRPC del ORR va con mTLS por defecto: hace falta un cert por ORR.
+    if [ "$GRPC_TLS_MODE" != 0 ]; then
+        [ -s "$CERTS_DIR/orr_$N.crt" ] || {
+            echo "FATAL: $CERTS_DIR no tiene certs de ORR hasta N=$N (falta orr_$N.crt):"
+            echo "       regenera certs-pregen con gen-certs.sh orr_1..orr_$N (o DKMS_MESH_GRPC_TLS=0)"
+            exit 1; }
+    fi
     export DKMS_MESH_CERTS_SRC="$CERTS_DIR"
 fi
 

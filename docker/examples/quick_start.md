@@ -68,6 +68,8 @@ quditto, los mismos que le configuraste a él.
 
 ```bash
 mkdir orr && cd orr
+.../docker/gen-certs.sh orr_1 <IP-anunciable> ./certs    # su gRPC va con mTLS por
+                                                         # defecto: cert de nodo (net-ca)
 cp .../docker/compose/orr.yml .
 echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/node.orr.yml node.yml   # editar: ids, qkc_addr, sdn_url,

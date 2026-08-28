@@ -11,6 +11,16 @@ deliver_queue_capacity = 65536  # cola alta para tests de saturación
 
 # Puertos gRPC del resto de ORRs hoja. El bootstrap pide GetPublicKey
 # a cada uno con retry exponencial hasta tenerlas todas.
+# El gRPC de este ORR va con mTLS por defecto (grpc_tls = true): lo que le
+# habla su DKMS y lo que le hablan los otros ORR. Identidad de nodo de
+# gen-tls.sh (rutas relativas a la raíz del repo, desde donde arranca
+# start-orrs.sh). Los peer_grpc_addrs de abajo dicen http:// y el ORR los sube
+# a https:// él solo.
+[tls]
+cert_path        = "scripts/demo-star/tls/orr_11.crt"
+key_path         = "scripts/demo-star/tls/orr_11.key"
+control_plane_ca = "scripts/demo-star/tls/net-ca.crt"
+
 [peers]
 orr_22 = 22
 orr_33 = 33

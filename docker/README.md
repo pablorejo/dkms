@@ -103,18 +103,20 @@ necesario si una máquina corre **varios nodos del mismo rol** (p. ej. tests).
 
 ### Seguridad y firewall (léelo — modelo completo en `docs/SECURITY.md`)
 
-La autenticación fuerte está **solo** donde debe: mTLS DKMS↔SAE (siempre) y,
-opt-in, el plano de control (SDN, announce, gRPC) y el handshake PQC QKC↔QKC.
-El resto **depende de que estos puertos vivan en red confiable**:
+La autenticación fuerte está donde cruza el cable: mTLS DKMS↔SAE (siempre),
+mTLS en el gRPC del ORR —DKMS↔ORR y ORR↔ORR— (**por defecto**, certificados de
+nodo ML-DSA-65) y, opt-in, el plano de control (SDN, announce) y el handshake
+PQC QKC↔QKC. El resto **depende de que estos puertos vivan en red confiable**:
 
 - **`grpc` del DKMS (20007)**: plano de operador SIN auth; su RPC `Drain` borra
   todos los buffers de una llamada. Bindea a **localhost por defecto**; si lo
   abres, firewaléalo a la red interna. Nunca entre instituciones.
 - **`ack` del DKMS (20009)**: TCP plano sin auth hoy (migración a ETSI-020
   pendiente). Ábrelo solo entre los DKMS que se enlazan.
-- **`local`/`admin` del QKC, `grpc` del ORR hacia su DKMS**: intra-institución.
-  DKMS↔ORR lleva material de clave en claro en ese salto: **deben compartir
-  host o red L2 confiable**.
+- **`local`/`admin` del QKC**: intra-institución. El `grpc` del ORR (20003) va
+  con mTLS por defecto; sólo si lo apagas (`grpc_tls: false` en el ORR y
+  `orr_tls: false` en el DKMS) DKMS↔ORR lleva material en claro, y entonces
+  **deben compartir host o red L2 confiable**.
 - **`metrics` (todos)**: sin auth y responden a cualquier path — red interna.
 - **SDN `http`/`grpc` (19000/19002)**: en multi-host, actívales mTLS
   (`control_tls: true` en su `node.yml` + certs de `net-ca`) — si no, cualquiera
@@ -404,26 +406,31 @@ este enlace, o el 20000 está filtrado entre ambas máquinas.
 
 ---
 
-### Cifrar el gRPC DKMS↔ORR y ORR↔ORR (`grpc_tls`)
+### El gRPC del ORR va con mTLS por defecto (`grpc_tls`)
 
-Ese gRPC va **en claro** por defecto, y por él pasa el material de transporte
-sin cifrar: está bien mientras DKMS y ORR compartan máquina o una red interna
-de confianza, y no en otro caso. Para cifrarlo con mTLS, con los mismos
-certificados de nodo de la CA de red:
+Por el gRPC del ORR pasa el material de transporte del DKMS, y por él llegan
+también los ORR de las demás instituciones (bootstrap). Va con **mTLS por
+defecto**, con los mismos certificados de nodo de la CA de red que el resto de
+planos (ML-DSA-65 e intercambio híbrido X25519MLKEM768): el ORR presenta
+`certs/<orr_id>.crt` y **exige** un certificado de cliente de `net-ca`, y el
+DKMS le habla por `https://` presentando el suyo. No hay que activar nada;
+hace falta un certificado por ORR (`gen-certs.sh <orr_id> <ip> ./certs`, con
+`./certs` montado en `/config/certs` como en el DKMS). Sin él, el ORR **no
+arranca en claro por su cuenta**: se para y dice qué le falta. Lo dice también
+al arrancar bien: `orr gRPC listening (mTLS)`.
+
+Apagarlo es una decisión que hay que escribir, en los **dos** extremos y en
+**todos** los ORR a la vez —las direcciones de los pares que reparte la SDN
+llegan como `http://` y cada ORR las sube a `https://` según su propio
+`grpc_tls`—, y sólo vale si DKMS y ORR comparten máquina o red interna de
+confianza:
 
 ```yaml
 # node.orr.yml
-control_tls: true          # identidad del ORR: certs/<orr_id>.crt/.key + net-ca.crt
-grpc_tls: true             # el gRPC exige cert de cliente de la CA de red
+grpc_tls: false            # en claro; [tls] sólo sale entonces con control_tls
 # node.dkms.yml
-orr_tls: true              # dial https:// al ORR
+orr_tls: false             # dial http:// al ORR
 ```
-
-Es un ajuste de despliegue: en los **dos** extremos, y en **todos** los ORR a la
-vez, porque las direcciones de los pares que reparte la SDN llegan como
-`http://` y cada ORR les cambia el esquema según su propio `grpc_tls`. Hace
-falta un certificado de nodo por ORR (`gen-certs.sh <orr_id> <ip>`). El ORR
-lo dice al arrancar: `orr gRPC listening (mTLS)`.
 
 ## 3. ORR
 
@@ -432,7 +439,16 @@ su nodo, las envuelve (cebolla, PQC E2E con el ORR destino) y las entrega al
 DKMS remoto vía su ORR. Habla con: **su** QKC (20001), la SDN (19000) y los
 ORR de los demás nodos (20003).
 
-**Paso 1 — directorio y ficheros:**
+**Paso 1 — certificado.** El gRPC del ORR va con **mTLS por defecto** (por él
+pasa el material de transporte del DKMS y llegan los ORR de fuera), así que
+necesita su certificado de nodo, firmado por la misma `net-ca` que los DKMS,
+con la IP anunciable en el SAN:
+
+```bash
+.../docker/gen-certs.sh orr_1 10.0.0.11 ./certs      # ML-DSA-65 por defecto
+```
+
+**Paso 2 — directorio y ficheros** (con `./certs` dentro):
 
 ```bash
 mkdir orr && cd orr
@@ -441,7 +457,7 @@ echo "IMAGE_PREFIX=tuusuario" > .env
 cp .../docker/examples/node.orr.yml node.yml
 ```
 
-**Paso 2 — editar `node.yml`:**
+**Paso 3 — editar `node.yml`:**
 
 ```yaml
 orr_id: "orr_1"
@@ -465,8 +481,10 @@ peer_grpc_addrs:
 | `sdn_announce_secs` | cada cuánto reanuncia (default 30). Es también su heartbeat. |
 | `peers` / `peer_grpc_addrs` | **semilla, opcional**: los ORR con los que arrancar el bootstrap antes de que la SDN conteste. La lista viva la manda la SDN en la respuesta al anuncio, y un ORR nuevo aparece solo. Lo que pongas aquí es además un suelo que la SDN no puede borrar. Ojo a que no son solo los vecinos físicos: el bootstrap PQC ORR↔ORR es extremo a extremo e independiente de la topología de enlaces. `peers` mapea `orr_id → qkc_id`; `peer_grpc_addrs` mapea `orr_id → URL` (20003). |
 | `default_max_hops` | déjalo en 1 (PQC E2E, el modo que usa el DKMS). |
+| `grpc_tls` | default `true`: mTLS en su gRPC con `certs/<orr_id>.crt/.key` + `net-ca.crt`. `false` sólo si DKMS y ORR comparten máquina o red interna (y entonces `orr_tls: false` en el DKMS). |
+| `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 
-**Paso 3 — arrancar y verificar:**
+**Paso 4 — arrancar y verificar:**
 
 ```bash
 docker compose -f orr.yml up -d && docker compose -f orr.yml logs -f
@@ -500,6 +518,9 @@ por el 20009). Es el único módulo con TLS, así que tiene un paso extra.
   un cert de cliente del que el DKMS **extrae su identidad** (SAN
   `urn:dkms:sae:<id>`, o CN/DNS con el id pelado).
 - **Plano peer (20006)**: mTLS entre DKMS; ambos validan contra la CA común.
+- **Plano ORR (20003, saliente)**: mTLS hacia su ORR, **por defecto**; el
+  DKMS presenta este mismo certificado de nodo y verifica el del ORR con
+  `net-ca`. El ORR necesita el suyo (`gen-certs.sh orr_1 10.0.0.11 ./certs`).
 
 ```bash
 # genera/reutiliza la CA en ./certs y emite el cert de ESTE dkms.

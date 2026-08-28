@@ -2,8 +2,11 @@
 # Genera el material TLS que necesita un DKMS para el mTLS ETSI-020 (DKMS<->DKMS)
 # y ETSI-014 (SAE->DKMS).
 #
-#   gen-certs.sh <node_id> <advertise_ip> [out_dir]     # cert de un DKMS
+#   gen-certs.sh <node_id> <advertise_ip> [out_dir]     # cert de nodo: dkms-N, orr_N, qkc-N, sdn
 #   gen-certs.sh --sae <sae_id> [out_dir]               # cert de cliente SAE
+#
+# ML-DSA-65 por defecto (KEY_ALG, más abajo). El ORR necesita el suyo aunque no
+# haya mTLS con la SDN: su gRPC (DKMS↔ORR, ORR↔ORR) va con mTLS por defecto.
 #
 # DOS RAÍCES DE CONFIANZA SEPARADAS (ver docs/SECURITY.md §2):
 #   net-ca.crt net-ca.key    -> CA de RED. Firma los certs de NODO (DKMS, y en
@@ -33,11 +36,22 @@ DAYS="${DAYS:-3650}"
 # explícito (sin él, WebPkiClientVerifier construye un trust set vacío en
 # silencio — ver docs/SECURITY.md §5 gotcha 7).
 # Algoritmo de firma de los certs (docs/SECURITY.md §Fase 5/6 PQC):
-#   rsa (default)  — RSA clásico.
-#   ml-dsa-65      — firma post-cuántica ML-DSA (FIPS 204). Requiere openssl
-#                    3.5+. La clave se emite en forma **seed-only** (128 B), la
-#                    única que carga el runtime Rust (common::tls_pqc).
-KEY_ALG="${KEY_ALG:-rsa}"
+#   ml-dsa-65 (default) — firma post-cuántica ML-DSA (FIPS 204): es lo que
+#                    hace PQC la autenticación de todos los planos TLS. Requiere
+#                    openssl 3.5+. La clave se emite en forma **seed-only**
+#                    (128 B), la única que carga el runtime Rust (common::tls_pqc).
+#   rsa            — RSA clásico. NO es quantum-safe: sólo para clientes SAE
+#                    antiguos que no saben verificar ML-DSA (OpenSSL < 3.5).
+KEY_ALG="${KEY_ALG:-ml-dsa-65}"
+
+case "$KEY_ALG" in
+  ml-dsa-65|ml-dsa|mldsa|mldsa65)
+    if ! openssl list -public-key-algorithms 2>/dev/null | grep -qi "ML-DSA"; then
+      echo "[gen-certs] FATAL: $(openssl version) no genera ML-DSA (hace falta OpenSSL >= 3.5)." >&2
+      echo "[gen-certs]        Genera los certs en otra máquina y tráelos, o KEY_ALG=rsa (no PQC)." >&2
+      exit 1
+    fi ;;
+esac
 
 # Genera una clave privada en el fichero indicado, según KEY_ALG. $2 = bits RSA.
 gen_key() {

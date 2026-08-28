@@ -118,6 +118,11 @@ impl OrrService {
         cfg.peers = lowercase_keys(cfg.peers, "peers")?;
         cfg.peer_pubkeys = lowercase_keys(cfg.peer_pubkeys, "peer_pubkeys")?;
         cfg.peer_grpc_addrs = lowercase_keys(cfg.peer_grpc_addrs, "peer_grpc_addrs")?;
+        // Con `grpc_tls`, los pares se dialan por `https://` diga lo que diga
+        // el TOML: el esquema es una decisión de despliegue, no de cada URL.
+        for url in cfg.peer_grpc_addrs.values_mut() {
+            *url = crate::grpc_tls::peer_url(url);
+        }
 
         // Identidad ML-KEM (long-term, regenerada cada vez que arranca
         // el proceso — TODO: persistir en disco si queremos pubkeys

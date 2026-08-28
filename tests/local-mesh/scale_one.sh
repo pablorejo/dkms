@@ -75,7 +75,7 @@ DKMS_MESH_EDGES=$(edges_of)
 export DKMS_MESH_EDGES
 echo "== $TOPO_FAM n=$N $REG: $(echo "$DKMS_MESH_EDGES" | wc -w) aristas"
 # El algoritmo de firma de los certs lo hereda mesh.sh -> gen-certs.sh por env.
-echo "== certs: KEY_ALG=${KEY_ALG:-rsa} (loader: $([ -x "$LOADER_BIN" ] && echo rust || echo python))"
+echo "== certs: KEY_ALG=${KEY_ALG:-ml-dsa-65} (loader: $([ -x "$LOADER_BIN" ] && echo rust || echo python))"
 
 # ── caps de observación ────────────────────────────────────────────────────
 CAP=600
@@ -225,6 +225,6 @@ CERT_SIG=$(openssl x509 -in "$DKMS_MESH_DIR/certs/dkms-1.crt" -noout -text 2>/de
 LOADER_USED=$([ -x "$LOADER_BIN" ] && echo rust || echo python)
 printf '{"topo":"%s","n":%d,"regimen":"%s","cap_s":%d,"llenos":%d,"total":%d,"key_alg":"%s","cert_sig":"%s","loader":"%s"}\n' \
     "$TOPO_FAM" "$N" "$REG" "$CAP" "$OK" "$TOTAL" \
-    "${KEY_ALG:-rsa}" "${CERT_SIG:-desconocido}" "$LOADER_USED" > "$OUT/meta.json"
+    "${KEY_ALG:-ml-dsa-65}" "${CERT_SIG:-desconocido}" "$LOADER_USED" > "$OUT/meta.json"
 "$MESH" down >/dev/null 2>&1
 echo "== $TOPO_FAM n=$N $REG: archivado en $OUT"

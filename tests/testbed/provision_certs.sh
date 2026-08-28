@@ -63,6 +63,17 @@ for n in "${NODES[@]}"; do
     issue_dkms "${NODE_DKMS[$n]}" "${NODE_IP[$n]}"
 done
 issue_dkms dkms-4 "$D_IP"
+
+# ─── 2b. certs de nodo de los ORR ─────────────────────────────────────
+# El gRPC del ORR va con mTLS por defecto (grpc_tls): presenta su cert de
+# nodo y exige uno de net-ca a su DKMS y a los ORR de los demás nodos. Mismo
+# generador, mismo SAN con la IP anunciable; el id sigue la convención
+# `orr_<n>` que la SDN y los DKMS derivan.
+orr_of() { echo "orr_${1#dkms-}"; }
+for n in "${NODES[@]}"; do
+    issue_dkms "$(orr_of "${NODE_DKMS[$n]}")" "${NODE_IP[$n]}"
+done
+issue_dkms orr_4 "$D_IP"
 pass "net-ca: $(openssl x509 -in "$WORK/net-ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
 
 # ─── 3. certs de cliente de los SAE ───────────────────────────────────
@@ -103,22 +114,23 @@ sae_files() {
 }
 
 for n in "${NODES[@]}"; do
-    id="${NODE_DKMS[$n]}"
+    id="${NODE_DKMS[$n]}"; oid="$(orr_of "$id")"
     mapfile -t files < <(sae_files)
     scp "${SSH_OPTS[@]}" "$WORK/net-ca.crt" "$WORK/sae-ca.crt" "$WORK/rogue_ca.crt" \
-        "$WORK/$id.crt" "$WORK/$id.key" "${files[@]}" "$n:$CERTS_REMOTE/" >/dev/null
+        "$WORK/$id.crt" "$WORK/$id.key" "$WORK/$oid.crt" "$WORK/$oid.key" \
+        "${files[@]}" "$n:$CERTS_REMOTE/" >/dev/null
     on "$n" "chmod 600 $CERTS_REMOTE/*.key"
-    pass "$n: net-ca + sae-ca + $id + ${#SAES[@]} SAEs"
+    pass "$n: net-ca + sae-ca + $id + $oid + ${#SAES[@]} SAEs"
 done
 
 # nodo D (~/site4 en la VM de la SDN)
 on "$D_HOST" "mkdir -p site4/certs"
 mapfile -t files < <(sae_files)
 scp "${SSH_OPTS[@]}" "$WORK/net-ca.crt" "$WORK/sae-ca.crt" "$WORK/rogue_ca.crt" \
-    "$WORK/dkms-4.crt" "$WORK/dkms-4.key" "${files[@]}" \
-    "$D_HOST:site4/certs/" >/dev/null
+    "$WORK/dkms-4.crt" "$WORK/dkms-4.key" "$WORK/orr_4.crt" "$WORK/orr_4.key" \
+    "${files[@]}" "$D_HOST:site4/certs/" >/dev/null
 on "$D_HOST" "chmod 600 site4/certs/*.key"
-pass "$D_HOST:~/site4/certs: net-ca + sae-ca + dkms-4 + ${#SAES[@]} SAEs"
+pass "$D_HOST:~/site4/certs: net-ca + sae-ca + dkms-4 + orr_4 + ${#SAES[@]} SAEs"
 
 # Ninguna VM debe tener claves privadas de CA — solo los certs públicos.
 # Retiramos cualquier *-ca.key/.srl (y la ca.key huérfana histórica de site4).
@@ -126,6 +138,6 @@ on "$D_HOST" "rm -f site4/certs/*-ca.key site4/certs/ca.key site4/certs/*.srl" |
 info "retiradas claves privadas de CA de site4 (las VMs solo llevan certs públicos)"
 
 log ""
-info "los DKMS leen los certs al arrancar: hay que reiniciarlos para que los tomen"
-info "  for h in ${NODES[*]}; do ssh \$h 'cd site && docker compose -f site.yml restart dkms'; done"
+info "DKMS y ORR leen los certs al arrancar: hay que reiniciarlos para que los tomen"
+info "  for h in ${NODES[*]}; do ssh \$h 'cd site && docker compose -f site.yml restart dkms orr'; done"
 summary

@@ -90,11 +90,26 @@ PQC_AUTH="${DKMS_MESH_PQC_AUTH:-off}"
 # `link_psk` identica en los dos extremos: se deriva del indice de arista, que
 # es el mismo mirado desde cualquiera de los dos lados.
 FRAME_AUTH="${DKMS_MESH_FRAME_AUTH:-off}"
-# DKMS_MESH_GRPC_TLS=1 cifra con mTLS el gRPC del ORR: lo que le habla su DKMS
-# (material de transporte, que si no va en claro) y lo que le hablan los ORR
-# pares. Necesita un cert de nodo por ORR (orr_N, CA de red), que se genera
-# aquí o viene en DKMS_MESH_CERTS_SRC.
-GRPC_TLS="${DKMS_MESH_GRPC_TLS:-0}"
+# El gRPC del ORR va con mTLS (lo que le habla su DKMS —material de
+# transporte— y lo que le hablan los ORR pares), como en producción: es el
+# default del binario. DKMS_MESH_GRPC_TLS=0 lo apaga, que es el brazo de
+# comparación. Necesita un cert de nodo por ORR (orr_N, CA de red), que se
+# genera aquí o viene en DKMS_MESH_CERTS_SRC.
+GRPC_TLS="${DKMS_MESH_GRPC_TLS:-1}"
+# Algoritmo de los certificados: ML-DSA-65 (PQC) por defecto, como gen-certs.
+# Donde el openssl no sabe generarlos (CESGA, 1.1.1g) se siembran solos de
+# certs-pregen/<alg> si existe, sin tener que pedirlo.
+KEY_ALG="${KEY_ALG:-ml-dsa-65}"; export KEY_ALG
+if [ "${1:-}" = up ] && [ -z "${DKMS_MESH_CERTS_SRC:-}" ] && [ "$KEY_ALG" != rsa ] \
+   && ! openssl list -public-key-algorithms 2>/dev/null | grep -qi "ML-DSA"; then
+    if [ -d "$REPO/certs-pregen/$KEY_ALG" ]; then
+        DKMS_MESH_CERTS_SRC="$REPO/certs-pregen/$KEY_ALG"
+        echo "mesh: $(openssl version) no genera $KEY_ALG; certs pre-generados de $DKMS_MESH_CERTS_SRC"
+    else
+        echo "mesh: FATAL: $(openssl version) no genera $KEY_ALG y no hay $REPO/certs-pregen/$KEY_ALG (KEY_ALG=rsa para clásico, que no es PQC)" >&2
+        exit 1
+    fi
+fi
 SIGNDIR=""
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
@@ -333,7 +348,9 @@ sdn_announce_secs: 5
 ports: {grpc: $(orr_port "$n"), metrics: $(port "$n" 20004)}
 EOF
         if [ "$GRPC_TLS" = 1 ]; then
-            printf 'control_tls: true\ngrpc_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node$n.orr.yml"
+            printf 'grpc_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node$n.orr.yml"
+        else
+            printf 'grpc_tls: false\n' >> "$DIR/yml/node$n.orr.yml"
         fi
         # Firma ML-DSA del bootstrap: el ORR firma la pubkey ML-KEM que anuncia
         # en GetPublicKey, y sus pares la verifican con la clave pública de
@@ -392,9 +409,12 @@ EOF
         for n2 in $(seq 1 "$total"); do
             [ -s "$DIR/certs/dkms-$n2.crt" ] || faltan=$((faltan+1))
             [ -s "$DIR/certs/sae_$n2.crt" ] || faltan=$((faltan+1))
+            if [ "$GRPC_TLS" = 1 ]; then
+                [ -s "$DIR/certs/orr_$n2.crt" ] || faltan=$((faltan+1))
+            fi
         done
         if [ "$faltan" -gt 0 ] || [ ! -s "$DIR/certs/net-ca.crt" ] || [ ! -s "$DIR/certs/sae-ca.crt" ]; then
-            echo "mesh: FATAL: DKMS_MESH_CERTS_SRC=$DKMS_MESH_CERTS_SRC no cubre N=$total ($faltan ficheros de nodo/SAE ausentes)" >&2
+            echo "mesh: FATAL: DKMS_MESH_CERTS_SRC=$DKMS_MESH_CERTS_SRC no cubre N=$total ($faltan ficheros de DKMS/ORR/SAE ausentes)" >&2
             exit 1
         fi
         echo "mesh: certs pre-generados desde $DKMS_MESH_CERTS_SRC ($(ls "$DIR"/certs/*.crt | wc -l) certs, firma: $(openssl x509 -in "$DIR/certs/dkms-1.crt" -noout -text 2>/dev/null | grep -m1 'Signature Algorithm' | sed 's/.*: *//'))"

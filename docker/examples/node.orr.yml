@@ -18,3 +18,9 @@ peer_grpc_addrs:                   # orr_id -> URL gRPC del ORR peer (puerto 200
   orr_2: "http://10.0.0.12:20003"
 
 # default_max_hops: 1              # 1 = PQC E2E (recomendado)
+
+# El gRPC de este ORR (su DKMS y los ORR de fuera) va con mTLS POR DEFECTO:
+# necesita certs/<orr_id>.crt/.key + net-ca.crt (gen-certs.sh orr_1 <ip>
+# ./certs, ML-DSA-65) en certs_dir. Sin ellos no arranca, y lo dice.
+# grpc_tls: true
+# certs_dir: "/config/certs"       # donde el compose monta ./certs
