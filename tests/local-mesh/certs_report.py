@@ -49,7 +49,8 @@ def read_cell(d):
             # el máximo por enlace y se suma; los rechazos se acumulan igual.
             "fa_mode": "", "fa_signed": 0, "fa_verified": 0,
             "fa_bad_mac": 0, "fa_replayed": 0, "fa_plain_ok": 0,
-            "fa_plain_rej": 0, "orr_replay_dropped": 0, "orr_peel_failed": 0}
+            "fa_plain_rej": 0, "orr_replay_dropped": 0, "orr_peel_failed": 0,
+            "warmup": 0}
     try:
         with open(os.path.join(d, "meta.json")) as fh:
             cell["meta"] = json.load(fh)
@@ -59,6 +60,13 @@ def read_cell(d):
     for name in sorted(os.listdir(d)):
         if not (name.startswith("load.") and name.endswith(".csv")):
             continue
+        # Errores ANTES del primer 200 de este SAE = arranque: el cliente de
+        # carga empieza a pegar antes de que el DKMS haya levantado su listener
+        # mTLS. Medido el 2026-08-28: los 3343 `ERR:connect` de un SAE caían
+        # TODOS en los primeros 19 s, y el primer 200 llegaba justo después;
+        # cero en los 290 s siguientes. Contarlos como errores hacía que cada
+        # celda pareciera tener miles de fallos cuando no tenía ninguno.
+        seen_ok = False
         with open(os.path.join(d, name)) as fh:
             fh.readline()  # cabecera
             for line in fh:
@@ -66,6 +74,11 @@ def read_cell(d):
                 if len(p) < 6:
                     continue
                 st = p[2]
+                if st == "200":
+                    seen_ok = True
+                elif not seen_ok:
+                    cell["warmup"] = cell.get("warmup", 0) + 1
+                    continue
                 # Las filas agregadas de 429/503 traen `xN` en n_keys.
                 if p[1] == "-1" and p[5].startswith("x"):
                     try:
@@ -191,6 +204,7 @@ def fmt(cell):
         "malas": cell["hs_failed"] + cell["tls_fail"] + cell["auth_reject"],
         "mldsa": cell["mldsa_keys"],
         "corrupt": cell["corrupt"],
+        "warmup": cell["warmup"],
         "fa_mode": cell["fa_mode"] or "-",
         "fa_signed": cell["fa_signed"],
         "fa_verified": cell["fa_verified"],
@@ -242,6 +256,12 @@ def main(argv):
     print(" `en_claro` a 0 con modo Require — si no, config asimétrica. NO se")
     print(" espera firmados == verificados: scale_one.sh archiva sólo qkc1 y")
     print(" qkc2, así que no es un sistema cerrado.)")
+    tot_warm = sum(c["warmup"] for c in cells)
+    if tot_warm:
+        print("(%d peticiones descartadas por caer ANTES del primer 200 de su SAE:"
+              % tot_warm)
+        print(" el cliente pega antes de que el DKMS levante su listener. No son"
+              " errores.)")
     print("%-34s %-6s %-8s %12s %12s %8s %10s %8s" % (
         "brazo", "carga", "modo", "firmados", "verificados", "rechaz", "en_claro",
         "orr_ko"))
