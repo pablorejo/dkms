@@ -93,8 +93,14 @@ start_load() {
         # 6 nodos repartidos por el anillo; una ronda cada ~3 s.
         local nodes=()
         for i in 0 1 2 3 4 5; do nodes+=( $(( 1 + i * N / 6 )) ); done
+        # La salida se ARCHIVA, no se tira: `mesh.sh keys` es lo único de toda
+        # la campaña que comprueba que los dos extremos de un intercambio
+        # ETSI-014 se llevan la MISMA clave, byte a byte. Mandarla a /dev/null
+        # dejaba la prueba funcional más fuerte sin registrar, y el job sólo
+        # reportaba "N/90 llenos", que dice que hay material, no que sea el
+        # correcto.
         ( while [ -f "$OUT/.loading" ]; do
-              "$MESH" keys "${nodes[@]}" >/dev/null 2>&1
+              "$MESH" keys "${nodes[@]}" >> "$OUT/keys.log" 2>&1
               sleep 3
           done ) &
         LOAD_PIDS+=($!)
