@@ -125,7 +125,11 @@ def read_cell(d):
             continue
         with open(os.path.join(d, name), errors="replace") as fh:
             for raw in fh:
-                if "qkc.frame_auth me=" not in raw:
+                # El prefiltro va sobre la línea CRUDA, que lleva escapes ANSI
+                # ENTRE el nombre del evento y los campos. Buscar
+                # "qkc.frame_auth me=" no casa nunca — el mismo fallo que
+                # avisa el comentario de ANSI, cometido otra vez.
+                if "qkc.frame_auth" not in raw:
                     continue
                 m = re_fa.search(ANSI.sub("", raw))
                 if m:
