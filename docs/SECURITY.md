@@ -751,6 +751,13 @@ regímenes.
   al rotar SA). Persistirla exigiría meter estado en disco en un sistema
   diseñado sin él, y el ataque necesita capturar y reinyectar en el hueco de un
   reinicio concreto.
+- **`default_max_hops = 0` (passthrough) apaga la protección extremo a extremo**
+  sin decir nada. En ese modo no hay capa de cebolla: el payload va en claro
+  hasta el QKC, que lo cifra con el OTP del enlace, y el frame ni siquiera pasa
+  por `handle_onion_in`, así que no hay tag AEAD ni ventana anti-replay — sólo
+  queda el MAC de enlace, salto a salto. El default es `1` en el Rust y en
+  `render_config.py`, así que hay que ponerlo a mano para perderlo; pero si
+  alguien lo hace, que sepa lo que apaga.
 - **El socket de ACK del DKMS sigue sin autenticar** (`ack_socket.rs`, Fase 4):
   acepta TCP plano de cualquiera y saca el `from` del cuerpo. No compromete
   material —es contabilidad del generador— pero sí es autenticación de origen
