@@ -203,6 +203,7 @@ def fmt(cell):
 def main(argv):
     root = argv[1] if len(argv) > 1 else "certs-results"
     cells = []
+    incompletas = []
     for alg in sorted(os.listdir(root)):
         ad = os.path.join(root, alg)
         if not os.path.isdir(ad):
@@ -211,6 +212,14 @@ def main(argv):
             d = os.path.join(ad, cd)
             # Sin meta.json la celda está en curso (scale_one.sh lo escribe al
             # final): listarla daría una fila de ceros que parece un fallo.
+            #
+            # Pero omitirla EN SILENCIO es casi peor: una celda que se corrompió
+            # al archivar (un job que terminó con código 0 y no dejó ni logs ni
+            # meta — pasó el 2026-08-28 por tocar scale_one.sh mientras corría)
+            # simplemente desaparece del informe, y sólo se nota si uno está
+            # comparando brazo con brazo. Se avisa al final.
+            if os.path.isdir(d) and not os.path.exists(os.path.join(d, "meta.json")):
+                incompletas.append(os.path.join(alg, cd))
             if os.path.isdir(d) and os.path.exists(os.path.join(d, "meta.json")):
                 c = fmt(read_cell(d))
                 # El nombre del directorio identifica el BRAZO completo
@@ -218,6 +227,12 @@ def main(argv):
                 # el algoritmo del certificado, y dos brazos pueden compartirlo.
                 c["alg"] = alg
                 cells.append(c)
+    if incompletas:
+        print("!! %d celda(s) SIN meta.json, ignoradas — en curso, o el job murió"
+              % len(incompletas))
+        for c in incompletas:
+            print("   %s" % c)
+        print("")
     if not cells:
         print("sin celdas en %s" % root)
         return 1
