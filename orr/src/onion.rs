@@ -588,6 +588,41 @@ mod tests {
         assert_ne!(ca, cb);
     }
 
+    /// Guarda de regresión del fallo medido en CESGA el 2026-08-28.
+    ///
+    /// El OTP del enlace QKC trocea el payload en bloques de
+    /// `key_size_bits / 8` —32 B por defecto— y gasta UNA CLAVE QKD POR BLOQUE.
+    /// Cuando el AEAD metía `nonce ‖ ct ‖ tag` dentro del payload, un mensaje
+    /// de 32 B pasaba a 60: de un bloque a dos, el doble de material por salto,
+    /// y −51 % de rendimiento en el brazo QKD. En PQC no se habría visto.
+    ///
+    /// Si alguien vuelve a meter bytes en el payload, este test lo dice aquí en
+    /// vez de dentro de un job de una hora.
+    #[test]
+    fn the_payload_must_not_grow_past_the_otp_block() {
+        const OTP_BLOCK: usize = 32; // key_size_bits (256) / 8
+        let body = vec![0xAAu8; OTP_BLOCK];
+        let path = vec![PathHopSecret {
+            orr_id: "orr_dst".into(),
+            master_secret: Zeroizing::new(random_secret()),
+            epoch_id: 7,
+        }];
+        let onion = build_onion(&path, body.clone(), 42, 1, b"hdr").unwrap();
+        assert_eq!(
+            onion.payload.len(),
+            body.len(),
+            "el payload de la cebolla no puede crecer: cada byte de más puede \
+             costar una clave QKD entera por salto"
+        );
+        assert_eq!(
+            onion.payload.len().div_ceil(OTP_BLOCK),
+            1,
+            "un mensaje de un bloque tiene que seguir siendo un bloque"
+        );
+        // El tag existe, pero fuera del payload: va en la cabecera.
+        assert_eq!(onion.tag.len(), TAG_LEN);
+    }
+
     #[test]
     fn build_and_peel_1_hop() {
         let ms_dst = random_secret();
