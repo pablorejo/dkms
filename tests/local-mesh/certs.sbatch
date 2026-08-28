@@ -36,7 +36,7 @@
 set -e
 TOPO="${TOPO:?falta TOPO (ringchords|cn|bridge2)}"
 N="${N:?falta N}"
-REG="${REG:?falta REG (poca|media|mucha)}"
+REG="${REG:?falta REG (ninguna|poca|media|mucha)}"
 KEY_ALG="${KEY_ALG:-ml-dsa-65}"
 export KEY_ALG
 

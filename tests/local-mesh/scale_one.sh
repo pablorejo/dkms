@@ -5,7 +5,11 @@
 #               cn         (ciclo puro C_N — edge-transitivo a todo N)
 #               bridge2    (dos comunidades ringchords de N/2 + un puente:
 #                           regular de facto y máximamente desigual)
-#   régimen     poca   — goteo: una ronda de keys sobre 6 nodos cada ~3 s
+#   régimen     ninguna — cero tráfico SAE: mide el camino del GENERADOR solo
+#                         (DKMS→ORR→QKC→ORR→DKMS), que es donde vive el sello
+#                         extremo a extremo. Al cerrar la observación hace UNA
+#                         ronda de `keys` como prueba funcional, ya sin medir.
+#               poca   — goteo: una ronda de keys sobre 6 nodos cada ~3 s
 #               media  — sae_load con 2 hilos por maestro
 #               mucha  — sae_load con 9 hilos por maestro (+ recuperación)
 #
@@ -19,7 +23,7 @@ set -uo pipefail
 
 TOPO_FAM=${1:?ringchords|cn|bridge2}
 N=${2:?nodos}
-REG=${3:?poca|media|mucha}
+REG=${3:?ninguna|poca|media|mucha}
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -89,6 +93,11 @@ RECOVERY_CAP=300
 LOAD_PIDS=()
 start_load() {
     case "$REG" in
+    ninguna)
+        # A propósito, nada. El generador llena los buffers sin que ningún SAE
+        # pida: es el único régimen en el que lo que se mide es SOLO la cadena
+        # de transporte, sin la ruta de servicio compitiendo por la CPU.
+        ;;
     poca)
         # 6 nodos repartidos por el anillo; una ronda cada ~3 s.
         local nodes=()
@@ -142,7 +151,7 @@ start_load() {
 # y sus curvas pasaron por "medidas bajo carga" siendo llenados en vacío.
 # Mejor morir aquí que producir un dato que miente.
 check_load() {
-    [ "$REG" = poca ] && return 0
+    case "$REG" in ninguna|poca) return 0 ;; esac
     sleep 20
     local vivos=0 p
     for p in "${LOAD_PIDS[@]:-}"; do kill -0 "$p" 2>/dev/null && vivos=$((vivos+1)); done
@@ -191,6 +200,17 @@ while (( SECONDS < DEADLINE )); do
 done
 echo "== observación cerrada: $OK/$TOTAL llenos"
 stop_load
+# Sin tráfico durante la medida, la comprobación de que el material entregado
+# es el BUENO tiene que hacerse en algún momento: una ronda al final, ya fuera
+# de la ventana. Sin esto el arm sólo diría "llenó", que no es lo mismo que
+# "los dos extremos se llevan la misma clave".
+if [ "$REG" = ninguna ]; then
+    nodes=()
+    for i in 0 1 2 3 4 5; do nodes+=( $(( 1 + i * N / 6 )) ); done
+    echo "== prueba funcional final: mesh.sh keys ${nodes[*]}"
+    "$MESH" keys "${nodes[@]}" > "$OUT/keys.log" 2>&1
+    tail -1 "$OUT/keys.log"
+fi
 if [ "$REG" = mucha ]; then
     DEADLINE=$(( SECONDS + RECOVERY_CAP ))
     while (( SECONDS < DEADLINE )); do
@@ -220,11 +240,35 @@ done
 # mismo topo/n/régimen son indistinguibles y la comparación RSA vs ML-DSA no
 # se puede reconstruir a posteriori. `cert_sig` se lee del cert emitido, que
 # es la verdad sobre el terreno (no lo que se pidió por env).
+# Contadores del sello extremo a extremo (dkms/src/e2e.rs), agregados sobre el
+# ÚLTIMO `generator.state` de cada par: son la prueba de que el camino nuevo no
+# está descartando material en silencio. `epochs_none` sostenido significa que
+# el acuerdo de clave no cuaja; los otros tres deberían ser 0.
+e2e_sum() {
+    local field=$1 total=0 v
+    for i in $(seq 1 "$N"); do
+        v=$(sed 's/\x1b\[[0-9;]*m//g' "$DKMS_MESH_DIR/logs/dkms$i.log" 2>/dev/null \
+            | grep -a generator.state | tail -$(( N - 1 )) \
+            | grep -o "$field=[0-9]*" | cut -d= -f2 | awk '{t+=$1} END{print t+0}')
+        total=$(( total + ${v:-0} ))
+    done
+    echo "$total"
+}
+E2E_CORRUPT=$(e2e_sum recv_corrupt); E2E_NOEPOCH=$(e2e_sum recv_no_epoch); E2E_REPLAY=$(e2e_sum recv_replayed)
+E2E_NONE=0
+for i in $(seq 1 "$N"); do
+    c=$(sed 's/\x1b\[[0-9;]*m//g' "$DKMS_MESH_DIR/logs/dkms$i.log" 2>/dev/null \
+        | grep -a generator.state | tail -$(( N - 1 )) | grep -c 'e2e_epoch="none"')
+    E2E_NONE=$(( E2E_NONE + c ))
+done
+echo "== e2e: recv_corrupt=$E2E_CORRUPT recv_no_epoch=$E2E_NOEPOCH recv_replayed=$E2E_REPLAY pares_sin_epoca=$E2E_NONE"
+
 CERT_SIG=$(openssl x509 -in "$DKMS_MESH_DIR/certs/dkms-1.crt" -noout -text 2>/dev/null \
     | grep -m1 'Signature Algorithm' | sed 's/.*: *//' | tr -d ' ')
 LOADER_USED=$([ -x "$LOADER_BIN" ] && echo rust || echo python)
-printf '{"topo":"%s","n":%d,"regimen":"%s","cap_s":%d,"llenos":%d,"total":%d,"key_alg":"%s","cert_sig":"%s","loader":"%s"}\n' \
+printf '{"topo":"%s","n":%d,"regimen":"%s","cap_s":%d,"llenos":%d,"total":%d,"key_alg":"%s","cert_sig":"%s","loader":"%s","e2e":{"recv_corrupt":%d,"recv_no_epoch":%d,"recv_replayed":%d,"pares_sin_epoca":%d}}\n' \
     "$TOPO_FAM" "$N" "$REG" "$CAP" "$OK" "$TOTAL" \
-    "${KEY_ALG:-ml-dsa-65}" "${CERT_SIG:-desconocido}" "$LOADER_USED" > "$OUT/meta.json"
+    "${KEY_ALG:-ml-dsa-65}" "${CERT_SIG:-desconocido}" "$LOADER_USED" \
+    "$E2E_CORRUPT" "$E2E_NOEPOCH" "$E2E_REPLAY" "$E2E_NONE" > "$OUT/meta.json"
 "$MESH" down >/dev/null 2>&1
 echo "== $TOPO_FAM n=$N $REG: archivado en $OUT"
