@@ -223,9 +223,10 @@ def main(argv):
         return 1
 
     print("== ¿FUNCIONA LA AUTENTICACIÓN DEL PLANO DE DATOS? ==")
-    print("(docs/SECURITY.md §Fase 8. En un brazo sano: firmados == verificados,")
-    print(" y los tres contadores de rechazo a 0. `en_claro` > 0 con modo Require")
-    print(" significaría config asimétrica.)")
+    print("(docs/SECURITY.md §Fase 8. Lo que importa: `rechaz` y `orr_ko` a 0, y")
+    print(" `en_claro` a 0 con modo Require — si no, config asimétrica. NO se")
+    print(" espera firmados == verificados: scale_one.sh archiva sólo qkc1 y")
+    print(" qkc2, así que no es un sistema cerrado.)")
     print("%-34s %-6s %-8s %12s %12s %8s %10s %8s" % (
         "brazo", "carga", "modo", "firmados", "verificados", "rechaz", "en_claro",
         "orr_ko"))
