@@ -17,9 +17,29 @@
 //! La ventana se indexa por `header.from`, que es el ORR de origen y no cambia
 //! salto a salto — a diferencia de `next_orr_id`.
 
-use common::crypto::frame_mac::{ReplayError, ReplayWindow, DEFAULT_WINDOW};
+use common::crypto::frame_mac::{ReplayError, ReplayWindow};
 use dashmap::DashMap;
 use parking_lot::Mutex;
+
+/// Anchura de la ventana, en unidades de contador.
+///
+/// **No es "cuántos mensajes hacia atrás toleramos", y esa diferencia es la
+/// razón de este número.** El contador es UNO por ORR de origen, compartido
+/// entre todos sus destinos, así que el destino sólo ve una de cada `d`
+/// posiciones si el origen habla con `d` peers: la ventana se consume al ritmo
+/// TOTAL de emisión del origen, no al de lo que llega aquí.
+///
+/// Con los 13 000 mensajes/s por nodo medidos en CESGA (n=10, régimen alto),
+/// los 1024 del default darían 79 ms de tolerancia a reordenación — y a N=30,
+/// menos. Cualquier hipo de red o de planificación por encima de eso se
+/// contaría como replay de un mensaje legítimo. 65 536 dan ~5 s a ese ritmo, y
+/// cuestan 8 KB de bitmap por origen (menos de 250 KB con 30 nodos).
+///
+/// La alternativa —un contador por destino, que haría la secuencia densa— se
+/// descartó: en un camino multi-salto el ORR intermedio vería las secuencias de
+/// varios destinos entrelazadas y con los mismos números, y las colisiones
+/// serían falsos replays.
+const ONION_WINDOW: u64 = 65_536;
 
 /// Ventanas anti-replay, una por ORR de origen visto.
 #[derive(Debug, Default)]
@@ -46,7 +66,7 @@ impl OnionReplay {
         let w = self
             .by_origin
             .entry(origin.to_string())
-            .or_insert_with(|| Mutex::new(ReplayWindow::new(DEFAULT_WINDOW)));
+            .or_insert_with(|| Mutex::new(ReplayWindow::new(ONION_WINDOW)));
         let mut g = w.lock();
         g.check_and_set(session, counter)
     }
@@ -107,6 +127,22 @@ mod tests {
             r.check("orr_1", 7, 6),
             Err(ReplayError::RetiredSession { .. })
         ));
+    }
+
+    #[test]
+    fn the_window_survives_a_sparse_counter() {
+        // El caso real: el origen habla con 9 peers, así que a ESTE destino le
+        // llega una de cada ~9 posiciones del contador. Con la ventana estrecha
+        // del default esto empezaría a dar `TooOld` en cuanto hubiera algo de
+        // reordenación; con `ONION_WINDOW` hay margen de sobra.
+        let r = OnionReplay::new();
+        let peers = 9u64;
+        for i in 1..=2000u64 {
+            assert!(r.check("orr_1", 7, i * peers).is_ok(), "mensaje {i}");
+        }
+        // Y un rezagado de hace 500 mensajes (4500 posiciones de contador)
+        // sigue entrando: es reordenación, no un replay.
+        assert!(r.check("orr_1", 7, 1500 * peers - 1).is_ok());
     }
 
     #[test]
