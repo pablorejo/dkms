@@ -731,12 +731,40 @@ un extremo firma coincide con lo que el otro verifica y los cuatro últimos son
 0. En el ORR, `replay_dropped` en `orr.state`, separado de `peel_failed`: uno es
 "tag válido, mensaje repetido" y el otro "tag que no cuadra".
 
-**Verificación.** 439 tests en verde. Malla local N=4 en anillo, enlaces QKD y
-PQC, con `frame_auth = require`: simetría exacta signed/verified en las ocho
-direcciones, `bad_mac = replayed = peel_failed = replay_dropped = 0`, 12 288
-mensajes por nodo entregados y 12/12 pares ETSI-014 byte-idénticos. Coste en
-CESGA: campaña `ringchords n=10`, brazos `frameoff`/`framerequire`, tres
-regímenes.
+**Verificación.** 448 tests unitarios, más dos pruebas de integración que
+comprueban lo que los unitarios no pueden:
+
+- `tests/local-mesh/frame_auth_negative.sh` — a un nodo se le quita la PSK en
+  caliente y se comprueba que sus vecinos lo dejan **fuera** (`plain_rej` ~1700
+  en cada uno) en vez de degradar el enlace a no autenticado: el tráfico con él
+  se congela. El primer rechazo es el NOTIFY sin firmar, que es fail-closed en
+  cuanto el receptor tiene PSK.
+- `tests/local-mesh/frame_auth_tamper.sh` + `frame_tamper.py` — un proxy TCP
+  entre dos QKC, **sin ninguna clave**, voltea un bit cada N frames. Resultado:
+  1204 frames, 60 tocados, `bad_mac = 60` en el peer y `recv_corrupt = 0` en el
+  DKMS. Ni una modificación se cuela, y ninguna llega al material. El proxy
+  parsea el wire de verdad, para que lo que falle sea el MAC y no el parser.
+
+**Coste, medido en CESGA sobre enlaces QKD (`ringchords`, certificados
+ML-DSA-65).** A N=10, contra el mismo despliegue sin MAC de frame: `media`
+5300.2 → 5298.2 claves/s (−0.04 %), `mucha` 13146.3 → 13147.3 (+0.01 %). A
+**N=30**, contra `rsa-qkd-authoff` —o sea, contando también el salto de
+certificados RSA a ML-DSA—: `media` 4432.9 → 4429.6 y `mucha` 8766.6 → 8753.8,
+**−0.1 % en ambos**, con p95 2.2 → 2.2 y 7.8 → 8.0 ms.
+
+**Corrección.** En las 15 celdas de las tres campañas: `bad_mac`, `replayed`,
+`plain_ok`, `plain_rej`, `orr_ko` y `corrupt` **a cero**, y ni un solo
+handshake TLS fallido. A N=30 se verificaron 7.9 millones de frames. La prueba
+funcional más dura es el régimen `poca`, que compara los bytes de los dos
+extremos de cada intercambio ETSI-014: **870/870 parejas de la malla completa
+con buffer lleno y 3180 intercambios 100 % byte-idénticos**.
+
+**Una trampa que costó una campaña entera y conviene no repetir.** La primera
+versión metía `nonce ‖ ct ‖ tag` dentro del payload de la cebolla y midió
+**−51 %**. El OTP del enlace trocea en bloques de `key_size_bits / 8` y gasta
+una clave QKD por bloque, así que 28 bytes de más convierten un mensaje de 32 B
+en dos bloques: el doble de material por salto. Es invisible en enlaces PQC.
+Ver la gotcha del troceado en CLAUDE.md.
 
 **Lo que sigue sin cubrir.**
 
