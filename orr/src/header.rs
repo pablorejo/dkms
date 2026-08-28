@@ -73,6 +73,15 @@ pub struct OrrHeader {
     /// salto siguiente. Ver `onion_replay`.
     #[serde(default)]
     pub counter: u64,
+    /// Tag AES-GCM de la capa que va en `payload`.
+    ///
+    /// Viaja en la cabecera y no pegado al payload a propósito: el tag no es
+    /// secreto, y el OTP del enlace QKC trocea el payload en bloques de
+    /// `key_size_bits / 8` gastando una clave QKD por bloque. Metido en el
+    /// payload, 16 bytes de tag convierten un mensaje de 32 en dos bloques y
+    /// duplican el consumo de material por salto (medido: −51 % de rendimiento).
+    #[serde(with = "serde_bytes", default)]
+    pub tag: [u8; common::crypto::aead::TAG_LEN],
 }
 
 impl OrrHeader {
@@ -93,6 +102,7 @@ impl OrrHeader {
             // ventana que consultar; los campos van a 0 por uniformidad.
             session: 0,
             counter: 0,
+            tag: [0u8; common::crypto::aead::TAG_LEN],
         }
     }
 
@@ -108,6 +118,7 @@ impl OrrHeader {
         max_hops: i32,
         session: u64,
         counter: u64,
+        tag: [u8; common::crypto::aead::TAG_LEN],
     ) -> Self {
         Self {
             kind: HEADER_TYPE.to_string(),
@@ -120,6 +131,7 @@ impl OrrHeader {
             timestamp: now_unix_secs(),
             session,
             counter,
+            tag,
         }
     }
 
@@ -166,7 +178,7 @@ mod tests {
     #[test]
     fn onion_round_trip() {
         let kid = [0xAB; 16];
-        let h = OrrHeader::onion("orr_1", "orr_4", "orr_2", kid, 2, 9, 3);
+        let h = OrrHeader::onion("orr_1", "orr_4", "orr_2", kid, 2, 9, 3, [7u8; 16]);
         let buf = h.encode().unwrap();
         let h2 = OrrHeader::decode(&buf).unwrap();
         assert_eq!(h2.from, "orr_1");

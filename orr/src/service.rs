@@ -622,6 +622,7 @@ impl OrrService {
             onion.max_hops,
             onion.session,
             onion.counter,
+            onion.tag,
         );
         let frame = Frame {
             kind: FRAME_LOCAL_SEND,
@@ -710,6 +711,7 @@ impl OrrService {
             &ms,
             &key_id,
             &payload,
+            &header.tag,
             header.max_hops,
             epoch_id,
             header.session,
@@ -774,6 +776,7 @@ impl OrrService {
             remaining_after,
             prev_header.session,
             prev_header.counter,
+            inner.tag,
         );
         let out = Frame {
             kind: FRAME_LOCAL_SEND,

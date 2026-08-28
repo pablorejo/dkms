@@ -24,7 +24,7 @@
 //! ```
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    aead::{Aead, AeadCore, AeadInPlace, KeyInit, OsRng, Payload},
     Aes256Gcm, Key, Nonce,
 };
 use thiserror::Error;
@@ -107,6 +107,65 @@ pub fn seal(key: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<SealedMessage, A
     })
 }
 
+/// Sella con nonce **explícito** y tag **separado** del ciphertext.
+///
+/// Existe por una razón muy concreta: en la cebolla del ORR ni el nonce ni el
+/// tag son secretos, y meterlos dentro del payload cuesta **claves QKD**. El
+/// OTP del enlace trocea en bloques de `key_size_bits / 8` —32 bytes por
+/// defecto— y consume una clave por bloque, así que los 28 bytes de
+/// `nonce ‖ tag` convierten un mensaje de 32 bytes en dos bloques: el doble de
+/// material QKD por salto. Medido en CESGA el 2026-08-28: −51 % de rendimiento,
+/// con `wenc_to` y `misses` disparados en el keystore.
+///
+/// Sacándolos del payload, el ciphertext mide exactamente lo que el plaintext y
+/// el troceado no cambia.
+///
+/// **El caller responde de que el nonce no se repita con la misma clave.** El
+/// uso seguro es derivarlo de lo mismo que deriva la clave: si cada clave se usa
+/// con un único nonce, la reutilización es imposible por construcción.
+pub fn seal_detached(
+    key: &[u8],
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<(Vec<u8>, [u8; TAG_LEN]), AeadError> {
+    if key.len() != KEY_LEN {
+        return Err(AeadError::BadKeyLen(key.len()));
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let mut buf = plaintext.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, &mut buf)
+        .map_err(|_| AeadError::Encrypt)?;
+    let mut tag_out = [0u8; TAG_LEN];
+    tag_out.copy_from_slice(tag.as_slice());
+    Ok((buf, tag_out))
+}
+
+/// Inversa de [`seal_detached`].
+pub fn open_detached(
+    key: &[u8],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+    tag: &[u8; TAG_LEN],
+    aad: &[u8],
+) -> Result<Vec<u8>, AeadError> {
+    if key.len() != KEY_LEN {
+        return Err(AeadError::BadKeyLen(key.len()));
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let mut buf = ciphertext.to_vec();
+    cipher
+        .decrypt_in_place_detached(
+            Nonce::from_slice(nonce),
+            aad,
+            &mut buf,
+            aes_gcm::Tag::from_slice(tag),
+        )
+        .map_err(|_| AeadError::Decrypt)?;
+    Ok(buf)
+}
+
 /// Descifra y verifica. Devuelve error si la clave es incorrecta, el
 /// nonce no coincide, el `aad` no coincide o el ciphertext fue
 /// manipulado (tag GCM no valida).
@@ -125,6 +184,51 @@ pub fn open(key: &[u8], msg: &SealedMessage, aad: &[u8]) -> Result<Vec<u8>, Aead
             },
         )
         .map_err(|_| AeadError::Decrypt)
+}
+
+#[cfg(test)]
+mod tests_detached {
+    use super::*;
+
+    #[test]
+    fn detached_round_trip_keeps_the_ciphertext_length() {
+        // LA propiedad que importa: el ciphertext mide lo MISMO que el
+        // plaintext. Es lo que evita cruzar el bloque del OTP y gastar una
+        // segunda clave QKD por salto.
+        let key = [7u8; KEY_LEN];
+        let nonce = [3u8; NONCE_LEN];
+        let pt = vec![0xABu8; 32];
+        let (ct, tag) = seal_detached(&key, &nonce, &pt, b"aad").unwrap();
+        assert_eq!(ct.len(), pt.len(), "el detached no debe alargar el payload");
+        assert_eq!(tag.len(), TAG_LEN);
+        assert_eq!(open_detached(&key, &nonce, &ct, &tag, b"aad").unwrap(), pt);
+    }
+
+    #[test]
+    fn detached_catches_tampering_and_wrong_aad() {
+        let key = [7u8; KEY_LEN];
+        let nonce = [3u8; NONCE_LEN];
+        let (mut ct, tag) = seal_detached(&key, &nonce, b"hola", b"aad").unwrap();
+        assert!(open_detached(&key, &nonce, &ct, &tag, b"otro").is_err(), "aad");
+        ct[0] ^= 0xFF;
+        assert!(open_detached(&key, &nonce, &ct, &tag, b"aad").is_err(), "ct");
+        let (ct2, mut tag2) = seal_detached(&key, &nonce, b"hola", b"aad").unwrap();
+        tag2[0] ^= 0xFF;
+        assert!(open_detached(&key, &nonce, &ct2, &tag2, b"aad").is_err(), "tag");
+        let mut n2 = nonce;
+        n2[0] ^= 0xFF;
+        assert!(open_detached(&key, &n2, &ct2, &tag, b"aad").is_err(), "nonce");
+    }
+
+    #[test]
+    fn detached_and_attached_agree() {
+        // Mismo cifrado por debajo: `seal` = nonce ‖ detached(ct) ‖ tag.
+        let key = [9u8; KEY_LEN];
+        let sealed = seal(&key, b"mensaje", b"aad").unwrap();
+        let (ct, tag) = seal_detached(&key, &sealed.nonce, b"mensaje", b"aad").unwrap();
+        assert_eq!(&sealed.ciphertext[..ct.len()], &ct[..]);
+        assert_eq!(&sealed.ciphertext[ct.len()..], &tag[..]);
+    }
 }
 
 #[cfg(test)]
