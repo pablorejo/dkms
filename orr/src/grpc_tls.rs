@@ -82,7 +82,11 @@ pub async fn channel(url: &str) -> Result<Channel, String> {
             )
             .map_err(|e| format!("tls: {e}"))?;
     }
-    ep.connect().await.map_err(|e| format!("connect: {e}"))
+    // Cadena de causas entera: "transport error" a secas no dice si es TLS
+    // (cert de otra CA, SAN que no casa) o red.
+    ep.connect()
+        .await
+        .map_err(|e| format!("connect: {:#}", anyhow::Error::new(e)))
 }
 
 #[cfg(test)]

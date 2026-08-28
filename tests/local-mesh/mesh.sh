@@ -69,6 +69,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$REPO/target/release"
 RENDER="$REPO/docker/render_config.py"
 GENCERTS="$REPO/docker/gen-certs.sh"
+# key id de un cert: `Subject` (el suyo) o `Authority` (el de quien lo firmó).
+# Sirve para saber si una hoja cuelga de una CA sin verificar la firma, que
+# con ML-DSA no puede hacer un openssl viejo. Acepta el formato de 1.1.1
+# (`keyid:XX:..`) y el de 3.x (`XX:..` a secas).
+cert_keyid() {
+    openssl x509 -in "$1" -noout -text 2>/dev/null \
+        | grep -A1 "$2 Key Identifier" | tail -1 | tr -d ' ' | sed 's/^keyid://'
+}
 # Bajo tests/results/, que está en .gitignore: son artefactos, no fuente.
 DIR="${DKMS_MESH_DIR:-$REPO/tests/results/local-mesh}"
 SCOPE="dkms-local-mesh"
@@ -417,7 +425,20 @@ EOF
             echo "mesh: FATAL: DKMS_MESH_CERTS_SRC=$DKMS_MESH_CERTS_SRC no cubre N=$total ($faltan ficheros de DKMS/ORR/SAE ausentes)" >&2
             exit 1
         fi
-        echo "mesh: certs pre-generados desde $DKMS_MESH_CERTS_SRC ($(ls "$DIR"/certs/*.crt | wc -l) certs, firma: $(openssl x509 -in "$DIR/certs/dkms-1.crt" -noout -text 2>/dev/null | grep -m1 'Signature Algorithm' | sed 's/.*: *//'))"
+        # Y que las hojas cuelguen DE ESTA CA y no de otra copia con el mismo
+        # nombre: openssl 1.1.1 no verifica firmas ML-DSA, pero sí imprime los
+        # key ids. Pasó (CESGA 2026-08-28): orr_N firmados por la net-ca local
+        # sobre un juego cuya net-ca era otra, y el DKMS no validó al ORR — sin
+        # un solo error que lo dijera, sólo "transport error" y 0/90 llenos.
+        local pair leaf ca
+        for pair in dkms-1:net-ca sae_1:sae-ca $([ "$GRPC_TLS" = 1 ] && echo orr_1:net-ca); do
+            leaf=${pair%%:*}; ca=${pair##*:}
+            if [ "$(cert_keyid "$DIR/certs/$leaf.crt" Authority)" != "$(cert_keyid "$DIR/certs/$ca.crt" Subject)" ]; then
+                echo "mesh: FATAL: $leaf.crt no está firmado por el $ca.crt de $DKMS_MESH_CERTS_SRC (es otra copia de la CA): regenera el juego entero" >&2
+                exit 1
+            fi
+        done
+        echo "mesh: certs pre-generados desde $DKMS_MESH_CERTS_SRC ($(/bin/ls "$DIR"/certs/*.crt | wc -l) certs, firma: $(openssl x509 -in "$DIR/certs/dkms-1.crt" -noout -text 2>/dev/null | grep -m1 'Signature Algorithm' | sed 's/.*: *//'))"
     fi
     echo "$total" > "$DIR/N"
 }

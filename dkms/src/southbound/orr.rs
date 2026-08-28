@@ -147,10 +147,14 @@ impl OrrClient {
                 .map_err(|e| DkmsError::Other(anyhow!("orr tls: {e}")))?;
         }
 
+        // Con la cadena de causas entera: tonic resume todo en "transport
+        // error", y lo que hace falta ver es lo de dentro — p. ej. `invalid
+        // peer certificate: UnknownIssuer`, que es un ORR con cert de otra
+        // CA. Medido en CESGA 2026-08-28: veinte reintentos mudos.
         let channel = endpoint
             .connect()
             .await
-            .map_err(|e| DkmsError::Other(anyhow!("orr connect: {e}")))?;
+            .map_err(|e| DkmsError::Other(anyhow!("orr connect: {:#}", anyhow::Error::new(e))))?;
 
         debug!(endpoint = ep, "orr client connected");
         Ok(Some(Self {
