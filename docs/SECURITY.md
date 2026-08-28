@@ -738,13 +738,27 @@ mensajes por nodo entregados y 12/12 pares ETSI-014 byte-idénticos. Coste en
 CESGA: campaña `ringchords n=10`, brazos `frameoff`/`framerequire`, tres
 regímenes.
 
-**Lo que sigue sin cubrir.** Un QKC intermedio malicioso ya no puede alterar la
-carga (lo impide el tag AEAD de la cebolla) pero sigue viendo el `header_orr_mp`
-en claro y puede descartar frames: la disponibilidad no es objetivo de esta
-fase. Y las claves de sesión SAE siguen sin comprobación propia extremo a
-extremo — van envueltas con una clave de transporte y entregadas por ETSI-020;
-las capas de esta fase lo hacen inalcanzable en la práctica, no imposible en
-principio.
+**Lo que sigue sin cubrir.**
+
+- **Disponibilidad.** Un QKC intermedio malicioso ya no puede alterar la carga
+  —lo impide el tag AEAD de la cebolla— pero sigue viendo el `header_orr_mp` en
+  claro y puede descartar frames. No es objetivo de esta fase.
+- **La ventana anti-replay es RAM-only, así que un reinicio la vacía.** Justo
+  después de reiniciar, un receptor acepta el primer mensaje que le llegue sea
+  cual sea su contador, y sólo a partir de ahí empieza a filtrar: un mensaje
+  reciente capturado antes del reinicio puede colarse en esa rendija. Es la
+  misma propiedad que tiene cualquier anti-replay sin estado persistente (IPsec
+  al rotar SA). Persistirla exigiría meter estado en disco en un sistema
+  diseñado sin él, y el ataque necesita capturar y reinyectar en el hueco de un
+  reinicio concreto.
+- **El socket de ACK del DKMS sigue sin autenticar** (`ack_socket.rs`, Fase 4):
+  acepta TCP plano de cualquiera y saca el `from` del cuerpo. No compromete
+  material —es contabilidad del generador— pero sí es autenticación de origen
+  que falta, en un plano que cruza instituciones.
+- **Las claves de sesión SAE** ya llevan `session_key_digest` (una huella ligada
+  al `key_id`, comprobada antes de guardar y de acusar recibo), así que el caso
+  de "los dos SAE se llevan claves distintas en silencio" está cerrado. Lo que
+  no hay es una comprobación que el propio SAE pueda hacer: se fía de su KME.
 
 ## 4. Decisions log
 
