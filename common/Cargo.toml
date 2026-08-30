@@ -43,6 +43,7 @@ chacha20poly1305   = { workspace = true }
 aes-gcm            = { workspace = true }
 ml-kem             = { workspace = true }
 ml-dsa             = { version = "0.1.1", features = ["pkcs8"] }
+x509-parser        = "0.16"
 webpki             = { package = "rustls-webpki", version = "0.103", features = ["aws-lc-rs", "aws-lc-rs-unstable"] }
 zeroize            = "1.8"
 ring               = { workspace = true }

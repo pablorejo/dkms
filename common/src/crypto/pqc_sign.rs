@@ -33,6 +33,45 @@ pub enum SignError {
     BadLength,
     #[error("invalid signature")]
     Invalid,
+    #[error("the key is not an ML-DSA-65 PKCS#8 (seed form)")]
+    NotMlDsa,
+}
+
+/// Clave de firma ML-DSA-65 cargada de un PKCS#8 — la del certificado de
+/// nodo. Con ella el anuncio de pubkey del ORR queda atado al cert (y por
+/// tanto a la CA de red), en vez de a una semilla aparte que había que
+/// repartir a mano como `peer_verify_keys`.
+pub struct MlDsa65Signer {
+    sk: SigningKey<MlDsa65>,
+}
+
+impl MlDsa65Signer {
+    /// Desde el DER PKCS#8 en forma semilla (la que emite `gen-certs.sh`).
+    pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, SignError> {
+        use ml_dsa::pkcs8::DecodePrivateKey;
+        SigningKey::<MlDsa65>::from_pkcs8_der(der)
+            .map(|sk| Self { sk })
+            .map_err(|_| SignError::NotMlDsa)
+    }
+
+    /// Desde el PEM de `tls.key_path`. Una clave RSA/ECDSA devuelve
+    /// [`SignError::NotMlDsa`].
+    pub fn from_pkcs8_pem(pem: &[u8]) -> Result<Self, SignError> {
+        use rustls::pki_types::{pem::PemObject, PrivateKeyDer};
+        match PrivateKeyDer::from_pem_slice(pem) {
+            Ok(PrivateKeyDer::Pkcs8(k)) => Self::from_pkcs8_der(k.secret_pkcs8_der()),
+            _ => Err(SignError::NotMlDsa),
+        }
+    }
+
+    /// Clave de verificación (1952 B): la misma que lleva el SPKI del cert.
+    pub fn verifying_key(&self) -> Vec<u8> {
+        self.sk.verifying_key().encode().to_vec()
+    }
+
+    pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
+        self.sk.sign(msg).encode().to_vec()
+    }
 }
 
 /// Par de firma ML-DSA serializado a bytes.
@@ -174,6 +213,16 @@ fn announcement_msg(orr_id: &str, suite: &str, public_key: &[u8]) -> Vec<u8> {
     m.extend_from_slice(&(public_key.len() as u16).to_be_bytes());
     m.extend_from_slice(public_key);
     m
+}
+
+/// Firma el anuncio `(orr_id, suite, public_key)` con la clave del cert de nodo.
+pub fn sign_orr_pubkey_with(
+    signer: &MlDsa65Signer,
+    orr_id: &str,
+    suite: &str,
+    public_key: &[u8],
+) -> Vec<u8> {
+    signer.sign(&announcement_msg(orr_id, suite, public_key))
 }
 
 /// Firma el anuncio `(orr_id, suite, public_key)` de un ORR (bootstrap PQC).

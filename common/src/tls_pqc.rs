@@ -109,7 +109,7 @@ impl KeyProvider for PqcKeyProvider {
 
 /// Algoritmos de verificación: los clásicos del provider aws-lc-rs **más**
 /// ML-DSA-65. `&'static` como exige `WebPkiSupportedAlgorithms`.
-static VERIFY_ALGS: &[&dyn rustls::pki_types::SignatureVerificationAlgorithm] = &[
+pub(crate) static VERIFY_ALGS: &[&dyn rustls::pki_types::SignatureVerificationAlgorithm] = &[
     webpki::aws_lc_rs::ML_DSA_65,
     webpki::aws_lc_rs::ECDSA_P256_SHA256,
     webpki::aws_lc_rs::ECDSA_P384_SHA384,

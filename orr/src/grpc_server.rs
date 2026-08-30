@@ -36,6 +36,47 @@ pub struct OrrGrpc {
     pub svc: OrrService,
 }
 
+/// El `from` del cuerpo tiene que ser la identidad del certificado mTLS del
+/// que llama (SAN `dkms://<id>`). Sin esto, cualquier miembro de la red —un
+/// DKMS de otra institución con su cert de `net-ca`— podía reclamar ser
+/// `orr_X` y sobrescribirle el `bootstrap_secret` en este ORR: el mTLS solo
+/// probaba «alguien de la red», no «quien dice ser». Sin certs (`grpc_tls =
+/// false`, red interna de confianza) se deja pasar y se avisa una vez.
+fn require_from_matches_peer(
+    peer_certs: Option<std::sync::Arc<Vec<tonic::transport::CertificateDer<'static>>>>,
+    from: &str,
+) -> std::result::Result<(), Status> {
+    match peer_certs {
+        Some(certs) => {
+            let claimed = from.to_ascii_lowercase();
+            match common::cert_identity::node_id_from_certs(&certs) {
+                Some(id) if id == claimed => Ok(()),
+                other => {
+                    warn!(
+                        from = %claimed,
+                        cert_identity = ?other,
+                        "orr.grpc: el `from` del cuerpo no coincide con la identidad del cert \
+                         mTLS del que llama; rechazado"
+                    );
+                    Err(Status::permission_denied(format!(
+                        "from={claimed} no coincide con la identidad del certificado ({other:?})"
+                    )))
+                }
+            }
+        }
+        None => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                warn!(
+                    "orr.grpc: llamada sin certificado de cliente (grpc_tls = false): el `from` \
+                     de EstablishSecret y de las rotaciones va SIN autenticar"
+                );
+            });
+            Ok(())
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl OrrControl for OrrGrpc {
     type ListCircuitsStream = ReceiverStream<std::result::Result<ProtoCircuit, Status>>;
@@ -136,8 +177,9 @@ impl OrrControl for OrrGrpc {
         _req: Request<GetPublicKeyRequest>,
     ) -> std::result::Result<Response<GetPublicKeyResponse>, Status> {
         let id = &self.svc.identity;
-        // Firma ML-DSA del anuncio (§Fase 6 PQC); vacía si no hay seed de firma.
-        let signature = id.sign_pubkey_announcement().unwrap_or_default();
+        // Firma ML-DSA del anuncio (§Fase 6 PQC), con la cadena del cert de
+        // nodo si se firma con él; vacías si este ORR no firma.
+        let (signature, signing_certs) = id.sign_pubkey_announcement().unwrap_or_default();
         Ok(Response::new(GetPublicKeyResponse {
             public_key: id.public_key.clone(),
             suite: id.suite.clone(),
@@ -145,6 +187,7 @@ impl OrrControl for OrrGrpc {
                 value: self.svc.cfg.orr_id.clone(),
             }),
             signature,
+            signing_certs,
         }))
     }
 
@@ -153,6 +196,7 @@ impl OrrControl for OrrGrpc {
         &self,
         req: Request<EstablishSecretRequest>,
     ) -> std::result::Result<Response<EstablishSecretResponse>, Status> {
+        let peer_certs = req.peer_certs();
         let m = req.into_inner();
         let from = m
             .from
@@ -166,6 +210,7 @@ impl OrrControl for OrrGrpc {
             }));
         }
         tracing::Span::current().record("from", tracing::field::display(&from));
+        require_from_matches_peer(peer_certs, &from)?;
 
         // NOTA passive re-bootstrap: anteriormente había aquí un early
         // return `if has_bootstrap → ok` por idempotencia. Eso rompía la
@@ -231,12 +276,19 @@ impl OrrControl for OrrGrpc {
         &self,
         req: Request<RequestEphemeralKeyRequest>,
     ) -> std::result::Result<Response<RequestEphemeralKeyResponse>, Status> {
+        let peer_certs = req.peer_certs();
         let m = req.into_inner();
         tracing::Span::current().record(
             "from",
             tracing::field::display(m.from.as_ref().map(|n| n.value.as_str()).unwrap_or("")),
         );
         tracing::Span::current().record("epoch", m.epoch_id);
+        let claimed = m
+            .from
+            .as_ref()
+            .map(|n| n.value.to_lowercase())
+            .unwrap_or_default();
+        require_from_matches_peer(peer_certs, &claimed)?;
         let resp = crate::rotation::handle_request_ephemeral_key(
             &self.svc.peers,
             &self.svc.cfg.orr_id,
@@ -251,12 +303,19 @@ impl OrrControl for OrrGrpc {
         &self,
         req: Request<EstablishEphemeralSecretRequest>,
     ) -> std::result::Result<Response<EstablishEphemeralSecretResponse>, Status> {
+        let peer_certs = req.peer_certs();
         let m = req.into_inner();
         tracing::Span::current().record(
             "from",
             tracing::field::display(m.from.as_ref().map(|n| n.value.as_str()).unwrap_or("")),
         );
         tracing::Span::current().record("epoch", m.epoch_id);
+        let claimed = m
+            .from
+            .as_ref()
+            .map(|n| n.value.to_lowercase())
+            .unwrap_or_default();
+        require_from_matches_peer(peer_certs, &claimed)?;
         let resp = crate::rotation::handle_establish_ephemeral_secret(
             &self.svc.peers,
             &self.svc.cfg.orr_id,

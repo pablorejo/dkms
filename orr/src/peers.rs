@@ -105,6 +105,9 @@ pub struct PeerRegistry {
     /// verificar la firma de su anuncio de pubkey. Inmutable (de config).
     peer_verify_keys: HashMap<String, Vec<u8>>,
     bootstrap_trust: crate::config::BootstrapTrust,
+    /// CA de red, para verificar la cadena de un anuncio firmado con la clave
+    /// del cert de nodo (`signing_certs`). `None` sin `[tls]`.
+    trust_roots: Option<common::cert_identity::TrustRoots>,
     local_orr_id: String,
     local_qkc_id: u32,
 }
@@ -112,7 +115,11 @@ pub struct PeerRegistry {
 /// Veredicto sobre la **firma ML-DSA** del anuncio de pubkey de un peer.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SigVerdict {
-    /// Firma válida contra la verify key configurada del peer.
+    /// Firma válida con la clave del **cert de nodo** del peer, cuya cadena
+    /// verifica contra la CA de red y cuyo SAN es `dkms://<orr_id>`. No
+    /// necesita config por par y sobrevive a los reinicios del peer.
+    CertBound,
+    /// Firma válida contra la verify key configurada del peer (heredado).
     Valid,
     /// No hay verify key configurada para este peer (tofu: se acepta sin firma).
     NoKey,
@@ -176,6 +183,12 @@ impl PeerRegistry {
         )
     }
 
+    /// CA de red con la que verificar los anuncios atados al cert de nodo.
+    pub fn with_trust_roots(mut self, roots: Option<common::cert_identity::TrustRoots>) -> Self {
+        self.trust_roots = roots;
+        self
+    }
+
     /// Constructor completo: además de los pins, las **verifying keys ML-DSA**
     /// de los peers (§Fase 6 PQC) para verificar la firma de sus anuncios.
     pub fn with_all(
@@ -199,6 +212,7 @@ impl PeerRegistry {
             rebootstrap_inflight: RwLock::new(HashMap::new()),
             grpc_addrs: RwLock::new(HashMap::new()),
             bootstrap_trust,
+            trust_roots: None,
             local_orr_id,
             local_qkc_id,
         }
@@ -229,8 +243,43 @@ impl PeerRegistry {
         suite: &str,
         public_key: &[u8],
         signature: &[u8],
+        signing_certs: &[Vec<u8>],
     ) -> SigVerdict {
         use crate::config::BootstrapTrust::*;
+        // Anuncio atado al cert de nodo (desde 2026-08-30): la cadena tiene
+        // que encadenar hasta la CA de red y el SAN tiene que ser este
+        // orr_id; la firma se verifica con la clave de ese cert. Una firma
+        // inválida o una cadena ajena se rechaza siempre, en tofu también:
+        // alguien está intentando algo.
+        if !signing_certs.is_empty() {
+            let Some(roots) = &self.trust_roots else {
+                tracing::warn!(
+                    peer = %orr_id,
+                    "orr.peer_pubkey: anuncio firmado con cert de nodo pero este ORR no tiene \
+                     CA de red cargada ([tls] ausente); no puedo verificar la cadena"
+                );
+                return match self.bootstrap_trust {
+                    Strict => SigVerdict::Reject,
+                    Tofu => SigVerdict::Unsigned,
+                };
+            };
+            return match common::cert_identity::verify_node_cert(signing_certs, roots, orr_id) {
+                Ok(vk) => match common::crypto::pqc_sign::verify_orr_pubkey(
+                    &vk, orr_id, suite, public_key, signature,
+                ) {
+                    Ok(()) => SigVerdict::CertBound,
+                    Err(_) => SigVerdict::Reject,
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %orr_id,
+                        error = %e,
+                        "orr.peer_pubkey: cadena del anuncio rechazada"
+                    );
+                    SigVerdict::Reject
+                }
+            };
+        }
         match self.peer_verify_keys.get(orr_id) {
             Some(vk) => {
                 if signature.is_empty() {
@@ -654,17 +703,17 @@ mod tests {
             Tofu,
         );
         assert_eq!(
-            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig),
+            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig, &[]),
             SigVerdict::Valid
         );
         assert_eq!(
-            reg.verify_announcement("orr_2", "ml-kem-768", &[0x44; 1184], &sig),
+            reg.verify_announcement("orr_2", "ml-kem-768", &[0x44; 1184], &sig, &[]),
             SigVerdict::Reject,
             "un MITM que sustituye la pubkey no puede reproducir la firma",
         );
         // Sin firma, tofu → Unsigned; strict → Reject.
         assert_eq!(
-            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &[]),
+            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &[], &[]),
             SigVerdict::Unsigned
         );
         let reg_strict = PeerRegistry::with_all(
@@ -676,7 +725,7 @@ mod tests {
             Strict,
         );
         assert_eq!(
-            reg_strict.verify_announcement("orr_2", "ml-kem-768", &pk, &[]),
+            reg_strict.verify_announcement("orr_2", "ml-kem-768", &pk, &[], &[]),
             SigVerdict::Reject
         );
 
@@ -690,7 +739,7 @@ mod tests {
             Tofu,
         );
         assert_eq!(
-            reg_nokey.verify_announcement("orr_9", "ml-kem-768", &pk, &sig),
+            reg_nokey.verify_announcement("orr_9", "ml-kem-768", &pk, &sig, &[]),
             SigVerdict::NoKey
         );
         let reg_nokey_strict = PeerRegistry::with_all(
@@ -702,7 +751,7 @@ mod tests {
             Strict,
         );
         assert_eq!(
-            reg_nokey_strict.verify_announcement("orr_9", "ml-kem-768", &pk, &sig),
+            reg_nokey_strict.verify_announcement("orr_9", "ml-kem-768", &pk, &sig, &[]),
             SigVerdict::Reject
         );
     }
@@ -916,5 +965,78 @@ mod tests {
         // Limpiar marca de fallo (= intento previo exitoso) → libre de nuevo
         reg.clear_rebootstrap_failure("orr_2");
         assert!(reg.should_attempt_rebootstrap("orr_2", Duration::from_secs(30)));
+    }
+
+    /// El anuncio firmado con la clave del cert de nodo se verifica contra la
+    /// CA de red y el SAN, sin `peer_verify_keys`: `strict` funciona con
+    /// peers que nadie configuró a mano, y el ancla sobrevive a los reinicios
+    /// de la identidad ML-KEM.
+    #[test]
+    fn a_cert_bound_announcement_verifies_against_the_network_ca_needs_openssl35() {
+        use crate::config::BootstrapTrust;
+        use common::cert_identity::TrustRoots;
+        use common::crypto::pqc_sign::{sign_orr_pubkey_with, MlDsa65Signer};
+
+        let dir = std::env::temp_dir().join(format!("orr_peers_pki_{}", std::process::id()));
+        let Some(pki) = common::test_support::mldsa_test_pki(&dir, &["orr_1", "orr_2"]) else {
+            common::test_support::skip_or_fail("openssl sin ML-DSA (<3.5)");
+            return;
+        };
+        let strict = |roots: Option<TrustRoots>| {
+            PeerRegistry::with_all(
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                "orr_9".into(),
+                9,
+                BootstrapTrust::Strict,
+            )
+            .with_trust_roots(roots)
+        };
+        let reg = strict(Some(TrustRoots::from_file(&pki.ca_crt).unwrap()));
+        let signer =
+            MlDsa65Signer::from_pkcs8_pem(&std::fs::read(pki.key("orr_1")).unwrap()).unwrap();
+        let pk = vec![0x11u8; 1184];
+        let sig = sign_orr_pubkey_with(&signer, "orr_1", "ml-kem-768", &pk);
+        let chain = vec![pki.cert_der("orr_1")];
+        assert_eq!(
+            reg.verify_announcement("orr_1", "ml-kem-768", &pk, &sig, &chain),
+            SigVerdict::CertBound
+        );
+        // Reclamar ser orr_2 con el cert de orr_1: el SAN no casa.
+        let sig2 = sign_orr_pubkey_with(&signer, "orr_2", "ml-kem-768", &pk);
+        assert_eq!(
+            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig2, &chain),
+            SigVerdict::Reject
+        );
+        // Pubkey alterada en tránsito.
+        assert_eq!(
+            reg.verify_announcement("orr_1", "ml-kem-768", &[0x12u8; 1184], &sig, &chain),
+            SigVerdict::Reject
+        );
+        // Un cert perfecto de OTRA CA no vale.
+        let rogue_dir =
+            std::env::temp_dir().join(format!("orr_peers_rogue_{}", std::process::id()));
+        let rogue = common::test_support::mldsa_test_pki(&rogue_dir, &["orr_1"]).unwrap();
+        let rogue_signer =
+            MlDsa65Signer::from_pkcs8_pem(&std::fs::read(rogue.key("orr_1")).unwrap()).unwrap();
+        let rsig = sign_orr_pubkey_with(&rogue_signer, "orr_1", "ml-kem-768", &pk);
+        assert_eq!(
+            reg.verify_announcement(
+                "orr_1",
+                "ml-kem-768",
+                &pk,
+                &rsig,
+                &[rogue.cert_der("orr_1")]
+            ),
+            SigVerdict::Reject
+        );
+        // Sin CA cargada, strict no puede verificar la cadena: rechaza.
+        assert_eq!(
+            strict(None).verify_announcement("orr_1", "ml-kem-768", &pk, &sig, &chain),
+            SigVerdict::Reject
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&rogue_dir);
     }
 }

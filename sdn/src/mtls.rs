@@ -24,7 +24,6 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use tracing::{debug, error, info, warn};
-use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
 
 /// Identidad del peer extraída del cert cliente verificado por rustls.
 /// `None` en `san` si el cert no trae un SAN utilizable. Se inyecta a nivel
@@ -44,31 +43,7 @@ impl PeerCertIdentity {
     }
 }
 
-/// Extrae el primer SAN útil (URI > DNS > CN) de un cert DER.
-fn extract_san_identifier(der: &[u8]) -> Option<String> {
-    let (_, cert) = X509Certificate::from_der(der).ok()?;
-    for want_uri in [true, false] {
-        for ext in cert.extensions() {
-            if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
-                for gn in &san.general_names {
-                    match gn {
-                        GeneralName::URI(u) if want_uri => return Some((*u).to_owned()),
-                        GeneralName::DNSName(d) if !want_uri => return Some((*d).to_owned()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    // Materializar la String dentro del scope de `cert`: devolver el iterador
-    // encadenado dejaría un temporal que sobrevive al cert prestado (E0597).
-    let cn = cert
-        .subject()
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok().map(str::to_owned));
-    cn
-}
+use common::cert_identity::extract_san_identifier;
 
 /// Sirve `router` sobre TLS con verificación de cert cliente, inyectando
 /// [`PeerCertIdentity`] en cada request. Bucle resiliente: un fallo de

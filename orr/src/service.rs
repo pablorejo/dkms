@@ -104,6 +104,20 @@ pub struct OrrService {
     pub onion_replay: Arc<crate::onion_replay::OnionReplay>,
 }
 
+/// Cadena de certificados de `tls.cert_path` en DER, hoja primero.
+fn load_cert_chain_der(path: &std::path::Path) -> Result<Vec<Vec<u8>>> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let pem = std::fs::read(path).map_err(|e| OrrError::Relay(format!("tls.cert_path: {e}")))?;
+    let chain: Vec<Vec<u8>> = CertificateDer::pem_slice_iter(&pem)
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| OrrError::Relay(format!("tls.cert_path PEM: {e}")))?;
+    if chain.is_empty() {
+        return Err(OrrError::Relay("tls.cert_path sin certificados".into()));
+    }
+    Ok(chain)
+}
+
 impl OrrService {
     pub async fn new(mut cfg: OrrConfig, metrics: Metrics) -> Result<Self> {
         // Normalización: la crate `config` lowercase de forma silenciosa
@@ -137,15 +151,61 @@ impl OrrService {
                 })?),
                 None => None,
             };
-        let identity = Arc::new(
-            OrrIdentity::generate(cfg.orr_id.clone(), &cfg.default_pqc_suite)?
-                .with_sign_seed(sign_seed),
-        );
+        // Firma del anuncio de pubkey atada al CERTIFICADO de nodo: la clave
+        // ML-DSA-65 de `tls.key_path` firma y la cadena viaja en
+        // `GetPublicKey`, así que el peer verifica contra la CA de red y el
+        // SAN sin `peer_verify_keys`. Esto es lo que hace usable
+        // `bootstrap_trust = strict` con una identidad ML-KEM efímera: el
+        // ancla es el cert, no el proceso. Una clave que no sea ML-DSA (RSA)
+        // no puede firmar de forma post-cuántica: se cae a la semilla
+        // heredada, si la hay.
+        let cert_signer = match &cfg.tls {
+            Some(t) => {
+                let key_pem = std::fs::read(&t.key_path)
+                    .map_err(|e| OrrError::Relay(format!("tls.key_path: {e}")))?;
+                match common::crypto::pqc_sign::MlDsa65Signer::from_pkcs8_pem(&key_pem) {
+                    Ok(key) => {
+                        let chain = load_cert_chain_der(&t.cert_path)?;
+                        info!(
+                            certs = chain.len(),
+                            "orr: el anuncio de pubkey se firma con la clave del cert de nodo \
+                             (ML-DSA-65); el ancla de confianza es la CA de red"
+                        );
+                        Some((key, chain))
+                    }
+                    Err(_) => {
+                        warn!(
+                            "orr: la clave del cert de nodo no es ML-DSA-65 (¿RSA?): el anuncio \
+                             de pubkey no queda atado al cert y `bootstrap_trust = strict` \
+                             solo funcionará con peer_verify_keys"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if cert_signer.is_some() && cfg.sign_secret_seed.is_some() {
+            info!("orr: sign_secret_seed queda superseded por la clave del cert de nodo");
+        }
+        let trust_roots = match &cfg.tls {
+            Some(t) => Some(
+                common::cert_identity::TrustRoots::from_file(&t.control_plane_ca)
+                    .map_err(OrrError::Relay)?,
+            ),
+            None => None,
+        };
+        let mut identity = OrrIdentity::generate(cfg.orr_id.clone(), &cfg.default_pqc_suite)?;
+        if let Some((key, chain)) = cert_signer {
+            identity = identity.with_cert_key(key, chain);
+        }
+        let identity = Arc::new(identity.with_sign_seed(sign_seed));
         info!(
             orr_id = %cfg.orr_id,
             suite = %identity.suite,
             pubkey_len = identity.public_key.len(),
-            signs_announcements = identity.sign_seed.is_some(),
+            signs_announcements = identity.signer.is_some(),
+            cert_bound = identity.signs_with_cert(),
             "orr.identity generated",
         );
 
@@ -167,14 +227,17 @@ impl OrrService {
         }
 
         let cfg = Arc::new(cfg);
-        let peers = Arc::new(PeerRegistry::with_all(
-            cfg.peers.clone(),
-            peer_pubkeys,
-            peer_verify_keys,
-            cfg.orr_id.clone(),
-            cfg.qkc_id,
-            cfg.bootstrap_trust,
-        ));
+        let peers = Arc::new(
+            PeerRegistry::with_all(
+                cfg.peers.clone(),
+                peer_pubkeys,
+                peer_verify_keys,
+                cfg.orr_id.clone(),
+                cfg.qkc_id,
+                cfg.bootstrap_trust,
+            )
+            .with_trust_roots(trust_roots),
+        );
 
         let (deliveries_tx, _) = broadcast::channel(cfg.deliver_queue_capacity.max(1));
         let (frames_tx, mut frames_rx) = mpsc::channel::<Frame>(cfg.deliver_queue_capacity.max(1));
@@ -1001,7 +1064,7 @@ impl OrrService {
             // actual y el encap subsiguiente produce un ciphertext que
             // la sk fresca sí puede decapsular.
             let pk = match bootstrap::try_fetch_pubkey(&addr).await {
-                Ok((fresh_pk, suite, reported, signature)) => {
+                Ok((fresh_pk, suite, reported, signature, signing_certs)) => {
                     let reported_lc = reported.to_lowercase();
                     if !reported_lc.is_empty() && reported_lc != peer_id_owned {
                         warn!(
@@ -1014,8 +1077,13 @@ impl OrrService {
                         return;
                     }
                     // §Fase 6 PQC: la pubkey refrescada también se verifica.
-                    if peers.verify_announcement(&peer_id_owned, &suite, &fresh_pk, &signature)
-                        == crate::peers::SigVerdict::Reject
+                    if peers.verify_announcement(
+                        &peer_id_owned,
+                        &suite,
+                        &fresh_pk,
+                        &signature,
+                        &signing_certs,
+                    ) == crate::peers::SigVerdict::Reject
                     {
                         warn!(
                             peer = %peer_id_owned, addr = %addr,

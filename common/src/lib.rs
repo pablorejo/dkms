@@ -11,6 +11,7 @@
 // crate — práctica habitual en ecosistemas tonic.
 #![allow(clippy::result_large_err)]
 
+pub mod cert_identity;
 pub mod config;
 pub mod crypto;
 pub mod error;

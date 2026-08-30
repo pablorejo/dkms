@@ -655,6 +655,7 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
  "wire",
+ "x509-parser",
  "zeroize",
 ]
 

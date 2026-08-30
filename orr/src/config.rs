@@ -129,11 +129,12 @@ pub struct OrrConfig {
     #[serde(default = "default_suite")]
     pub default_pqc_suite: String,
 
-    /// Semilla ML-DSA (32 B, base64) de la **identidad de firma estable** de
-    /// este ORR (docs/SECURITY.md §Fase 6 PQC). Con ella se firma la pubkey
-    /// ML-KEM que se anuncia en `GetPublicKey`, para que el peer detecte un
-    /// MITM aunque la identidad ML-KEM sea efímera. Solo config local; la clave
-    /// pública correspondiente se reparte a los peers como su `peer_verify_keys`.
+    /// **Heredado.** Semilla ML-DSA (32 B, base64) para firmar la pubkey
+    /// ML-KEM que se anuncia en `GetPublicKey`, verificable con las
+    /// `peer_verify_keys` que hubiera que repartir a mano. Desde 2026-08-30
+    /// el anuncio se firma con la clave del **cert de nodo** (`[tls]`) y el
+    /// peer lo verifica contra la CA de red; con `[tls]` presente y clave
+    /// ML-DSA esta semilla se ignora.
     #[serde(default)]
     pub sign_secret_seed: Option<common::config::SecretString>,
 
@@ -146,11 +147,11 @@ pub struct OrrConfig {
     /// Ancla de confianza del bootstrap (docs/SECURITY.md §Fase 6). `tofu`
     /// (default): acepta la pubkey que el peer anuncia por `GetPublicKey`
     /// (trust-on-first-use), avisando si difiere de un pin en `peer_pubkeys`.
-    /// `strict`: exige que la pubkey case un pin configurado; rechaza el
-    /// fetch si no. Nota: `strict` es práctico solo con identidades ORR
-    /// estables entre reinicios — hoy la identidad se regenera en cada boot
-    /// (ver `service.rs`), así que strict requiere persistir la identidad
-    /// (pendiente, decisión de diseño).
+    /// `strict`: exige un anuncio **firmado** — con la clave del cert de nodo
+    /// del peer (cadena hasta la CA de red y SAN `dkms://<orr_id>`, lo normal
+    /// desde 2026-08-30) o, heredado, con una `peer_verify_keys` configurada.
+    /// Como el ancla es el certificado, `strict` no necesita config por par y
+    /// sobrevive a los reinicios de la identidad ML-KEM efímera.
     #[serde(default)]
     pub bootstrap_trust: BootstrapTrust,
 

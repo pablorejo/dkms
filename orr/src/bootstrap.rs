@@ -253,7 +253,7 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
     let max_backoff = Duration::from_secs(30);
     loop {
         match try_fetch_pubkey(addr).await {
-            Ok((pk, suite, reported_id, signature)) => {
+            Ok((pk, suite, reported_id, signature, signing_certs)) => {
                 let reported_lc = reported_id.to_lowercase();
                 if !reported_lc.is_empty() && reported_lc != peer_id {
                     warn!(
@@ -272,8 +272,12 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
                 // es efímera (se regenera en cada arranque), así que nunca hay
                 // pin que case y `strict` rechazaba TODO aunque la firma fuese
                 // correcta (medido: 12 rechazos en una malla de 4 nodos).
-                let sig = peers.verify_announcement(peer_id, &suite, &pk, &signature);
-                let firmado = matches!(sig, crate::peers::SigVerdict::Valid);
+                let sig =
+                    peers.verify_announcement(peer_id, &suite, &pk, &signature, &signing_certs);
+                let firmado = matches!(
+                    sig,
+                    crate::peers::SigVerdict::Valid | crate::peers::SigVerdict::CertBound
+                );
                 match sig {
                     crate::peers::SigVerdict::Reject => {
                         warn!(
@@ -292,6 +296,10 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
                     ),
                     crate::peers::SigVerdict::Valid => debug!(
                         peer = %peer_id, "orr.peer_pubkey: firma ML-DSA válida",
+                    ),
+                    crate::peers::SigVerdict::CertBound => debug!(
+                        peer = %peer_id,
+                        "orr.peer_pubkey: firma ML-DSA atada al cert de nodo (CA de red)",
                     ),
                 }
                 // §Fase 6: contrasta la pubkey anunciada contra el pin de
@@ -357,7 +365,7 @@ async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, a
 /// (verificado smoke 2026-05-25 n10-real16k).
 pub(crate) async fn try_fetch_pubkey(
     addr: &str,
-) -> std::result::Result<(Vec<u8>, String, String, Vec<u8>), String> {
+) -> std::result::Result<(Vec<u8>, String, String, Vec<u8>, Vec<Vec<u8>>), String> {
     let ch = crate::grpc_tls::channel(addr).await?;
     let mut client = OrrControlClient::new(ch);
     let resp = client
@@ -366,7 +374,13 @@ pub(crate) async fn try_fetch_pubkey(
         .map_err(|s| format!("rpc: {s}"))?
         .into_inner();
     let id = resp.orr_id.map(|n| n.value).unwrap_or_default();
-    Ok((resp.public_key, resp.suite, id, resp.signature))
+    Ok((
+        resp.public_key,
+        resp.suite,
+        id,
+        resp.signature,
+        resp.signing_certs,
+    ))
 }
 
 /// Hace el encap contra `pk`, llama a `EstablishSecret` y devuelve el

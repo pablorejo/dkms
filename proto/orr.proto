@@ -142,6 +142,13 @@ message GetPublicKeyResponse {
   // `peer_verify_keys[orr_id]` configurada — cierra el MITM sobre GetPublicKey
   // sin necesidad de persistir la identidad ML-KEM (que sigue siendo efímera).
   bytes  signature  = 4;
+  // Cadena X.509 (DER, hoja primero) del certificado de NODO cuya clave
+  // ML-DSA-65 firmó `signature` (desde 2026-08-30). El que verifica encadena
+  // la hoja hasta la CA de red y comprueba que su SAN es `dkms://<orr_id>`:
+  // así el ancla de confianza es el certificado, que sobrevive a los
+  // reinicios, y no hace falta repartir `peer_verify_keys`. Vacío si el ORR
+  // firma con la semilla heredada (`sign_secret_seed`) o no firma.
+  repeated bytes signing_certs = 5;
 }
 
 message EstablishSecretRequest {
