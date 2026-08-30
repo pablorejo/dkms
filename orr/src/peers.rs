@@ -108,6 +108,9 @@ pub struct PeerRegistry {
     /// CA de red, para verificar la cadena de un anuncio firmado con la clave
     /// del cert de nodo (`signing_certs`). `None` sin `[tls]`.
     trust_roots: Option<common::cert_identity::TrustRoots>,
+    /// Pares para los que ya hay una task de rotación viva: una por par,
+    /// arrancada al terminar el bootstrap del lado iniciador.
+    rotation_spawned: RwLock<std::collections::HashSet<String>>,
     local_orr_id: String,
     local_qkc_id: u32,
 }
@@ -213,6 +216,7 @@ impl PeerRegistry {
             grpc_addrs: RwLock::new(HashMap::new()),
             bootstrap_trust,
             trust_roots: None,
+            rotation_spawned: RwLock::new(std::collections::HashSet::new()),
             local_orr_id,
             local_qkc_id,
         }
@@ -342,6 +346,7 @@ impl PeerRegistry {
         self.rebootstrap_last_failure.write().remove(orr_id);
         self.rebootstrap_inflight.write().remove(orr_id);
         self.grpc_addrs.write().remove(orr_id);
+        self.rotation_spawned.write().remove(orr_id);
     }
 
     /// Clave pública ML-KEM long-term del peer. `None` si no la
@@ -545,6 +550,72 @@ impl PeerRegistry {
 
     pub fn set_current_send_epoch(&self, orr_id: String, epoch_id: u32) {
         self.current_send_epochs.write().insert(orr_id, epoch_id);
+    }
+
+    /// Época con la que ENVIAR a `orr_id`. En el iniciador es la última que el
+    /// respondedor confirmó con su `ok` al FIN (`current_send_epoch`); en el
+    /// respondedor, que no negocia, la última instalada. Nunca una época que
+    /// el otro extremo pueda no tener todavía: el iniciador guarda la nueva
+    /// ANTES de mandar el FIN, así que lo que el respondedor instala al
+    /// recibirlo ya existe aquí (ver `rotation::run_one_rotation`).
+    pub fn send_epoch_for(&self, orr_id: &str) -> Option<u32> {
+        self.current_send_epoch(orr_id)
+            .or_else(|| self.latest_epoch_for(orr_id))
+    }
+
+    /// Quita UNA época: la provisional de una rotación cuyo FIN no llegó a
+    /// confirmarse. No toca la `current_send_epoch`.
+    pub fn remove_master_epoch(&self, orr_id: &str, epoch_id: u32) {
+        if let Some(m) = self.master_secrets.write().get_mut(orr_id) {
+            m.remove(&epoch_id);
+        }
+    }
+
+    /// Un bootstrap —inicial o rehecho— sustituye TODA la historia con el
+    /// peer: el `bootstrap_secret` nuevo, la época 0 sembrada con él, y ni
+    /// una época ni una esk de antes. Quien rehace el bootstrap ha perdido su
+    /// estado (o ha visto que el otro lo perdió): seguir cifrando con épocas
+    /// que el otro no tiene es justo lo que dejaba los frames en «missing
+    /// epoch». La `current_send_epoch` se borra: el envío cae a la 0 y la
+    /// primera rotación vuelve a empezar en la 1. Espejo del «prune after
+    /// relink» del QKC.
+    pub fn reset_for_bootstrap(&self, orr_id: &str, secret: [u8; 32]) {
+        self.master_secrets.write().remove(orr_id);
+        self.ephemeral_sks.write().remove(orr_id);
+        self.current_send_epochs.write().remove(orr_id);
+        self.bootstrap_secrets
+            .write()
+            .insert(orr_id.to_string(), Zeroizing::new(secret));
+        self.set_master_for_epoch(orr_id.to_string(), 0, secret);
+    }
+
+    /// [`Self::drop_old_epochs`] para UN peer: lo llama cada extremo tras
+    /// instalar una época. `keep_last_n` se acota a ≥ 2 porque entre que el
+    /// respondedor instala N y el iniciador recibe el `ok`, el iniciador
+    /// sigue cifrando con N−1.
+    pub fn drop_old_epochs_for(&self, orr_id: &str, keep_last_n: usize) {
+        let keep = keep_last_n.max(2);
+        if let Some(m) = self.master_secrets.write().get_mut(orr_id) {
+            while m.len() > keep {
+                if m.pop_first().is_none() {
+                    break;
+                }
+            }
+        }
+        if let Some(e) = self.ephemeral_sks.write().get_mut(orr_id) {
+            while e.len() > keep {
+                if e.pop_first().is_none() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `true` la primera vez que se pide para `orr_id`: quien lo obtiene
+    /// arranca la task de rotación de ese par, y nadie más. `forget` lo
+    /// libera.
+    pub fn try_mark_rotation_spawned(&self, orr_id: &str) -> bool {
+        self.rotation_spawned.write().insert(orr_id.to_string())
     }
 
     // ─── passive re-bootstrap reactivo ────────────────────────────────

@@ -162,26 +162,26 @@ pub struct OrrConfig {
     #[serde(default = "default_deliver_queue")]
     pub deliver_queue_capacity: usize,
 
-    /// Periodo entre rotaciones de `master_secret` por peer, en
-    /// milisegundos. Cada `rotation_period_ms` el initiator
-    /// (lex-smaller `orr_id`) dispara una nueva época con keypair
-    /// ML-KEM-768 efímera fresca. Default `30000` (30 s).
+    /// Periodo entre rotaciones del `master_secret` por peer, en
+    /// milisegundos. Cada periodo el iniciador (lex-smaller `orr_id`)
+    /// negocia una época nueva con una keypair ML-KEM efímera fresca
+    /// (`rotation.rs`); el respondedor la instala al recibir el FIN. Default
+    /// `3600000` (1 h), alineado con `pqc_rekey_secs` del QKC y
+    /// `transport_e2e.rekey_secs` del DKMS.
     ///
-    /// Forward secrecy boundary (audit H-3 / Option B): tras cada
-    /// rotación, la esk del responder se zeroiza, así que capturar la
-    /// long-term sk en el futuro no descifra tráfico de épocas
-    /// pasadas. Bajar este número aumenta la resistencia a captura
-    /// (más boundaries) a costa de más tráfico de control y más CPU
-    /// en encap/decap. Subirlo lo contrario.
+    /// Es forward secrecy real desde 2026-08-30 (antes la rotación estaba
+    /// desconectada y todo corría en la época 0): la esk del respondedor se
+    /// zeroiza tras el decap, así que capturar la clave long-term después no
+    /// descifra las épocas pasadas. Solo importa para los modos cebolla
+    /// (`max_hops != 0`): con el default `0` el ORR es un relé y el material
+    /// va sellado extremo a extremo por el DKMS.
     #[serde(default = "default_rotation_period_ms")]
     pub rotation_period_ms: u64,
 
-    /// Cuántas épocas pasadas de `master_secret` mantener vivas
-    /// simultáneamente por peer. Tolera tráfico in-flight durante la
-    /// rotación: frames que viajan con `epoch_id = N - 1` siguen
-    /// descifrables mientras `N - 1 ≥ latest_epoch - keep + 1`.
-    /// Default `3`. Las épocas más viejas se zeroizan en cada
-    /// rotación exitosa vía `peers.drop_old_epochs(keep)`.
+    /// Cuántas épocas de `master_secret` mantener vivas por peer, en cada
+    /// extremo. Tolera lo que esté en vuelo durante una rotación. Default
+    /// `3`; se acota a ≥ 2 porque entre que el respondedor instala N y el
+    /// iniciador recibe el `ok`, el iniciador sigue cifrando con N−1.
     #[serde(default = "default_epoch_history_keep")]
     pub epoch_history_keep: usize,
 }
@@ -218,7 +218,7 @@ fn default_deliver_queue() -> usize {
     4096
 }
 fn default_rotation_period_ms() -> u64 {
-    30_000
+    3_600_000
 }
 fn default_epoch_history_keep() -> usize {
     3

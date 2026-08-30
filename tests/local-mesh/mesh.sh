@@ -41,6 +41,8 @@
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
 #
+#   DKMS_MESH_BOOTSTRAP_TRUST   tofu (default) | strict: el ORR exige anuncios de
+#                              pubkey firmados con el cert de nodo (sin verify keys)
 #   DKMS_MESH_LINK_TYPE         pqc (default) o qkd. En modo qkd se levanta un
 #                               quditto POR ARISTA —los dos QKC del enlace
 #                               apuntan al mismo, uno pide enc_keys y el otro
@@ -374,6 +376,14 @@ EOF
                     echo "  orr_$m: \"$(cat "$SIGNDIR/orr_$m.vk")\""
                 done
             } >> "$DIR/yml/node$n.orr.yml"
+        fi
+        # Ancla de confianza del bootstrap sin repartir claves: con
+        # DKMS_MESH_BOOTSTRAP_TRUST=strict el ORR exige anuncios firmados con
+        # el cert de nodo (cadena hasta net-ca + SAN), que es lo que firma por
+        # defecto con [tls]. Es la prueba de que strict funciona sin config
+        # por par. (El brazo `sign` ya lo pone junto a sus verify keys.)
+        if [ "$PQC_AUTH" != sign ] && [ -n "${DKMS_MESH_BOOTSTRAP_TRUST:-}" ]; then
+            printf 'bootstrap_trust: %s\n' "$DKMS_MESH_BOOTSTRAP_TRUST" >> "$DIR/yml/node$n.orr.yml"
         fi
         python3 "$RENDER" orr "$DIR/yml/node$n.orr.yml" "$DIR/cfg/orr$n" >/dev/null
 

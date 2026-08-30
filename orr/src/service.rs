@@ -497,7 +497,7 @@ impl OrrService {
         // commodities en smoke 2026-05-25 n10-real16k). El próximo tick
         // del generator reintenta el send; mientras tanto, la task
         // spawnneada hace el re-handshake.
-        let epoch_id = match self.peers.latest_epoch_for(dest_orr) {
+        let epoch_id = match self.peers.send_epoch_for(dest_orr) {
             Some(e) => e,
             None => {
                 self.trigger_passive_rebootstrap(dest_orr);
@@ -616,7 +616,7 @@ impl OrrService {
             // OBJ-010: la época que se usa para cifrar la capa de este
             // hop es la última conocida. Pre-rotación cableada
             // (OBJ-011/012/013) este valor es 0 para todos los peers.
-            let epoch_id = self.peers.latest_epoch_for(orr_id).ok_or_else(|| {
+            let epoch_id = self.peers.send_epoch_for(orr_id).ok_or_else(|| {
                 OrrError::Relay(format!(
                     "hop {orr_id} sin master_secret (bootstrap incompleto)"
                 ))
@@ -1125,12 +1125,9 @@ impl OrrService {
             .await;
             match res {
                 Ok(secret) => {
-                    // Mismo cableado que el bootstrap inicial: tanto
-                    // bootstrap_secret como master_secret_epoch_0 (ver
-                    // comentario en bootstrap.rs:151-152 sobre el
-                    // workaround temporal de OBJ-011).
-                    peers.set_bootstrap(peer_id_owned.clone(), secret);
-                    peers.set_master_for_epoch(peer_id_owned.clone(), 0, secret);
+                    // Mismo cableado que el bootstrap inicial: el secreto
+                    // nuevo sustituye TODA la historia con el peer.
+                    peers.reset_for_bootstrap(&peer_id_owned, secret);
                     // Limpiamos cualquier marca de fallo previo: el
                     // próximo trigger (si llega) no estará rate-limited.
                     peers.clear_rebootstrap_failure(&peer_id_owned);

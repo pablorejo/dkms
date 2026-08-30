@@ -64,6 +64,7 @@ use thiserror::Error;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
+use crate::identity::OrrIdentity;
 use crate::macs::{
     mac_fin, mac_req, mac_resp, verify_mac_fin, verify_mac_req, verify_mac_resp, MacError,
 };
@@ -165,9 +166,15 @@ pub async fn run_one_rotation(
     ss.copy_from_slice(&encap.shared_secret);
     let ct = encap.ciphertext;
 
-    // 5. mac_fin + RPC EstablishEphemeralSecret.
+    // 5. Commit PROVISIONAL de la época ANTES del FIN. El respondedor la
+    //    instala al recibir el FIN y puede cifrar con ella antes de que nos
+    //    llegue su `ok`; si no la tuviéramos ya, ese frame caería por
+    //    «missing epoch» y dispararía un re-bootstrap sin motivo — la
+    //    carrera de 1 RTT por la que la rotación estuvo desactivada. El
+    //    envío no la usa hasta el `ok` (`current_send_epoch`).
+    peers.set_master_for_epoch(peer_id.to_string(), epoch, ss);
     let mac3 = mac_fin(&bootstrap, epoch, local_orr_id, peer_id, &ct);
-    let resp2 = client
+    let fin = client
         .establish_ephemeral_secret(EstablishEphemeralSecretRequest {
             from: Some(NodeId {
                 value: local_orr_id.to_string(),
@@ -179,14 +186,22 @@ pub async fn run_one_rotation(
             ciphertext: ct,
             mac: mac3,
         })
-        .await?
-        .into_inner();
+        .await;
+    let resp2 = match fin {
+        Ok(r) => r.into_inner(),
+        Err(status) => {
+            peers.remove_master_epoch(peer_id, epoch);
+            return Err(status.into());
+        }
+    };
     if !resp2.ok {
+        // El respondedor no la instaló: fuera la provisional, o quedaría una
+        // época que solo existe en este lado.
+        peers.remove_master_epoch(peer_id, epoch);
         return Err(RotationError::Remote(resp2.error));
     }
 
-    // 6. Commit local: nuevo master_secret + current_send_epoch.
-    peers.set_master_for_epoch(peer_id.to_string(), epoch, ss);
+    // 6. Commit: a partir de aquí se envía con la época nueva.
     peers.set_current_send_epoch(peer_id.to_string(), epoch);
     info!(
         local = %local_orr_id,
@@ -197,15 +212,27 @@ pub async fn run_one_rotation(
     Ok(epoch)
 }
 
-/// Spawnea una task tokio que rota con `peer_id` cada
-/// `rotation_period_ms`. **Solo el lado lex-smaller** del par inicia
-/// — el otro es reactivo (handlers gRPC). Si `local_orr_id >= peer_id`
-/// retorna sin hacer nada.
+/// Task tokio que rota con `peer_id` cada `rotation_period_ms`. **Solo el
+/// lado lex-smaller** del par inicia — el otro es reactivo (handlers gRPC).
+/// Si `local_orr_id >= peer_id` retorna sin hacer nada. La arranca
+/// `bootstrap::bootstrap_peer` al terminar el bootstrap, una por par
+/// (`PeerRegistry::try_mark_rotation_spawned`).
 ///
-/// Backoff exponencial cap 30 s en errores transient. Tras cada éxito
-/// llama a `peers.drop_old_epochs(epoch_history_keep)` para liberar
-/// secretos antiguos.
+/// Cuatro cosas, todas medidas antes de escribirse así:
+/// - **Un establecimiento en vuelo por par**: cada intento toma
+///   `try_mark_rebootstrap_inflight`, el mismo flag que el re-bootstrap
+///   pasivo. Dos encap concurrentes para el mismo par dejan dos secretos
+///   (2026-08-02). Si está ocupado, el tick se salta.
+/// - **Si el peer contesta «no bootstrap_secret», se ha reiniciado**: se
+///   rehace el bootstrap desde aquí mismo, con el flag en mano, y se rota
+///   sobre el nuevo. Antes nadie lo hacía con `max_hops = 0` y el par
+///   quedaba desincronizado hasta un reinicio completo.
+/// - **Poda por par tras cada éxito** (`drop_old_epochs_for`, ≥ 2).
+/// - **Independiente del tráfico**: el disparador es el reloj, así que un
+///   enlace ocioso rota igual (la clase de bug del rekey del QKC).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_rotation_task(
+    identity: Arc<OrrIdentity>,
     suite: String,
     local_orr_id: String,
     peer_id: String,
@@ -222,40 +249,106 @@ pub fn spawn_rotation_task(
         );
         return;
     }
+    enum Next {
+        Wait,
+        Retry,
+        Backoff,
+    }
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(rotation_period_ms));
-        // Por defecto `interval.tick().await` dispara inmediatamente al
-        // primer await — consumimos esa primera salida para que el
-        // primer rotation NO ocurra al instante (lo dispara el
-        // bootstrap del OBJ-011 explícitamente).
+        let keep = epoch_history_keep.max(2);
+        let mut interval = tokio::time::interval(Duration::from_millis(rotation_period_ms.max(1)));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // El primer tick es inmediato: la época 0 acaba de sembrarse, la
+        // primera rotación espera un periodo entero.
         interval.tick().await;
         let mut backoff = Duration::from_millis(250);
         let max_backoff = Duration::from_secs(30);
         loop {
             interval.tick().await;
-            match run_one_rotation(&suite, &local_orr_id, &peer_id, &peer_addr, &peers).await {
-                Ok(epoch) => {
-                    info!(
+            loop {
+                if !peers.try_mark_rebootstrap_inflight(&peer_id) {
+                    debug!(
                         local = %local_orr_id,
                         peer = %peer_id,
-                        epoch,
-                        "orr.rotation success",
+                        "orr.rotation: otro establecimiento en vuelo para este par; salto el tick"
                     );
-                    peers.drop_old_epochs(epoch_history_keep);
-                    // Resetear backoff tras éxito.
-                    backoff = Duration::from_millis(250);
+                    break;
                 }
-                Err(e) => {
-                    warn!(
-                        local = %local_orr_id,
-                        peer = %peer_id,
-                        error = %e,
-                        backoff_ms = backoff.as_millis() as u64,
-                        "orr.rotation failed; backing off",
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(max_backoff);
+                let next =
+                    match run_one_rotation(&suite, &local_orr_id, &peer_id, &peer_addr, &peers)
+                        .await
+                    {
+                        Ok(epoch) => {
+                            peers.drop_old_epochs_for(&peer_id, keep);
+                            info!(
+                                local = %local_orr_id,
+                                peer = %peer_id,
+                                epoch,
+                                keep,
+                                "orr.rotation success",
+                            );
+                            backoff = Duration::from_millis(250);
+                            Next::Wait
+                        }
+                        Err(RotationError::NoBootstrap(_)) => {
+                            debug!(
+                                local = %local_orr_id,
+                                peer = %peer_id,
+                                "orr.rotation: sin bootstrap todavía; espero al siguiente periodo"
+                            );
+                            Next::Wait
+                        }
+                        Err(RotationError::Remote(ref msg))
+                            if msg.contains("no bootstrap_secret") =>
+                        {
+                            warn!(
+                                local = %local_orr_id,
+                                peer = %peer_id,
+                                "orr.rotation: el peer no tiene nuestro bootstrap_secret (se ha \
+                                 reiniciado); rehago el bootstrap y roto sobre el nuevo"
+                            );
+                            match crate::bootstrap::rebootstrap(
+                                &identity,
+                                &suite,
+                                &local_orr_id,
+                                &peer_id,
+                                &peer_addr,
+                                &peers,
+                            )
+                            .await
+                            {
+                                Ok(()) => Next::Retry,
+                                Err(e) => {
+                                    warn!(
+                                        local = %local_orr_id,
+                                        peer = %peer_id,
+                                        error = %e,
+                                        backoff_ms = backoff.as_millis() as u64,
+                                        "orr.rotation: no pude rehacer el bootstrap; backoff"
+                                    );
+                                    Next::Backoff
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                local = %local_orr_id,
+                                peer = %peer_id,
+                                error = %e,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "orr.rotation failed; backing off",
+                            );
+                            Next::Backoff
+                        }
+                    };
+                peers.clear_rebootstrap_inflight(&peer_id);
+                match next {
+                    Next::Wait => break,
+                    Next::Retry => continue,
+                    Next::Backoff => {
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(max_backoff);
+                    }
                 }
             }
         }
@@ -373,6 +466,7 @@ pub fn handle_establish_ephemeral_secret(
     peers: &PeerRegistry,
     local_orr_id: &str,
     suite: &str,
+    epoch_history_keep: usize,
     m: EstablishEphemeralSecretRequest,
 ) -> EstablishEphemeralSecretResponse {
     let from = m
@@ -462,6 +556,8 @@ pub fn handle_establish_ephemeral_secret(
     let mut ss = [0u8; 32];
     ss.copy_from_slice(&ss_bytes);
     peers.set_master_for_epoch(from.clone(), m.epoch_id, ss);
+    // Poda por par también en este lado: el iniciador solo poda las suyas.
+    peers.drop_old_epochs_for(&from, epoch_history_keep);
     info!(
         from = %from,
         peer = %peer,
@@ -507,6 +603,7 @@ mod tests {
         let peers = Arc::new(PeerRegistry::new(HashMap::new(), "orr_z".into(), 1));
         // local "orr_z" > peer "orr_a" lex → pasivo.
         spawn_rotation_task(
+            Arc::new(OrrIdentity::generate("orr_z", "ml-kem-768").unwrap()),
             "ml-kem-768".into(),
             "orr_z".into(),
             "orr_a".into(),
@@ -551,6 +648,18 @@ mod tests {
         orr_id: String,
         suite: String,
         peers: Arc<PeerRegistry>,
+        keep: usize,
+        /// Identidad ML-KEM del respondedor: con ella el mock contesta
+        /// `GetPublicKey` y `EstablishSecret` como el ORR real, lo que hace
+        /// falta para probar que la rotación rehace el bootstrap de un peer
+        /// que perdió su estado.
+        identity: Arc<OrrIdentity>,
+        /// Contestar `ok: false` al FIN sin instalar nada.
+        fail_fin: std::sync::atomic::AtomicBool,
+        /// Registro del INICIADOR, para comprobar en el FIN que ya tiene la
+        /// época que está confirmando.
+        initiator: std::sync::Mutex<Option<Arc<PeerRegistry>>>,
+        precommit_seen: std::sync::atomic::AtomicBool,
     }
 
     #[tonic::async_trait]
@@ -576,14 +685,35 @@ mod tests {
             &self,
             _req: Request<GetPublicKeyRequest>,
         ) -> std::result::Result<Response<GetPublicKeyResponse>, Status> {
-            Err(Status::unimplemented("test stub"))
+            Ok(Response::new(GetPublicKeyResponse {
+                public_key: self.identity.public_key.clone(),
+                suite: self.identity.suite.clone(),
+                orr_id: Some(NodeId {
+                    value: self.orr_id.clone(),
+                }),
+                signature: Vec::new(),
+                signing_certs: Vec::new(),
+            }))
         }
 
         async fn establish_secret(
             &self,
-            _req: Request<EstablishSecretRequest>,
+            req: Request<EstablishSecretRequest>,
         ) -> std::result::Result<Response<EstablishSecretResponse>, Status> {
-            Err(Status::unimplemented("test stub"))
+            // Lo que hace `grpc_server::establish_secret`: decap + reset.
+            let m = req.into_inner();
+            let from = m.from.map(|n| n.value.to_lowercase()).unwrap_or_default();
+            let ss = self
+                .identity
+                .decap(&m.ciphertext)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&ss);
+            self.peers.reset_for_bootstrap(&from, secret);
+            Ok(Response::new(EstablishSecretResponse {
+                ok: true,
+                error: String::new(),
+            }))
         }
 
         async fn request_ephemeral_key(
@@ -603,11 +733,25 @@ mod tests {
             &self,
             req: Request<EstablishEphemeralSecretRequest>,
         ) -> std::result::Result<Response<EstablishEphemeralSecretResponse>, Status> {
+            let m = req.into_inner();
+            if let Some(ini) = self.initiator.lock().unwrap().as_ref() {
+                if ini.master_for_epoch(&self.orr_id, m.epoch_id).is_some() {
+                    self.precommit_seen
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            if self.fail_fin.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(Response::new(EstablishEphemeralSecretResponse {
+                    ok: false,
+                    error: "fin rechazado (test)".into(),
+                }));
+            }
             let resp = handle_establish_ephemeral_secret(
                 &self.peers,
                 &self.orr_id,
                 &self.suite,
-                req.into_inner(),
+                self.keep,
+                m,
             );
             Ok(Response::new(resp))
         }
@@ -657,16 +801,38 @@ mod tests {
         orr_id: &str,
         suite: &str,
     ) -> (String, Arc<PeerRegistry>, oneshot::Sender<()>) {
+        let (url, peers, _svc, tx) = spawn_test_responder_with(orr_id, suite, 3).await;
+        (url, peers, tx)
+    }
+
+    /// Como [`spawn_test_responder`], devolviendo también el mock para poder
+    /// tocar `fail_fin` / `initiator` / `precommit_seen`.
+    async fn spawn_test_responder_with(
+        orr_id: &str,
+        suite: &str,
+        keep: usize,
+    ) -> (
+        String,
+        Arc<PeerRegistry>,
+        Arc<TestRotationResponder>,
+        oneshot::Sender<()>,
+    ) {
         let peers = Arc::new(PeerRegistry::new(
             std::collections::HashMap::new(),
             orr_id.into(),
             0,
         ));
-        let svc = TestRotationResponder {
+        let svc = Arc::new(TestRotationResponder {
             orr_id: orr_id.into(),
             suite: suite.into(),
             peers: peers.clone(),
-        };
+            keep,
+            identity: Arc::new(OrrIdentity::generate(orr_id, suite).unwrap()),
+            fail_fin: std::sync::atomic::AtomicBool::new(false),
+            initiator: std::sync::Mutex::new(None),
+            precommit_seen: std::sync::atomic::AtomicBool::new(false),
+        });
+        let svc_for_server = svc.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind 127.0.0.1:0");
@@ -676,7 +842,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
             let _ = Server::builder()
-                .add_service(OrrControlServer::new(svc))
+                .add_service(OrrControlServer::from_arc(svc_for_server))
                 .serve_with_incoming_shutdown(incoming, async move {
                     let _ = rx.await;
                 })
@@ -685,7 +851,238 @@ mod tests {
         // Pequeño yield para que el server entre al accept-loop antes
         // de que el cliente intente conectar.
         tokio::task::yield_now().await;
-        (url, peers, tx)
+        (url, peers, svc, tx)
+    }
+
+    fn initiator_registry(peer: &str, bootstrap: [u8; 32]) -> Arc<PeerRegistry> {
+        let peers = Arc::new(PeerRegistry::new(HashMap::new(), "orr_a".into(), 0));
+        peers.reset_for_bootstrap(peer, bootstrap);
+        peers
+    }
+
+    fn spawn_initiator_rotation(
+        peers: Arc<PeerRegistry>,
+        url_b: &str,
+        period_ms: u64,
+        keep: usize,
+    ) {
+        assert!(peers.try_mark_rotation_spawned("orr_b"));
+        spawn_rotation_task(
+            Arc::new(OrrIdentity::generate("orr_a", "ml-kem-768").unwrap()),
+            "ml-kem-768".into(),
+            "orr_a".into(),
+            "orr_b".into(),
+            url_b.to_string(),
+            peers,
+            period_ms,
+            keep,
+        );
+    }
+
+    /// El disparador es el reloj: un par sin tráfico rota igual, cada
+    /// periodo, y los dos extremos avanzan juntos con la poda por par.
+    #[tokio::test]
+    async fn rotation_fires_on_an_idle_link() {
+        let (url_b, peers_b, shutdown_b) = spawn_test_responder("orr_b", "ml-kem-768").await;
+        let bootstrap = [0x5A; 32];
+        peers_b.reset_for_bootstrap("orr_a", bootstrap);
+        let peers_a = initiator_registry("orr_b", bootstrap);
+        spawn_initiator_rotation(peers_a.clone(), &url_b, 200, 3);
+        tokio::time::sleep(Duration::from_millis(1_600)).await;
+
+        let latest = peers_a.current_send_epoch("orr_b").expect("rotó");
+        assert!(latest >= 4, "≥4 rotaciones en 1,6 s a 200 ms: {latest}");
+        assert_eq!(peers_a.send_epoch_for("orr_b"), Some(latest));
+        assert_eq!(peers_b.send_epoch_for("orr_a"), Some(latest));
+        for e in latest - 2..=latest {
+            assert_eq!(
+                peers_a
+                    .master_for_epoch("orr_b", e)
+                    .expect("época viva en A"),
+                peers_b
+                    .master_for_epoch("orr_a", e)
+                    .expect("época viva en B")
+            );
+        }
+        assert!(
+            peers_a.master_for_epoch("orr_b", latest - 3).is_none(),
+            "poda en A"
+        );
+        assert!(
+            peers_b.master_for_epoch("orr_a", latest - 3).is_none(),
+            "poda en B"
+        );
+        for e in 0..=latest {
+            assert!(!peers_b.has_ephemeral_sk("orr_a", e), "esk consumida");
+        }
+        let _ = shutdown_b.send(());
+    }
+
+    /// La carrera de 1 RTT: el respondedor instala N al recibir el FIN y
+    /// puede cifrar con N antes de que el iniciador reciba el `ok`. El
+    /// iniciador tiene que tener N YA cuando el FIN sale.
+    #[tokio::test]
+    async fn the_initiator_holds_the_new_epoch_before_the_fin_leaves() {
+        let (url_b, peers_b, svc, shutdown_b) =
+            spawn_test_responder_with("orr_b", "ml-kem-768", 3).await;
+        let bootstrap = [0x33; 32];
+        peers_b.reset_for_bootstrap("orr_a", bootstrap);
+        let peers_a = initiator_registry("orr_b", bootstrap);
+        *svc.initiator.lock().unwrap() = Some(peers_a.clone());
+
+        let epoch = run_one_rotation("ml-kem-768", "orr_a", "orr_b", &url_b, &peers_a)
+            .await
+            .expect("rotación");
+        assert_eq!(epoch, 1);
+        assert!(
+            svc.precommit_seen
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "al llegar el FIN el iniciador ya guardaba la época 1"
+        );
+        assert_eq!(peers_a.current_send_epoch("orr_b"), Some(1));
+        let _ = shutdown_b.send(());
+    }
+
+    /// Si el respondedor no confirma el FIN, la época provisional se quita:
+    /// no puede quedar una época que solo exista en un lado.
+    #[tokio::test]
+    async fn fin_failure_removes_provisional_epoch() {
+        let (url_b, peers_b, svc, shutdown_b) =
+            spawn_test_responder_with("orr_b", "ml-kem-768", 3).await;
+        let bootstrap = [0x44; 32];
+        peers_b.reset_for_bootstrap("orr_a", bootstrap);
+        let peers_a = initiator_registry("orr_b", bootstrap);
+        svc.fail_fin
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let err = run_one_rotation("ml-kem-768", "orr_a", "orr_b", &url_b, &peers_a)
+            .await
+            .expect_err("el FIN fue rechazado");
+        assert!(matches!(err, RotationError::Remote(_)), "{err:?}");
+        assert!(
+            peers_a.master_for_epoch("orr_b", 1).is_none(),
+            "provisional fuera"
+        );
+        assert_eq!(peers_a.current_send_epoch("orr_b"), None);
+        assert_eq!(
+            peers_a.send_epoch_for("orr_b"),
+            Some(0),
+            "se sigue enviando con la 0"
+        );
+        assert!(peers_b.master_for_epoch("orr_a", 1).is_none());
+
+        // Y con el FIN aceptado de nuevo, la siguiente rotación es la 1.
+        svc.fail_fin
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            run_one_rotation("ml-kem-768", "orr_a", "orr_b", &url_b, &peers_a)
+                .await
+                .expect("rotación"),
+            1
+        );
+        let _ = shutdown_b.send(());
+    }
+
+    /// Un bootstrap rehecho sustituye toda la historia: sin él, un lado
+    /// seguía cifrando con épocas que el otro (reiniciado) no tenía.
+    #[test]
+    fn bootstrap_reset_clears_stale_epochs_and_send_epoch() {
+        let peers = PeerRegistry::new(HashMap::new(), "orr_a".into(), 0);
+        for e in 0..=5u32 {
+            peers.set_master_for_epoch("orr_b".into(), e, [e as u8; 32]);
+        }
+        peers.set_current_send_epoch("orr_b".into(), 5);
+        peers.store_ephemeral_sk("orr_b".into(), 6, vec![9; 8]);
+        assert_eq!(peers.send_epoch_for("orr_b"), Some(5));
+
+        peers.reset_for_bootstrap("orr_b", [0xAA; 32]);
+        assert_eq!(peers.latest_epoch_for("orr_b"), Some(0));
+        assert_eq!(peers.master_for_epoch("orr_b", 0), Some([0xAA; 32]));
+        assert!(peers.master_for_epoch("orr_b", 5).is_none());
+        assert_eq!(peers.current_send_epoch("orr_b"), None);
+        assert_eq!(peers.send_epoch_for("orr_b"), Some(0));
+        assert!(!peers.has_ephemeral_sk("orr_b", 6));
+        assert!(peers.has_bootstrap("orr_b"));
+    }
+
+    /// Un único establecimiento en vuelo por par: mientras el re-bootstrap
+    /// pasivo tenga el flag, la rotación se salta el tick, y sigue en cuanto
+    /// se libera.
+    #[tokio::test]
+    async fn rotation_skips_tick_while_rebootstrap_inflight() {
+        let (url_b, peers_b, shutdown_b) = spawn_test_responder("orr_b", "ml-kem-768").await;
+        let bootstrap = [0x66; 32];
+        peers_b.reset_for_bootstrap("orr_a", bootstrap);
+        let peers_a = initiator_registry("orr_b", bootstrap);
+        assert!(peers_a.try_mark_rebootstrap_inflight("orr_b"));
+        spawn_initiator_rotation(peers_a.clone(), &url_b, 200, 3);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            peers_a.current_send_epoch("orr_b"),
+            None,
+            "con el flag ajeno no rota"
+        );
+
+        peers_a.clear_rebootstrap_inflight("orr_b");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            peers_a.current_send_epoch("orr_b").unwrap_or(0) >= 1,
+            "liberado, rota"
+        );
+        let _ = shutdown_b.send(());
+    }
+
+    /// El respondedor se reinicia a mitad de camino: contesta «no
+    /// bootstrap_secret». La rotación rehace el bootstrap desde el
+    /// iniciador (pubkey fresca + EstablishSecret), ambos resetean la
+    /// historia, y la siguiente época sale acordada. Antes, con
+    /// `max_hops = 0`, nadie lo hacía y el par quedaba muerto hasta reiniciar
+    /// todo.
+    #[tokio::test]
+    async fn a_peer_that_lost_its_state_is_rebootstrapped_by_the_rotation() {
+        let (url_b, peers_b, shutdown_b) = spawn_test_responder("orr_b", "ml-kem-768").await;
+        // B «reiniciado»: sin bootstrap ni épocas. A venía con historia.
+        let peers_a = initiator_registry("orr_b", [0x77; 32]);
+        for e in 1..=4u32 {
+            peers_a.set_master_for_epoch("orr_b".into(), e, [e as u8; 32]);
+        }
+        peers_a.set_current_send_epoch("orr_b".into(), 4);
+        assert!(!peers_b.has_bootstrap("orr_a"));
+
+        spawn_initiator_rotation(peers_a.clone(), &url_b, 200, 3);
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(peers_b.has_bootstrap("orr_a"), "B tiene bootstrap nuevo");
+        assert_eq!(
+            peers_a.bootstrap_for("orr_b").map(|z| *z),
+            peers_b.bootstrap_for("orr_a").map(|z| *z),
+            "el bootstrap rehecho es el mismo en los dos lados"
+        );
+        let latest = peers_a
+            .current_send_epoch("orr_b")
+            .expect("rotó tras rehacer");
+        assert!(latest >= 1, "{latest}");
+        // La historia de antes del reinicio de B se fue: ninguna de sus
+        // épocas inventadas sobrevive en A.
+        for e in 1..=4u32 {
+            assert_ne!(
+                peers_a.master_for_epoch("orr_b", e),
+                Some([e as u8; 32]),
+                "época vieja {e} aún en A"
+            );
+        }
+        for e in latest.saturating_sub(2)..=latest {
+            assert_eq!(
+                peers_a
+                    .master_for_epoch("orr_b", e)
+                    .expect("época viva en A"),
+                peers_b
+                    .master_for_epoch("orr_a", e)
+                    .expect("época viva en B"),
+                "época {e} acordada"
+            );
+        }
+        let _ = shutdown_b.send(());
     }
 
     /// Test 1: 2 ORRs locales + bootstrap sembrado + 2 rotaciones

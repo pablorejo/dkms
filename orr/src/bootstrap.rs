@@ -196,16 +196,11 @@ async fn bootstrap_peer(
             peers.clear_rebootstrap_inflight(&peer_id);
             match attempt {
                 Ok(secret) => {
-                    // OBJ-011: guardar como bootstrap_secret (HMAC key),
-                    // NO como master_secret.
-                    //
-                    // Workaround: cableamos también como master_secret
-                    // de epoch 0 en este lado. Sin esto la rotación
-                    // Option-B se desincroniza entre initiator/responder
-                    // y los frames se dropean con "missing epoch".
-                    // Ver comentario gemelo en `grpc_server.rs`.
-                    peers.set_bootstrap(peer_id.clone(), secret);
-                    peers.set_master_for_epoch(peer_id.clone(), 0, secret);
+                    // El bootstrap_secret es la clave HMAC de las rotaciones
+                    // y siembra la época 0; toda la historia anterior con
+                    // este peer, si la había, se va con él (ver
+                    // `PeerRegistry::reset_for_bootstrap`).
+                    peers.reset_for_bootstrap(&peer_id, secret);
                     info!(
                         local = %local_orr_id,
                         peer  = %peer_id,
@@ -231,21 +226,63 @@ async fn bootstrap_peer(
         debug!(peer = %peer_id, "orr.bootstrap bootstrap_secret already present");
     }
 
-    // Phase 3 + Phase 4 (rotación OBJ-011) deshabilitadas. La rotación
-    // actual (run_one_rotation + spawn_rotation_task) sólo actualiza el
-    // lado initiator (lex-smaller) y deja al passive con epoch=0,
-    // causando frames con `epoch=0` que el receiver dropea con
-    // `latest=Some(1)`. Hasta que el sub-protocolo propague la nueva
-    // época al passive side antes de que el initiator suba el contador
-    // local, mantenemos epoch=0 estable en ambos lados (master_secret
-    // sembrado desde el bootstrap_secret arriba).
-    let _ = rotation_period_ms;
-    let _ = epoch_history_keep;
-    let _ = suite;
-    let _ = local_orr_id;
-    let _ = peer_id;
-    let _ = addr;
-    let _ = peers;
+    // Fase 3: rotación periódica del master_secret (forward secrecy). Una
+    // task por par, y solo aquí: `spawn_one` se reinvoca desde el
+    // anunciador de la SDN en cada cambio de pares, así que el guard es lo
+    // que impide dos bucles compitiendo por el mismo par. Estuvo apagada
+    // desde que el respondedor podía emitir con la época nueva antes de que
+    // el iniciador la confirmara; `run_one_rotation` guarda ahora la época
+    // antes del FIN, y el bootstrap resetea la historia en los dos lados.
+    if peers.try_mark_rotation_spawned(&peer_id) {
+        crate::rotation::spawn_rotation_task(
+            identity,
+            suite,
+            local_orr_id,
+            peer_id,
+            addr,
+            peers,
+            rotation_period_ms,
+            epoch_history_keep,
+        );
+    }
+}
+
+/// Rehace el bootstrap con un peer que ha perdido su estado — lo dice él
+/// mismo al contestar «no bootstrap_secret» a una rotación. Pubkey fresca
+/// (se reinició: la ML-KEM es efímera), verificada como en el bootstrap
+/// inicial; encap + `EstablishSecret`; y la historia de épocas a cero en
+/// este lado. Lo llama el bucle de rotación **con el flag de exclusión ya en
+/// mano** (`try_mark_rebootstrap_inflight`): aquí no se toma.
+pub async fn rebootstrap(
+    identity: &OrrIdentity,
+    suite: &str,
+    local_orr_id: &str,
+    peer_id: &str,
+    addr: &str,
+    peers: &PeerRegistry,
+) -> std::result::Result<(), String> {
+    let (pk, pk_suite, reported, signature, signing_certs) = try_fetch_pubkey(addr).await?;
+    let reported_lc = reported.to_lowercase();
+    if !reported_lc.is_empty() && reported_lc != peer_id {
+        return Err(format!(
+            "el peer se presenta como {reported}, no como {peer_id}"
+        ));
+    }
+    if peers.verify_announcement(peer_id, &pk_suite, &pk, &signature, &signing_certs)
+        == crate::peers::SigVerdict::Reject
+    {
+        return Err("anuncio de pubkey rechazado (firma o cadena)".to_string());
+    }
+    peers.put_pubkey(peer_id.to_string(), pk.clone());
+    let secret = attempt_establish(identity, suite, &pk, local_orr_id, peer_id, addr).await?;
+    peers.reset_for_bootstrap(peer_id, secret);
+    info!(
+        local = %local_orr_id,
+        peer = %peer_id,
+        addr = %addr,
+        "orr.bootstrap rehecho: bootstrap_secret nuevo, historia de épocas a cero"
+    );
+    Ok(())
 }
 
 async fn fetch_pubkey(peers: &PeerRegistry, local_orr_id: &str, peer_id: &str, addr: &str) {

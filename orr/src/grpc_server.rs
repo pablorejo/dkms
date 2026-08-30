@@ -241,23 +241,15 @@ impl OrrControl for OrrGrpc {
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&ss);
-        // OBJ-011 (audit H-3): el shared_secret del bootstrap inicial
-        // se guarda como `bootstrap_secret` (HMAC key para autenticar
-        // rotaciones), NO como master_secret. El master_secret de
-        // cada época se produce vía `RequestEphemeralKey` +
-        // `EstablishEphemeralSecret` con keypair efímera fresca.
-        //
-        // Workaround temporal (rotación de Option-B desincronizada
-        // entre initiator/responder rompe epochs y se queda con
-        // `latest=1` en un lado y `latest=0` en otro): cableamos el
-        // bootstrap_secret también como master_secret de epoch 0 en
-        // ambos lados. Esto retrocede al modelo pre-OBJ-011 (sin
-        // forward secrecy por época), pero deja al `send_onion_*`
-        // operativo end-to-end. Volver al modelo correcto cuando
-        // `run_one_rotation` propague la nueva época al passive side.
-        self.svc.peers.set_bootstrap(from.clone(), secret);
-        self.svc.peers.set_master_for_epoch(from.clone(), 0, secret);
-        info!(peer = %from, "orr.establish_secret bootstrap_secret stored");
+        // El shared_secret del bootstrap es la clave HMAC de las rotaciones
+        // (`RequestEphemeralKey` + `EstablishEphemeralSecret`, keypair
+        // efímera por época) y siembra la época 0. Quien nos manda un
+        // EstablishSecret ha rehecho su bootstrap —se reinició, o vio que
+        // nos reiniciamos—, así que su historia con nosotros ya no existe:
+        // la nuestra con él tampoco puede seguir, o le cifraríamos con
+        // épocas que no tiene (`reset_for_bootstrap`).
+        self.svc.peers.reset_for_bootstrap(&from, secret);
+        info!(peer = %from, "orr.establish_secret bootstrap_secret stored (historia de épocas a cero)");
         Ok(Response::new(EstablishSecretResponse {
             ok: true,
             error: String::new(),
@@ -320,6 +312,7 @@ impl OrrControl for OrrGrpc {
             &self.svc.peers,
             &self.svc.cfg.orr_id,
             &self.svc.cfg.default_pqc_suite,
+            self.svc.cfg.epoch_history_keep,
             m,
         );
         Ok(Response::new(resp))
