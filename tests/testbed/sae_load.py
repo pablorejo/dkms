@@ -38,6 +38,19 @@ import time
 from http.client import HTTPSConnection
 from queue import Queue, Empty
 
+# El DKMS negocia SOLO el intercambio híbrido X25519MLKEM768 y presenta
+# certificados ML-DSA-65: hace falta OpenSSL >= 3.5 debajo de `ssl`. Con uno
+# anterior cada conexión muere en el handshake y el CSV mide un fallo del
+# cliente, no del DKMS (medido en CESGA, 1.1.1g: 3960 handshakes fallidos y
+# cero claves). El cliente Rust equivalente, tests/loadgen (target/release/
+# sae_load), usa rustls y no depende del OpenSSL del sistema.
+if ssl.OPENSSL_VERSION_INFO < (3, 5):
+    sys.exit(
+        "sae_load.py: este Python enlaza " + ssl.OPENSSL_VERSION + "; el DKMS exige "
+        "X25519MLKEM768 + ML-DSA (OpenSSL >= 3.5). Usa el cliente Rust: "
+        "target/release/sae_load (misma CLI y mismo CSV)."
+    )
+
 
 def make_ctx(certs: str, sae: str) -> ssl.SSLContext:
     # El cert de servidor del DKMS lo firma la misma CA de test, cuyo SAN es

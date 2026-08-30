@@ -706,6 +706,25 @@ cert de cliente firmado por la CA común **con la identidad en el SAN**:
 > Con otro formato de SAN el DKMS no extrae la identidad: el `enc_keys`
 > responde 200 pero el `dec_keys` del otro extremo da `key not found`.
 
+### Requisitos del cliente SAE (léelo antes de culpar al DKMS)
+
+El plano SAE es TLS 1.3 **solo con el intercambio híbrido post-cuántico
+`X25519MLKEM768`** y, por defecto, certificados **ML-DSA-65**. No hay respaldo
+clásico: un cliente que no ofrezca ese grupo no negocia y ve un
+`handshake failure` (el DKMS lo registra como `tls handshake failed`). Vale:
+
+- **OpenSSL ≥ 3.5** debajo del cliente (`openssl version`; en Python
+  `python3 -c 'import ssl; print(ssl.OPENSSL_VERSION)'`). `curl`, `requests`,
+  strongSwan… sirven si su OpenSSL es ese. Debian 13 (trixie) lo trae; bookworm
+  (3.0) y CESGA (1.1.1g) **no**.
+- **rustls** con el provider de este repo: `tests/loadgen` (`target/release/
+  sae_load`, misma CLI y CSV que `tests/testbed/sae_load.py`) es el cliente
+  de referencia y no depende del OpenSSL del sistema.
+
+Los `curl` de abajo asumen lo primero. Los binarios lo comprueban consigo
+mismos al arrancar (`tls_pqc: self-check OK`) y abortan si no negocian el
+híbrido: un nodo en marcha ya lo garantiza por su lado.
+
 API en `https://<dkms>:20005` (ETSI GS QKD 014):
 
 | endpoint | qué hace |

@@ -32,6 +32,12 @@ async fn main() -> Result<()> {
 
     let cfg: SdnConfig = common::config::load_config("sdn")?;
     info!(?cfg, "sdn starting");
+    // Self-check del intercambio de claves TLS (híbrido post-cuántico) con la
+    // identidad del nodo, si la hay; sin identidad no hay TLS que comprobar.
+    if let Some(t) = &cfg.tls {
+        common::tls_pqc::self_check_hybrid_kx_files(&t.cert_path, &t.key_path)
+            .map_err(anyhow::Error::msg)?;
+    }
 
     let metrics = Metrics::new("sdn");
     metrics.serve(cfg.metrics_addr.clone()).await?;

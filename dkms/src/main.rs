@@ -122,6 +122,10 @@ async fn main() -> Result<()> {
     common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     let mut cfg: DkmsConfig = common::config::load_config("dkms")?;
+    // Que el intercambio de claves TLS sea el híbrido post-cuántico no es
+    // configurable: se comprueba con la identidad del nodo antes de escuchar.
+    common::tls_pqc::self_check_hybrid_kx_files(&cfg.tls.cert_path, &cfg.tls.key_path)
+        .map_err(anyhow::Error::msg)?;
     // El gRPC hacia el ORR va con mTLS por defecto (`southbound.orr_tls`):
     // el esquema del endpoint se sube a https aquí, una vez, y todo lo que
     // venga detrás (cliente, TLS de cliente) se guía por él.

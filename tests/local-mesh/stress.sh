@@ -27,6 +27,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 MESH="$HERE/mesh.sh"
 LOADER="$REPO/tests/testbed/sae_load.py"
+# Se prefiere el binario Rust (tests/loadgen): el DKMS negocia solo
+# X25519MLKEM768 y presenta certs ML-DSA, y el `ssl` de Python solo puede con
+# OpenSSL >= 3.5. Misma CLI y mismo CSV.
+LOADER_BIN="$REPO/target/release/sae_load"
+if [ -x "$LOADER_BIN" ]; then LOADER_CMD=("$LOADER_BIN"); else LOADER_CMD=(python3 -u "$LOADER"); fi
 
 ARM=A
 NODES=10
@@ -151,7 +156,7 @@ run_point() {
         while (( i < ${#slaves[@]} )); do
             local chunk=("${slaves[@]:i:per}")
             local list; list=$(IFS=,; echo "${chunk[*]}")
-            python3 -u "$LOADER" \
+            "${LOADER_CMD[@]}" \
                 --sae "sae_$m" --slaves "$list" \
                 --certs "$MESH_DIR/certs" --host 127.0.0.1 --port "$(sae_port "$m")" \
                 --threads $(( th * ${#chunk[@]} )) --duration "$DURATION" \

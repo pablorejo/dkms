@@ -71,9 +71,22 @@ sleep 90
 # por el enlace.
 info "── midiendo fallos de clave DEC ya convergido, con carga para provocar tráfico"
 REMOTE=/tmp/dkms-testbed
+# Cliente de carga: el binario Rust (tests/loadgen) si está compilado para las
+# VMs (target-bookworm; DKMS_TESTBED_LOADER lo pisa). El DKMS negocia SOLO
+# X25519MLKEM768 y presenta certs ML-DSA, que el `ssl` de Python solo tiene con
+# OpenSSL >= 3.5; el binario habla con ambos. Misma CLI y mismo CSV.
+LOADER_BIN="${DKMS_TESTBED_LOADER:-$(dirname "${BASH_SOURCE[0]}")/../../target-bookworm/release/sae_load}"
+if [ -x "$LOADER_BIN" ]; then LOADER_CMD="./sae_load"; else LOADER_CMD="python3 -u sae_load.py"; fi
+ship_loader() {   # ship_loader <nodo>
+    if [ -x "$LOADER_BIN" ]; then
+        scp "${SSH_OPTS[@]}" "$LOADER_BIN" "$1:$REMOTE/sae_load" >/dev/null
+    else
+        scp "${SSH_OPTS[@]}" "$(dirname "${BASH_SOURCE[0]}")/sae_load.py" "$1:$REMOTE/" >/dev/null
+    fi
+}
 for n in "${NODES[@]}"; do
     on "$n" "mkdir -p $REMOTE"
-    scp "${SSH_OPTS[@]}" "$(dirname "${BASH_SOURCE[0]}")/sae_load.py" "$n:$REMOTE/" >/dev/null
+    ship_loader "$n"
 done
 declare -A SLAVE_OF
 for i in "${!NODES[@]}"; do
@@ -88,7 +101,7 @@ done
 # complete, y solo entonces empieza la ventana de medida — si no, se estaría
 # midiendo la propia convergencia y saldría rojo con el arreglo funcionando.
 for n in "${NODES[@]}"; do
-    on_detached "$n" "cd $REMOTE && setsid nohup python3 -u sae_load.py \
+    on_detached "$n" "cd $REMOTE && setsid nohup $LOADER_CMD \
         --sae ${NODE_SAE[$n]} --slave ${SLAVE_OF[$n]} --certs $CERTS_REMOTE \
         --threads 2 --duration 120 --rate-cap 20 --aggregate-throttled \
         --out $REMOTE/storm.csv > $REMOTE/storm.stdout 2>&1 < /dev/null & exit 0" || true

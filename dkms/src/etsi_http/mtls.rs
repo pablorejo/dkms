@@ -160,9 +160,12 @@ pub async fn serve_mtls(
             stats.record_ok(handshake_us);
             let handshake_ms = handshake_us / 1000;
 
-            let peer_id = {
+            let (peer_id, kx) = {
                 let (_io, session) = tls_stream.get_ref();
-                PeerIdentity::from_verified(session.peer_certificates())
+                (
+                    PeerIdentity::from_verified(session.peer_certificates()),
+                    session.negotiated_key_exchange_group().map(|g| g.name()),
+                )
             };
             // Una línea por conexión aceptada, con la identidad que rustls
             // verificó y cuánto costó el handshake. En campañas: grep
@@ -172,6 +175,7 @@ pub async fn serve_mtls(
                 plane = plane_label,
                 san = peer_id.san_identifier.as_deref().unwrap_or("<none>"),
                 handshake_ms,
+                kx = ?kx,
                 "tls.conn accepted"
             );
 

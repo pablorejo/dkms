@@ -162,13 +162,10 @@ static PQC_KEY_PROVIDER: PqcKeyProvider = PqcKeyProvider;
 /// `aws_lc_rs::default_provider()`.
 fn build_provider() -> CryptoProvider {
     let mut provider = aws_lc_rs::default_provider();
-    provider.signature_verification_algorithms = rustls::crypto::WebPkiSupportedAlgorithms {
-        all: VERIFY_ALGS,
-        mapping: VERIFY_MAPPING,
-    };
+    provider.signature_verification_algorithms = VERIFY_SUPPORTED;
     provider.key_provider = &PQC_KEY_PROVIDER;
 
-    // Intercambio de claves HÍBRIDO post-cuántico primero.
+    // Intercambio de claves HÍBRIDO post-cuántico, y SOLO ese.
     //
     // Autenticar con ML-DSA protege de que alguien se haga pasar por un nodo,
     // pero no de «grabar ahora, descifrar después»: si el secreto de sesión se
@@ -178,24 +175,180 @@ fn build_provider() -> CryptoProvider {
     //
     // rustls trae `X25519MLKEM768` (draft-ietf-tls-ecdhe-mlkem) pero solo lo
     // ofrece por defecto con la feature `prefer-post-quantum`, que no está
-    // activa aquí — así que lo ponemos delante explícitamente. Es híbrido: el
-    // secreto sale de combinar X25519 **y** ML-KEM-768, de modo que sigue
-    // siendo tan seguro como X25519 aunque ML-KEM fallara, y resistente a
-    // cuántico aunque X25519 caiga. Los clásicos quedan detrás para no romper
-    // a un peer que aún no lo soporte.
-    provider.kx_groups = vec![
-        aws_lc_rs::kx_group::X25519MLKEM768,
-        aws_lc_rs::kx_group::X25519,
-        aws_lc_rs::kx_group::SECP256R1,
-        aws_lc_rs::kx_group::SECP384R1,
-    ];
+    // activa aquí — así que se pone explícitamente. Es híbrido: el secreto
+    // sale de combinar X25519 **y** ML-KEM-768, de modo que sigue siendo tan
+    // seguro como X25519 aunque ML-KEM fallara, y resistente a cuántico
+    // aunque X25519 caiga.
+    //
+    // Hasta 2026-08-30 los grupos clásicos quedaban detrás como respaldo
+    // «para no romper a un peer que aún no lo soporte». Eso convertía la
+    // garantía en una preferencia: bastaba un cliente que no ofreciera el
+    // híbrido para que la sesión se negociara con X25519 a secas, sin que
+    // nada lo dijera. Desde entonces no hay respaldo en ningún plano: un
+    // peer o un SAE sin X25519MLKEM768 (OpenSSL < 3.5) no conecta, y lo ve
+    // como `HandshakeFailure` (ver docker/README.md, requisitos del cliente).
+    provider.kx_groups = vec![aws_lc_rs::kx_group::X25519MLKEM768];
     provider
 }
+
+/// Algoritmos de verificación de firma del provider PQC (ML-DSA-65 más los
+/// clásicos), en la forma que rustls consume.
+const VERIFY_SUPPORTED: rustls::crypto::WebPkiSupportedAlgorithms =
+    rustls::crypto::WebPkiSupportedAlgorithms {
+        all: VERIFY_ALGS,
+        mapping: VERIFY_MAPPING,
+    };
+
+/// El único grupo de intercambio de claves que este código negocia.
+pub const REQUIRED_KX_GROUP: rustls::NamedGroup = rustls::NamedGroup::X25519MLKEM768;
 
 /// Provider criptográfico con firma ML-DSA en certificados, además de los
 /// algoritmos clásicos.
 pub fn pqc_crypto_provider() -> Arc<CryptoProvider> {
     Arc::new(build_provider())
+}
+
+/// Verificador de servidor que acepta cualquier certificado. SOLO para el
+/// self-check de arranque, donde el nodo habla consigo mismo y lo que se
+/// comprueba es la negociación, no la confianza.
+#[derive(Debug)]
+struct TrustAnything;
+
+impl rustls::client::danger::ServerCertVerifier for TrustAnything {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &VERIFY_SUPPORTED)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &VERIFY_SUPPORTED)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        VERIFY_SUPPORTED.supported_schemes()
+    }
+}
+
+fn feed<D>(dst: &mut rustls::ConnectionCommon<D>, mut data: &[u8]) -> Result<(), String> {
+    while !data.is_empty() {
+        let n = dst.read_tls(&mut data).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        dst.process_new_packets().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Handshake TLS completo en memoria entre `server` y `client`. Devuelve el
+/// grupo de intercambio de claves negociado. Los flights ML-DSA son grandes
+/// (cert ~4 KB + CertVerify ~3.3 KB), así que cada lado se drena entero.
+pub fn handshake_in_memory(
+    server: Arc<rustls::ServerConfig>,
+    client: Arc<rustls::ClientConfig>,
+) -> Result<rustls::NamedGroup, String> {
+    let mut srv = rustls::ServerConnection::new(server).map_err(|e| e.to_string())?;
+    let name = rustls::pki_types::ServerName::try_from("localhost").map_err(|e| e.to_string())?;
+    let mut cli = rustls::ClientConnection::new(client, name).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    for _ in 0..30 {
+        let mut progressed = false;
+        buf.clear();
+        while cli.wants_write() {
+            cli.write_tls(&mut buf).map_err(|e| e.to_string())?;
+            progressed = true;
+        }
+        feed(&mut srv, &buf)?;
+        buf.clear();
+        while srv.wants_write() {
+            srv.write_tls(&mut buf).map_err(|e| e.to_string())?;
+            progressed = true;
+        }
+        feed(&mut cli, &buf)?;
+        if !cli.is_handshaking() && !srv.is_handshaking() {
+            break;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    if cli.is_handshaking() || srv.is_handshaking() {
+        return Err("el handshake no llegó a completarse".to_string());
+    }
+    srv.negotiated_key_exchange_group()
+        .map(|g| g.name())
+        .ok_or_else(|| "sin grupo de intercambio negociado".to_string())
+}
+
+/// Self-check de arranque: con la identidad TLS del nodo (`cert`/`key` en
+/// PEM) se hace un handshake consigo mismo y se comprueba que lo que se
+/// negocia es [`REQUIRED_KX_GROUP`]. Configurarlo no basta —hay que ver que
+/// se elige— y es mejor abortar aquí, con la causa, que descubrirlo cuando
+/// un peer no conecte.
+pub fn self_check_hybrid_kx(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), String> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("cert PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("cert PEM sin certificados".to_string());
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("key PEM: {e}"))?;
+    let provider = pqc_crypto_provider();
+    let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("identidad del nodo: {e}"))?;
+    let client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(TrustAnything))
+        .with_no_client_auth();
+    let kx = handshake_in_memory(Arc::new(server), Arc::new(client))?;
+    if kx != REQUIRED_KX_GROUP {
+        return Err(format!(
+            "el self-check negoció {kx:?} en vez de {REQUIRED_KX_GROUP:?}: este binario no \
+             es post-cuántico en el intercambio de claves"
+        ));
+    }
+    tracing::info!(
+        kx = ?kx,
+        "tls_pqc: self-check OK — el intercambio de claves TLS es el híbrido post-cuántico"
+    );
+    Ok(())
+}
+
+/// [`self_check_hybrid_kx`] leyendo la identidad de disco.
+pub fn self_check_hybrid_kx_files(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<(), String> {
+    let cert = std::fs::read(cert_path).map_err(|e| format!("{}: {e}", cert_path.display()))?;
+    let key = std::fs::read(key_path).map_err(|e| format!("{}: {e}", key_path.display()))?;
+    self_check_hybrid_kx(&cert, &key)
 }
 
 /// Instala el provider PQC como **default del proceso**. Debe llamarse una vez
@@ -484,6 +637,41 @@ mod tests {
             server.peer_certificates().is_some(),
             "mTLS: cert cliente ML-DSA verificado"
         );
+
+        // Sin respaldo clásico: un cliente que solo ofrezca X25519 no cierra
+        // el handshake. Es la política de todos los planos desde 2026-08-30,
+        // y lo que un SAE con OpenSSL < 3.5 va a ver.
+        let server2 = Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(load_certs("server.crt"), load_key("server.key"))
+                .unwrap(),
+        );
+        let mut classical = build_provider();
+        classical.kx_groups = vec![aws_lc_rs::kx_group::X25519];
+        let classical_client = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(classical))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(TrustAnything))
+                .with_no_client_auth(),
+        );
+        let err = handshake_in_memory(server2, classical_client)
+            .expect_err("X25519 a secas no puede negociar");
+        assert!(
+            err.contains("NoKxGroupsInCommon") || err.contains("HandshakeFailure"),
+            "el fallo tiene que ser por el grupo de intercambio: {err}"
+        );
+
+        // Y el self-check de arranque, con la identidad del nodo, pasa.
+        self_check_hybrid_kx(
+            &std::fs::read(p("server.crt")).unwrap(),
+            &std::fs::read(p("server.key")).unwrap(),
+        )
+        .expect("self-check con la identidad del nodo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

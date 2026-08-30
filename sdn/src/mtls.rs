@@ -101,10 +101,14 @@ pub async fn serve_mtls(
                     return;
                 }
             };
-            let peer_id = {
+            let (peer_id, kx) = {
                 let (_io, session) = tls_stream.get_ref();
-                PeerCertIdentity::from_verified(session.peer_certificates())
+                (
+                    PeerCertIdentity::from_verified(session.peer_certificates()),
+                    session.negotiated_key_exchange_group().map(|g| g.name()),
+                )
             };
+            tracing::debug!(%peer_addr, kx = ?kx, "tls.conn accepted");
             let svc = service_fn(move |req: Request<Incoming>| {
                 let mut router = router.clone();
                 let pid = peer_id.clone();

@@ -24,6 +24,12 @@ async fn main() -> Result<()> {
 
     let cfg: OrrConfig = common::config::load_config("orr")?;
     info!(?cfg, "orr starting");
+    // Self-check del intercambio de claves TLS (híbrido post-cuántico) con la
+    // identidad del nodo, si la hay; sin identidad no hay TLS que comprobar.
+    if let Some(t) = &cfg.tls {
+        common::tls_pqc::self_check_hybrid_kx_files(&t.cert_path, &t.key_path)
+            .map_err(anyhow::Error::msg)?;
+    }
     // Identidad TLS del proceso: el servidor gRPC (mTLS por defecto) y los
     // canales hacia los pares. Sin identidad no se arranca en claro a
     // escondidas: apagarlo es una decisión, y se escribe.
