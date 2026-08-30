@@ -41,6 +41,8 @@
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
 #
+#   DKMS_MESH_ACK_TRANSPORT     socket (default) | etsi020: ACK por mTLS y, con
+#                              etsi020, el listener del socket apagado
 #   DKMS_MESH_PQC_REKEY_SECS    pqc_rekey_secs de los enlaces PQC (default 3600)
 #   DKMS_MESH_E2E_REKEY_SECS    transport_e2e.rekey_secs del DKMS (default 3600)
 #   DKMS_MESH_ROTATION_MS       rotation_period_ms del ORR (default 1 h)
@@ -425,6 +427,14 @@ ports: {sae: $(sae_port "$n"), peer: $(port "$n" 20006), grpc: $(port "$n" 20007
 sae_bindings:
   sae_$n: dkms-$n
 EOF
+        # ACK autenticados por ETSI-020 y, con todos los nodos así, el socket
+        # TCP plano ni se escucha: el brazo que decide el flip de defaults.
+        if [ -n "${DKMS_MESH_ACK_TRANSPORT:-}" ]; then
+            printf 'ack_transport: %s\n' "$DKMS_MESH_ACK_TRANSPORT" >> "$DIR/yml/node$n.dkms.yml"
+            if [ "$DKMS_MESH_ACK_TRANSPORT" = etsi020 ]; then
+                printf 'ack_socket_listen: false\n' >> "$DIR/yml/node$n.dkms.yml"
+            fi
+        fi
         python3 "$RENDER" dkms "$DIR/yml/node$n.dkms.yml" "$DIR/cfg/dkms$n" >/dev/null
         patch_dkms_toml "$DIR/cfg/dkms$n/default.toml"
 
