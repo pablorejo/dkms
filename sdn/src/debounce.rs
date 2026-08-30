@@ -45,7 +45,7 @@ use std::{
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// Boxed sync fire callback shared between the worker task and the
 /// storm-fire path inside `request()`.
@@ -253,12 +253,13 @@ fn spawn_fire(inner: &Arc<Inner>) {
     let _handle = tokio::task::spawn_blocking(move || {
         loop {
             inner.fire_rerun.store(false, Ordering::Release);
-            // Catch panics so a buggy fire fn can't kill the runtime.
-            if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (inner.fire)()))
-            {
-                warn!(?payload, "debouncer fire panicked");
-            }
+            // Sin guardia de pánico, a propósito: el workspace compila con
+            // `panic = "abort"` (Cargo.toml), y bajo abort `catch_unwind`
+            // nunca atrapa nada — la guardia que había aquí solo funcionaba
+            // en los tests. Un solve que entra en pánico tira el SDN, compose
+            // lo reinicia y la topología se reconstruye con los siguientes
+            // anuncios; eso es mejor que un debouncer zombi que nadie detecta.
+            (inner.fire)();
             if !inner.fire_rerun.swap(false, Ordering::AcqRel) {
                 break;
             }

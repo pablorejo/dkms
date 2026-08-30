@@ -1,0 +1,36 @@
+# Gate de calidad: lo mismo que `make check` en local.
+#
+# La imagen es trixie (Debian 13) a propósito: trae OpenSSL 3.5, que es lo
+# que necesitan los dos tests que generan certificados ML-DSA con el `openssl`
+# del sistema. En bookworm (3.0) esos tests se saltarían — y con
+# DKMS_NO_TEST_SKIPS=1 el salto es un fallo, no un verde vacío.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: rust:1.88-trixie
+    env:
+      CARGO_TERM_COLOR: always
+      DKMS_NO_TEST_SKIPS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc para common/build.rs; cmake + clang/libclang porque highs-sys
+      # compila HiGHS con cmake y genera los bindings con bindgen; openssl
+      # (CLI) para los tests que emiten certificados.
+      - name: system deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            protobuf-compiler cmake clang libclang-dev make openssl
+          openssl version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: make check
+        run: make check

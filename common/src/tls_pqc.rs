@@ -252,7 +252,7 @@ mod tests {
     /// los certificados funciona end to end. Se salta si openssl no soporta
     /// ML-DSA (necesita 3.5+).
     #[test]
-    fn full_mtls_handshake_with_ml_dsa_certs() {
+    fn full_mtls_handshake_with_ml_dsa_certs_needs_openssl35() {
         use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 
         let dir = std::env::temp_dir().join(format!("mldsa_tls_{}", std::process::id()));
@@ -288,7 +288,9 @@ mod tests {
                 "/CN=mldsa-ca",
             ])
         {
-            eprintln!("openssl sin ML-DSA (¿<3.5?); salto el test de handshake");
+            crate::test_support::skip_or_fail(
+                "openssl sin ML-DSA (<3.5): no se pueden emitir los certs del handshake",
+            );
             return;
         }
 

@@ -486,7 +486,7 @@ el path es byte-idéntico al actual (frames 0x21/0x22). Cambios:
     provider aws-lc-rs + verificación ML_DSA_65 + `PqcKeyProvider` que carga
     claves ML-DSA (crate `ml-dsa`) con fallback a RSA/ECDSA/EdDSA. **Probado con
     un handshake mTLS completo in-memory donde CA, cert de servidor y cert de
-    cliente son todos ML-DSA** (test `full_mtls_handshake_with_ml_dsa_certs`).
+    cliente son todos ML-DSA** (test `full_mtls_handshake_with_ml_dsa_certs_needs_openssl35`).
     common 39 tests, clippy limpio. Interop clave: la clave ML-DSA se genera en
     forma seed-only (`openssl genpkey -provparam ml-dsa.output_formats=seed-only`),
     y webpki necesita el feature `aws-lc-rs-unstable`.
@@ -494,7 +494,7 @@ el path es byte-idéntico al actual (frames 0x21/0x22). Cambios:
     client_config,client_config_mtls}` usan `pqc_crypto_provider()`
     (retrocompatible: RSA/ECDSA siguen funcionando, y además ML-DSA).
     `gen-certs.sh KEY_ALG=ml-dsa-65` emite certs ML-DSA (claves seed-only).
-    Verificado: `public_api_loads_ml_dsa_certs` (la API pública carga certs
+    Verificado: `public_api_loads_ml_dsa_certs_needs_openssl35` (la API pública carga certs
     ML-DSA) + el handshake mTLS completo. gen-certs produce certs con
     `Signature Algorithm: ML-DSA-65` (CA/nodo/SAE), cadena válida.
 

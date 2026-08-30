@@ -133,7 +133,15 @@ common = { path = "common" }
 opt-level     = 3
 lto           = "thin"
 codegen-units = 1
-strip         = true
+# Symbols stay, only DWARF goes: a `panicked at` in production must resolve
+# to a frame under RUST_BACKTRACE=1. `strip = true` left every abort as an
+# unattributable hex address.
+strip         = "debuginfo"
+# Every recovery path in this system is process-restart shaped (DKMS
+# incarnation refill, QKC relink-on-reconnect, ORR re-bootstrap, compose
+# `restart: unless-stopped`); a task that dies quietly under `unwind` leaves
+# a zombie process nothing detects. Keep abort. Cargo does not allow
+# overriding `panic` per package, so this is workspace-wide by construction.
 panic         = "abort"
 
 [profile.dev]

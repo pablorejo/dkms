@@ -2,6 +2,8 @@
 #
 # Targets:
 #   make help              show this list
+#   make check             fmt --check + clippy -D warnings + test (the CI gate)
+#   make fmt / clippy / test   the three pieces of `check`, one at a time
 #   make images            build the 5 Rust images locally, no push.
 #   make push              push images already tagged with $(TAG).
 #
@@ -26,7 +28,7 @@ IMMUTABLE_TAG   ?= $(TAG)-$(GIT_SHA)
 
 ALL_RUST        := dkms orr qkc sdn quditto
 
-.PHONY: help images push
+.PHONY: help check fmt clippy test images push
 
 # ──────────────────────────────────────────────────────────────────────
 # help
@@ -41,6 +43,23 @@ help:
 	@echo "  IMMUTABLE_TAG=$(IMMUTABLE_TAG)"
 	@echo "  IMAGE_PREFIX=$(IMAGE_PREFIX)"
 	@echo "  GIT_SHA=$(GIT_SHA)"
+
+# ──────────────────────────────────────────────────────────────────────
+# Quality gate. `check` is what CI runs (.github/workflows/ci.yml); run it
+# locally before pushing. DKMS_NO_TEST_SKIPS=1 turns every environment-
+# dependent test skip (openssl < 3.5, non-default LP solver) into a failure,
+# so a green run means everything actually ran.
+# ──────────────────────────────────────────────────────────────────────
+fmt: ## cargo fmt --all -- --check
+	@cargo fmt --all -- --check
+
+clippy: ## cargo clippy --workspace --all-targets -- -D warnings
+	@cargo clippy --workspace --all-targets -- -D warnings
+
+test: ## cargo test --workspace
+	@cargo test --workspace
+
+check: fmt clippy test ## fmt + clippy + test, in that order
 
 # ──────────────────────────────────────────────────────────────────────
 # Build (local, no push).

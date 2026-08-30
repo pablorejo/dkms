@@ -21,6 +21,7 @@ pub mod logging;
 pub mod metrics;
 pub mod net;
 pub mod security;
+pub mod test_support;
 pub mod tls;
 pub mod tls_pqc;
 

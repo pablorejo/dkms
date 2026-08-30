@@ -1494,7 +1494,7 @@ mod tests {
     /// which would corrupt the WCMP tables (see the comment at the
     /// `lex_disabled` computation in `solve`). Tests asserting phase-2
     /// behaviour are therefore skipped under `SDN_SOLVER=clarabel`;
-    /// they still run on the default microlp backend.
+    /// they still run on the default highs backend (and on microlp).
     fn phase2_unavailable() -> bool {
         lp_backend() == LpBackend::Clarabel
     }
@@ -2016,6 +2016,9 @@ mod tests {
     #[test]
     fn lex_refinement_uses_residual_capacity_on_free_path() {
         if phase2_unavailable() {
+            common::test_support::skip_or_fail(
+                "la fase 2 del LP está apagada con SDN_SOLVER=clarabel",
+            );
             return;
         }
         let t = triangle_with_slack();
@@ -2183,6 +2186,9 @@ mod tests {
     #[test]
     fn diamond_topology_produces_multipath_wcmp_for_asymmetric_demand() {
         if phase2_unavailable() {
+            common::test_support::skip_or_fail(
+                "la fase 2 del LP está apagada con SDN_SOLVER=clarabel",
+            );
             return;
         }
         let t = diamond_topology();
@@ -2221,6 +2227,9 @@ mod tests {
     #[test]
     fn transit_node_has_single_next_hop_per_destination() {
         if phase2_unavailable() {
+            common::test_support::skip_or_fail(
+                "la fase 2 del LP está apagada con SDN_SOLVER=clarabel",
+            );
             return;
         }
         let t = diamond_topology();
@@ -2600,6 +2609,9 @@ mod tests {
     #[test]
     fn mesh_3x4_diagonal_corner_pair_produces_multipath_wcmp() {
         if phase2_unavailable() {
+            common::test_support::skip_or_fail(
+                "la fase 2 del LP está apagada con SDN_SOLVER=clarabel",
+            );
             return;
         }
         let t = mesh_3x4_topology();

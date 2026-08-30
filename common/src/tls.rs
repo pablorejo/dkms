@@ -145,7 +145,7 @@ mod tests {
     /// **ML-DSA** (firma post-cuántica) end to end — el runtime usa el provider
     /// PQC. Se salta si openssl no soporta ML-DSA (necesita 3.5+).
     #[test]
-    fn public_api_loads_ml_dsa_certs() {
+    fn public_api_loads_ml_dsa_certs_needs_openssl35() {
         let dir = std::env::temp_dir().join(format!("tls_mldsa_api_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let p = |f: &str| dir.join(f).to_str().unwrap().to_string();
@@ -176,7 +176,9 @@ mod tests {
                 "basicConstraints=critical,CA:TRUE",
             ])
         {
-            eprintln!("openssl sin ML-DSA; salto");
+            crate::test_support::skip_or_fail(
+                "openssl sin ML-DSA (<3.5): no se pueden emitir los certs del test",
+            );
             return;
         }
         for (n, eku) in [("srv", "serverAuth"), ("cli", "clientAuth")] {

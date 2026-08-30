@@ -341,15 +341,19 @@ impl SdnService {
             let topology = self.topology.clone();
             let mcf_snap = self.mcf_snapshot.clone();
             let pushers = self.pushers.clone();
+            // El cliente HTTP con el que se empujan las tablas se construye
+            // aquí, con la causa a la vista, y no dentro de la task: con
+            // `panic = "abort"` un `expect` ahí abortaría el SDN entero sin
+            // decir por qué.
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_millis(1500))
+                .build()
+                .map_err(|e| anyhow::anyhow!("reqwest client for forwarding push: {e:#}"))?;
             tokio::spawn(async move {
                 use crate::mcf::WcmpNextHop;
                 use common::proto::sdn::v1::{
                     topology_event, Topology as ProtoTopology, TopologyEvent,
                 };
-                let http = reqwest::Client::builder()
-                    .timeout(Duration::from_millis(1500))
-                    .build()
-                    .expect("reqwest client");
                 let mut last_topo: i64 = -1; // fuerza primer push al arrancar
                 let mut last_snap_ptr: usize = 0;
                 let mut tick = tokio::time::interval(Duration::from_millis(200));
