@@ -137,9 +137,20 @@ pub const FRAME_PQC_KEM_INIT_AUTH: u8 = 0x23;
 pub const FRAME_PQC_KEM_RESP_AUTH: u8 = 0x24;
 /// `FRAME_KEY_IDS_NOTIFY` autenticado (mismo payload ‖ tag de 32 B).
 pub const FRAME_KEY_IDS_NOTIFY_AUTH: u8 = 0x25;
-/// Reservados para un futuro handshake **firmado** (ML-DSA) — no usados aún.
+/// Handshake **firmado** (ML-DSA, `pqc_auth = sign`): mismo payload que
+/// 0x21/0x22 con la firma anexada en vez del tag HMAC.
 pub const FRAME_PQC_KEM_INIT_SIGNED: u8 = 0x26;
 pub const FRAME_PQC_KEM_RESP_SIGNED: u8 = 0x27;
+/// QKC_B → QKC_A (enlace **PQC**): el RESPONDEDOR pide resincronizar. Su lado
+/// DEC ha visto al iniciador cifrar con épocas que no tiene; como solo el
+/// iniciador puede mandar INIT, le manda su ventana (`payload = epoch_be(4)`,
+/// blob vacío) y el iniciador renegocia un bloque por encima de las dos.
+/// Mismas tres variantes que INIT/RESP (claro / HMAC / firmado) y misma
+/// política: bajo `require` una petición en claro se descarta. Un peer viejo
+/// que no conozca el kind lo ignora.
+pub const FRAME_PQC_RESYNC_REQ: u8 = 0x28;
+pub const FRAME_PQC_RESYNC_REQ_AUTH: u8 = 0x29;
+pub const FRAME_PQC_RESYNC_REQ_SIGNED: u8 = 0x2A;
 
 /// Valores del campo [`Frame::grade`] (byte RESERVED del prefijo).
 /// `0` = QKD-grade (todo el camino QKD; default), `1` = PQC-grade (≥1 salto PQC).

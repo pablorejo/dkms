@@ -42,7 +42,7 @@ use std::{
     time::Duration,
 };
 
-use common::crypto::link_mac::{self, TAG_INIT, TAG_LEN, TAG_RESP};
+use common::crypto::link_mac::{self, TAG_INIT, TAG_LEN, TAG_RESP, TAG_RESYNC};
 use common::crypto::pqc_sign::{self, SIGNATURE_LEN};
 use parking_lot::Mutex;
 // `tokio::time::Instant` y no `std`: es el mismo reloj en producción y el
@@ -51,7 +51,8 @@ use tokio::{sync::Notify, time::Instant};
 use tracing::{debug, info, warn};
 use wire::{
     Frame, FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED,
-    FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH, FRAME_PQC_KEM_RESP_SIGNED,
+    FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH, FRAME_PQC_KEM_RESP_SIGNED, FRAME_PQC_RESYNC_REQ,
+    FRAME_PQC_RESYNC_REQ_AUTH, FRAME_PQC_RESYNC_REQ_SIGNED,
 };
 use zeroize::Zeroizing;
 
@@ -130,6 +131,8 @@ pub struct PqcHandshake {
     resp_cache: Mutex<HashMap<u32, (Vec<u8>, Vec<u8>)>>,
     /// Último re-enlace, para el rate-limit de [`RELINK_MIN_INTERVAL`].
     last_relink: Mutex<Option<Instant>>,
+    /// Última petición de resync enviada (respondedor), mismo rate-limit.
+    last_resync_req: Mutex<Option<Instant>>,
     /// PSK del enlace para autenticar el handshake por HMAC (§Fase 5).
     /// `None` → sin PSK.
     psk: Option<Vec<u8>>,
@@ -141,6 +144,50 @@ pub struct PqcHandshake {
     auth: PqcAuth,
     /// Tamaño de clave en bits, atado en el MAC/firma (cierra el mismatch).
     key_size_bits: u32,
+}
+
+/// Qué mensaje de handshake se envía: fija el kind del frame (claro / HMAC /
+/// firmado) y el tag de dominio del MAC o la firma.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HsMsg {
+    /// Iniciador → respondedor: `época ‖ pubkey`.
+    Init,
+    /// Respondedor → iniciador: `época ‖ ciphertext`.
+    Resp,
+    /// Respondedor → iniciador: «cifras con épocas que no tengo; mi ventana
+    /// llega a `época`, renegocia por encima». Blob vacío.
+    ResyncReq,
+}
+
+impl HsMsg {
+    /// `(claro, hmac, firmado)`.
+    fn kinds(self) -> (u8, u8, u8) {
+        match self {
+            HsMsg::Init => (
+                FRAME_PQC_KEM_INIT,
+                FRAME_PQC_KEM_INIT_AUTH,
+                FRAME_PQC_KEM_INIT_SIGNED,
+            ),
+            HsMsg::Resp => (
+                FRAME_PQC_KEM_RESP,
+                FRAME_PQC_KEM_RESP_AUTH,
+                FRAME_PQC_KEM_RESP_SIGNED,
+            ),
+            HsMsg::ResyncReq => (
+                FRAME_PQC_RESYNC_REQ,
+                FRAME_PQC_RESYNC_REQ_AUTH,
+                FRAME_PQC_RESYNC_REQ_SIGNED,
+            ),
+        }
+    }
+
+    fn tag(self) -> &'static [u8] {
+        match self {
+            HsMsg::Init => TAG_INIT,
+            HsMsg::Resp => TAG_RESP,
+            HsMsg::ResyncReq => TAG_RESYNC,
+        }
+    }
 }
 
 /// Cómo llegó autenticado un frame de handshake, según su tipo.
@@ -198,6 +245,7 @@ impl PqcHandshake {
             rotations: AtomicU64::new(0),
             resp_cache: Mutex::new(HashMap::new()),
             last_relink: Mutex::new(None),
+            last_resync_req: Mutex::new(None),
             psk,
             sign_seed,
             peer_verify_key,
@@ -256,22 +304,9 @@ impl PqcHandshake {
     /// - `sign` + seed → 0x26/0x27 con `payload = época‖blob‖firma_MLDSA`.
     /// - `prefer`/`require` + psk → 0x23/0x24 con `payload = época‖blob‖tag_HMAC`.
     /// - resto → 0x21/0x22 en claro.
-    fn send_handshake(&self, is_init: bool, epoch: u32, blob: &[u8]) -> bool {
-        let (plain, hmac_kind, signed_kind, tag_kind) = if is_init {
-            (
-                FRAME_PQC_KEM_INIT,
-                FRAME_PQC_KEM_INIT_AUTH,
-                FRAME_PQC_KEM_INIT_SIGNED,
-                TAG_INIT,
-            )
-        } else {
-            (
-                FRAME_PQC_KEM_RESP,
-                FRAME_PQC_KEM_RESP_AUTH,
-                FRAME_PQC_KEM_RESP_SIGNED,
-                TAG_RESP,
-            )
-        };
+    fn send_handshake(&self, msg: HsMsg, epoch: u32, blob: &[u8]) -> bool {
+        let (plain, hmac_kind, signed_kind) = msg.kinds();
+        let tag_kind = msg.tag();
         let mut payload = Vec::with_capacity(4 + blob.len() + SIGNATURE_LEN);
         payload.extend_from_slice(&epoch.to_be_bytes());
         payload.extend_from_slice(blob);
@@ -454,24 +489,37 @@ impl PqcHandshake {
         if !self.is_initiator() {
             // El respondedor no puede renegociar —solo el lex-menor manda
             // INIT—, pero su lado DEC sí detecta cuando las ventanas se han
-            // separado. Sin esto la petición de resincronización se quedaría
-            // en un atómico que nadie lee y el operador no vería más que
-            // frames descartados. Si el enlace falla en los dos sentidos, el
-            // iniciador lo detectará por su cuenta y lo arreglará; si solo
-            // falla en este, hace falta intervención.
+            // separado, y puede PEDIRLO: manda un `FRAME_PQC_RESYNC_REQ` con
+            // su ventana y el iniciador renegocia por encima de las dos.
+            // Hasta 2026-08-30 aquí solo se logueaba, y una divergencia que
+            // viera solo este lado exigía reiniciar a mano.
             let me = self.clone();
             tokio::spawn(async move {
                 loop {
                     let peer_epoch = me.store.resync_requested().await;
+                    let mine = me.store.highest().unwrap_or(0);
+                    {
+                        let mut last = me.last_resync_req.lock();
+                        if let Some(prev) = *last {
+                            if prev.elapsed() < RELINK_MIN_INTERVAL {
+                                debug!(
+                                    peer = me.peer_id,
+                                    "qkc.pqc.resync_req omitido (demasiado seguido)"
+                                );
+                                continue;
+                            }
+                        }
+                        *last = Some(Instant::now());
+                    }
                     warn!(
                         me = me.my_id,
                         peer = me.peer_id,
                         peer_epoch,
                         mia = ?(me.store.lowest(), me.store.highest()),
-                        "qkc.pqc: el peer cifra con épocas que no tengo y este extremo es el \
-                         respondedor, así que no puede renegociar. Si el iniciador no lo \
-                         detecta también por su lado, el enlace no se recupera solo",
+                        "qkc.pqc: el peer cifra con épocas que no tengo; le pido que renegocie \
+                         por encima de mi ventana (resync_req)",
                     );
+                    me.send_handshake(HsMsg::ResyncReq, mine, &[]);
                 }
             });
             return;
@@ -753,7 +801,7 @@ impl PqcHandshake {
                 );
                 return false;
             }
-            self.send_handshake(true, epoch, &pubkey);
+            self.send_handshake(HsMsg::Init, epoch, &pubkey);
             attempts += 1;
             if attempts.is_multiple_of(20) {
                 debug!(
@@ -791,7 +839,7 @@ impl PqcHandshake {
         let mut stale = false;
         match cached {
             Some((pk, ct)) if pk == peer_pubkey => {
-                self.send_handshake(false, epoch, &ct);
+                self.send_handshake(HsMsg::Resp, epoch, &ct);
                 return;
             }
             Some(_) => {
@@ -827,7 +875,7 @@ impl PqcHandshake {
         self.resp_cache
             .lock()
             .insert(epoch, (peer_pubkey.to_vec(), encap.ciphertext.clone()));
-        self.send_handshake(false, epoch, &encap.ciphertext);
+        self.send_handshake(HsMsg::Resp, epoch, &encap.ciphertext);
     }
 
     /// Iniciador: llegó el RESP `época‖ciphertext` (`authed` = frame 0x24).
@@ -859,6 +907,38 @@ impl PqcHandshake {
             Ok(ss) => self.publish(epoch, ss),
             Err(e) => warn!(peer = self.peer_id, error = %e, "qkc.pqc: decap failed"),
         }
+    }
+
+    /// Iniciador: el respondedor pide renegociar por encima de `peer_epoch`
+    /// (su ventana). Pasa por [`Self::accept`] como cualquier otro mensaje de
+    /// handshake —bajo `require`/`sign` una petición sin autenticar se
+    /// descarta— y desemboca en el brazo de resync del bucle de rotación,
+    /// que es el único dueño de `establish`. En el respondedor no hace nada:
+    /// solo el lex-menor renegocia.
+    pub fn handle_resync_request(&self, payload: &[u8], recv: RecvAuth) {
+        let Some((peer_epoch, _blob)) = self.accept(TAG_RESYNC, payload, recv) else {
+            return;
+        };
+        if !self.is_initiator() {
+            debug!(
+                me = self.my_id,
+                peer = self.peer_id,
+                peer_epoch,
+                "qkc.pqc: petición de resync recibida en el respondedor; ignorada"
+            );
+            return;
+        }
+        info!(
+            me = self.my_id,
+            peer = self.peer_id,
+            peer_epoch,
+            mia = ?(self.store.lowest(), self.store.highest()),
+            "qkc.pqc: el respondedor pide resincronizar; renegocio por encima de su ventana",
+        );
+        // `request_resync` toma el 0 como "nada pendiente": una ventana que
+        // llega a 0 pide igual, y el re-enlace sube de todos modos por
+        // encima de la nuestra.
+        self.store.request_resync(peer_epoch.max(1));
     }
 }
 
@@ -1252,6 +1332,9 @@ mod tests {
                 match frame.kind {
                     FRAME_PQC_KEM_INIT => o.handle_init(&frame.payload, RecvAuth::Plain),
                     FRAME_PQC_KEM_RESP => o.handle_resp(&frame.payload, RecvAuth::Plain),
+                    FRAME_PQC_RESYNC_REQ => {
+                        o.handle_resync_request(&frame.payload, RecvAuth::Plain)
+                    }
                     _ => {}
                 }
             }
@@ -1371,5 +1454,63 @@ mod tests {
         assert_eq!(resp.store.highest(), Some(2));
         assert!(ini.pending_pk.lock().is_empty(), "sin keypairs colgando");
         assert_eq!(*ini.store.get(0).unwrap(), *resp.store.get(0).unwrap());
+    }
+
+    /// El respondedor no puede mandar INIT, pero sí PEDIR: su lado DEC ve al
+    /// iniciador cifrar con épocas que no tiene, manda 0x28 con su ventana y
+    /// el iniciador renegocia por encima de las dos. Hasta ahora solo lo
+    /// logueaba y una divergencia vista solo desde este lado exigía reinicio.
+    #[tokio::test(start_paused = true)]
+    async fn a_responder_resync_request_makes_the_initiator_relink() {
+        let (ini, resp, _t) = linked_pair(3600);
+        ini.spawn_rotation();
+        resp.spawn_rotation();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(ini.store.highest(), Some(2));
+        // Lo que hace el DEC del respondedor al no poder descifrar una época.
+        resp.store.request_resync(9);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let h = ini.store.highest().expect("épocas");
+        assert!(h > 2, "el iniciador renegoció un bloque nuevo: highest={h}");
+        assert_eq!(resp.store.highest(), Some(h));
+        assert_eq!(*ini.store.get(h).unwrap(), *resp.store.get(h).unwrap());
+        assert!(
+            ini.store.get(0).is_none(),
+            "la ventana vieja se podó tras el re-enlace"
+        );
+    }
+
+    /// La petición pasa por la misma política que INIT/RESP: bajo `require`
+    /// una en claro se descarta y una con el MAC del enlace llega al bucle.
+    #[tokio::test(start_paused = true)]
+    async fn a_resync_request_is_subject_to_the_handshake_policy() {
+        let ini = handshake_auth(1, 2, Some(PSK.to_vec()), PqcAuth::Require);
+        ini.handle_resync_request(&9u32.to_be_bytes(), RecvAuth::Plain);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), ini.store.resync_requested())
+                .await
+                .is_err(),
+            "en claro bajo require no vale"
+        );
+        ini.handle_resync_request(&authed(TAG_RESYNC, 9, 2, 1, &[]), RecvAuth::Hmac);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), ini.store.resync_requested())
+                .await
+                .expect("la autenticada llega"),
+            9
+        );
+    }
+
+    /// Solo el lex-menor renegocia: un respondedor que reciba una petición la
+    /// ignora en vez de intentar un INIT que rompería la invariante.
+    #[tokio::test(start_paused = true)]
+    async fn the_responder_ignores_an_incoming_resync_request() {
+        let resp = handshake(2, 1);
+        resp.handle_resync_request(&9u32.to_be_bytes(), RecvAuth::Plain);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), resp.store.resync_requested())
+                .await
+                .is_err()
+        );
     }
 }

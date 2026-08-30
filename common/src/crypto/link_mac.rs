@@ -36,6 +36,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub const TAG_INIT: &[u8] = b"QKCINIT";
 /// Etiqueta de dominio del `FRAME_PQC_KEM_RESP_AUTH`.
 pub const TAG_RESP: &[u8] = b"QKCRESP";
+/// Petición de resincronización del respondedor (`FRAME_PQC_RESYNC_REQ`).
+pub const TAG_RESYNC: &[u8] = b"QKCRESYNC";
 /// Etiqueta de dominio del `FRAME_KEY_IDS_NOTIFY_AUTH`.
 pub const TAG_NOTIFY: &[u8] = b"QKCNOTIFY";
 
