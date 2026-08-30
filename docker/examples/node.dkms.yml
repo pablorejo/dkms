@@ -29,5 +29,10 @@ peers:
 # nodos, sae-ca firma SAEs). Ruta configurable con certs_dir.
 # certs_dir: /config/certs
 
-# sae_bindings:                # fallback SAE->DKMS si la SDN no responde
-#   sae_1: dkms-1
+# SAEs que ESTE nodo sirve. No es opcional: el DKMS autoriza cada petición
+# ETSI-014 contra esta lista (fail-closed) y la anuncia a la SDN. Sin ella,
+# toda petición SAE recibe 404 UnknownSae.
+sae_bindings:
+  sae_1: dkms-1
+# sae_authorization: true      # false SOLO si la pertenencia SAE->DKMS es
+                               # puramente dinámica vía SDN (no recomendado)

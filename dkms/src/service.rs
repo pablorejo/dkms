@@ -82,7 +82,7 @@ use crate::{
             HDR_ACK_ENDPOINT, HDR_INCARNATION, HDR_KEY_ID, HDR_KEY_SIZE_BITS, HDR_MSG_TYPE,
             HDR_SAE_ORIGIN, MSG_TYPE_DKMS_BUFFER,
         },
-        OrrClient, QkcClient, SdnClient,
+        OrrClient, SdnClient,
     },
     state::{buffer::TransportKey, BufferPool, PendingStore},
     token_bucket::{compute_cost, SaeBuckets},
@@ -168,7 +168,6 @@ pub struct DkmsService {
     pub peers: Arc<PeerRegistry>,
 
     pub sdn: Option<Arc<SdnClient>>,
-    pub qkc: Option<Arc<QkcClient>>,
     /// Cliente gRPC al ORR co-localizado. Si está presente, el DKMS
     /// puede usar el transporte ORR↔QKC (binario sobre TCP) como
     /// alternativa al HTTP/2 ETSI 020 entre DKMSs. Se cablea como
@@ -231,7 +230,6 @@ impl DkmsService {
         sae_binding: Arc<SaeBindingCache>,
         peers: Arc<PeerRegistry>,
         sdn: Option<Arc<SdnClient>>,
-        qkc: Option<Arc<QkcClient>>,
         orr: Option<Arc<OrrClient>>,
         peer_client: Option<Arc<PeerHttpClient>>,
     ) -> Self {
@@ -252,7 +250,6 @@ impl DkmsService {
             sae_binding,
             peers,
             sdn,
-            qkc,
             orr,
             peer_client,
             generator: None,
@@ -988,12 +985,18 @@ impl DkmsService {
         // buffer_enc). Si llega algo legacy con msg_type vacío,
         // lo descartamos con un WARN para no ensuciar la pending store.
         let key_id = app.get(HDR_KEY_ID).cloned().unwrap_or_default();
-        warn!(
-            msg_type,
-            key_id,
-            "orr delivery con msg_type no reconocido — descartado; \
-             SAE-keys ya no viajan por ORR (van por HTTP ETSI 020)"
-        );
+        static UNKNOWN_MSG_TYPE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let n = UNKNOWN_MSG_TYPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if common::log_throttle::nth_is_loud(n) {
+            warn!(
+                msg_type,
+                key_id,
+                discarded = n + 1,
+                "orr delivery con msg_type no reconocido — descartado; \
+                 SAE-keys ya no viajan por ORR (van por HTTP ETSI 020)"
+            );
+        }
         Ok(())
     }
 
@@ -1060,20 +1063,37 @@ impl DkmsService {
                 return Ok(());
             }
             Err(crate::e2e::E2eError::Replay(e)) => {
+                // Los dos contadores van a `generator.state`; el log habla en
+                // las potencias de dos — un secreto divergente es CADA clave.
                 self.flow.recv_replayed(&source_dkms, 1);
-                warn!(source = %source_dkms, key_id = %key_id_str, error = %e,
-                      "e2e: clave repetida, descartada");
+                let n = self
+                    .flow
+                    .peer(&source_dkms)
+                    .recv_replayed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n.saturating_sub(1)) {
+                    warn!(source = %source_dkms, key_id = %key_id_str, error = %e,
+                          replayed = n, "e2e: clave repetida, descartada");
+                }
                 return Ok(());
             }
             Err(e) => {
                 self.flow.recv_corrupt(&source_dkms, 1);
-                warn!(
-                    source = %source_dkms,
-                    key_id = %key_id_str,
-                    error = %e,
-                    "e2e: clave de transporte NO verificable: la descarto sin acusar recibo. \
-                     Alterada en tránsito, cabecera manipulada o secreto e2e divergente",
-                );
+                let n = self
+                    .flow
+                    .peer(&source_dkms)
+                    .recv_corrupt
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n.saturating_sub(1)) {
+                    warn!(
+                        source = %source_dkms,
+                        key_id = %key_id_str,
+                        error = %e,
+                        corrupt = n,
+                        "e2e: clave de transporte NO verificable: la descarto sin acusar recibo. \
+                         Alterada en tránsito, cabecera manipulada o secreto e2e divergente",
+                    );
+                }
                 return Ok(());
             }
         };
@@ -1095,8 +1115,14 @@ impl DkmsService {
         // source expiraba, y como su métrica de fill incluía
         // `enc + ack_pending` quedaba atascado en `Saturated` con
         // SDN-rate=0. Ahora siempre push + siempre ACK; el RAM se
-        // acota por la rate del SDN y los SAEs drenan vía pop.
-        let _ = buf.dec.try_push(key);
+        // acota por la rate del SDN y los SAEs drenan vía pop. Si algún día
+        // vuelve a rechazar, que se vea en `generator.state`.
+        if buf.dec.try_push(key).is_err() {
+            self.flow
+                .peer(&source_dkms)
+                .dec_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Contadores del camino de claves. `recv` es la mitad del
         // diagnóstico que faltaba: sin él, "no le llegan mis claves" y "no

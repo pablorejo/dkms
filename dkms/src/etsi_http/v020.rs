@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use etsi::v020::{Etsi020ExtKeyAckContainer, Etsi020ExtKeyContainer, Etsi020VersionContainer};
 
@@ -56,7 +56,13 @@ async fn handle_ext_keys_ack(
     // segura del socket TCP plano heredado; hoy los ACKs salientes aún usan el
     // socket, así que esta ruta solo actúa si un peer decide usarla.
     let matched = svc.handle_incoming_ack(&peer.node_id, &ack.key_ids);
-    info!(
+    // Un lote cada 50 ms por peer bajo carga: contador en `generator.state`
+    // (`ack_recv`), línea a debug.
+    svc.flow
+        .peer(peer.node_id.as_str())
+        .ack_recv
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    debug!(
         peer = %peer.node_id,
         ack_status = ?ack.ack_status,
         keys = ack.key_ids.len(),

@@ -184,8 +184,9 @@ impl DemandRegistry {
     }
 
     /// Drop entries older than `max_age_ms` relative to `now_ms`.
-    /// Returns the number of entries evicted. Used by a future
-    /// reaper task; not wired yet.
+    /// Returns the number of entries evicted. Called from the presence
+    /// sweeper (`service.rs`) every `presence_ttl_secs / 3` with
+    /// `demand_ttl_secs` as the age.
     pub fn evict_older_than(&self, now_ms: i64, max_age_ms: i64) -> usize {
         let cutoff = now_ms.saturating_sub(max_age_ms);
         let stale: Vec<_> = self

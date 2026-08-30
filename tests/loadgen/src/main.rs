@@ -434,7 +434,7 @@ fn main() -> Result<()> {
     // Provider con ML-DSA + clásicos: es lo que permite presentar un cert de
     // cliente post-cuántico. Sin esto, `Identity::from_pem` con una clave
     // ML-DSA falla con "failed to parse private key as RSA, ECDSA, or EdDSA".
-    common::tls_pqc::install_process_default();
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     if args.roundtrip {
         let rt = tokio::runtime::Builder::new_multi_thread()

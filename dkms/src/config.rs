@@ -131,7 +131,11 @@ pub struct TlsCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SouthboundCfg {
     pub sdn_endpoint: String,
-    pub qkc_endpoint: String,
+    /// **Ya no se usa.** El DKMS no habla con el QKC: el material de
+    /// transporte entra por el ORR. Se admite para que los TOML antiguos
+    /// sigan parseando; si está, se avisa y se ignora.
+    #[serde(default)]
+    pub qkc_endpoint: Option<String>,
 
     /// HTTP admin de la SDN (p. ej. `http://10.0.0.100:19002`) al que me
     /// anuncio para que me incluya en su topología. Puerto distinto del de
@@ -308,6 +312,9 @@ impl Default for PendingCfg {
     }
 }
 
+/// `#[serde(default)]` a nivel de struct: un `[sae]` parcial en el TOML (el
+/// renderer emite solo `enforce_authorization`) completa el resto con
+/// `Default`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SaeCfg {

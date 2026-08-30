@@ -109,8 +109,10 @@ nodo ML-DSA-65) y, opt-in, el plano de control (SDN, announce) y el handshake
 PQC QKC↔QKC. El resto **depende de que estos puertos vivan en red confiable**:
 
 - **`grpc` del DKMS (20007)**: plano de operador SIN auth; su RPC `Drain` borra
-  todos los buffers de una llamada. Bindea a **localhost por defecto**; si lo
-  abres, firewaléalo a la red interna. Nunca entre instituciones.
+  todos los buffers de una llamada. Se renderiza en **`127.0.0.1` siempre**,
+  aunque `listen_ip` sea `0.0.0.0`; solo `control_addr: <ip>` en el `node.yml`
+  lo abre, y entonces el DKMS lo avisa al arrancar y toca firewalearlo a la red
+  interna. Nunca entre instituciones.
 - **`ack` del DKMS (20009)**: TCP plano sin auth hoy (migración a ETSI-020
   pendiente). Ábrelo solo entre los DKMS que se enlazan.
 - **`local`/`admin` del QKC**: intra-institución. El `grpc` del ORR (20003) va
@@ -485,6 +487,7 @@ peer_grpc_addrs:
 | `default_max_hops` | default 0 (passthrough): el material ya va sellado por el DKMS. `1`, `≥2` o `-1` añaden cebolla ORR↔ORR encima (privacidad de camino) y meten el bootstrap ORR↔ORR en el camino crítico. |
 | `grpc_tls` | default `true`: mTLS en su gRPC con `certs/<orr_id>.crt/.key` + `net-ca.crt`. `false` sólo si DKMS y ORR comparten máquina o red interna (y entonces `orr_tls: false` en el DKMS). |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
+| `control_addr` | **no lo pongas** salvo que sepas por qué: abre el gRPC de operador (20007, `Drain` sin auth) en esa IP en vez de `127.0.0.1`. |
 
 **Paso 4 — arrancar y verificar:**
 
@@ -578,7 +581,8 @@ peers:
 | `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
 | `transport_e2e` | **no hace falta tocarlo**. El material de transporte sale sellado extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`): ML-KEM-768 acordado por el mismo mTLS del ETSI-020 (20006), AES-256-GCM por clave, rotación cada 3600 s. Lo único que exige es lo que ya exigía el ETSI-020: que los DKMS se alcancen entre sí en 20006 con certs de `net-ca`. En `generator.state`, `e2e_epoch=none` sostenido es que ese acuerdo no llega. |
-| `sae_bindings` | mapeo local `sae→dkms` de respaldo si la SDN no responde. Opcional. |
+| `sae_bindings` | **obligatorio**: los SAE que este nodo sirve (`sae_id: <node_id>`). Es la lista contra la que se autoriza cada petición ETSI-014 (fail-closed) y la que se anuncia a la SDN. Sin ella toda petición SAE recibe 404 `UnknownSae`; el render y el arranque lo avisan. |
+| `sae_authorization` | default `true`. `false` desactiva esa autorización (cualquier cert de `sae-ca` puede pedir claves en nombre de cualquier SAE) — solo si la pertenencia SAE→DKMS es puramente dinámica vía SDN. |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 
 **Paso 4 — arrancar y verificar:**

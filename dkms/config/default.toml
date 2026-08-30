@@ -27,7 +27,6 @@ control_plane_ca = "/etc/dkms/tls/net-ca.crt"
 
 [southbound]
 sdn_endpoint        = "https://sdn:50053"
-qkc_endpoint        = "https://qkc:50051"
 connect_timeout_ms  = 1500
 rpc_timeout_ms      = 3000
 

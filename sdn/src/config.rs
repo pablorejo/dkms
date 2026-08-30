@@ -34,6 +34,16 @@ pub struct SdnConfig {
     #[serde(default = "default_presence_ttl")]
     pub presence_ttl_secs: u64,
 
+    /// Cuánto vive un informe de demanda (`POST /demand`) sin renovarse antes
+    /// de retirarlo del registro. Sin esto una entrada era eterna: un DKMS que
+    /// cambiaba el grado con el que reporta a un peer dejaba la del grado
+    /// antiguo como comodity fantasma (`dup_pairs` en `mcmcf.solve`). Por
+    /// defecto el mismo TTL de presencia. Compara con el `timestamp_ms` que
+    /// pone el DKMS, así que asume relojes razonablemente en hora (lo mismo
+    /// que ya exige el TLS).
+    #[serde(default)]
+    pub demand_ttl_secs: Option<u64>,
+
     /// Qué mecanismo produce las rates de `/rate`: `num` (precios α-fair,
     /// default), `maxmin` (waterfilling exacto) o `lp` (el MCMCF-λ clásico,
     /// como oráculo/estudio). La env `SDN_RATE_ALLOCATOR` lo pisa, igual que

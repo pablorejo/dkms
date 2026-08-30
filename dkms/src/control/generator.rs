@@ -430,6 +430,8 @@ impl Generator {
                     recv_corrupt = g(&f.recv_corrupt),
                     recv_no_epoch = g(&f.recv_no_epoch),
                     recv_replayed = g(&f.recv_replayed),
+                    dec_dropped = g(&f.dec_dropped),
+                    ack_recv = g(&f.ack_recv),
                     // Época e2e con la que le sellamos, y cuántas guardamos de
                     // él. `none` sostenido = el acuerdo de clave no cuaja.
                     e2e_epoch = self

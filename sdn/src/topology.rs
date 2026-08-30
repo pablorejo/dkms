@@ -17,7 +17,7 @@ use std::{
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::{Result, SdnError};
 
@@ -213,6 +213,31 @@ pub struct DkmsPeer {
     pub endpoint: String,
 }
 
+/// Resultado de un `upsert_*` de ancla. `Rejected` es distinto de
+/// `Unchanged` a propósito: un anuncio repetido no cambia nada y está bien;
+/// uno rechazado (segundo ORR/DKMS sobre el mismo QKC) tiene que volver al
+/// anunciante como `accepted = false` para que siga reintentando.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upsert {
+    Rejected,
+    Unchanged,
+    Changed,
+}
+
+impl Upsert {
+    pub fn changed(self) -> bool {
+        matches!(self, Upsert::Changed)
+    }
+
+    fn from_changed(changed: bool) -> Self {
+        if changed {
+            Upsert::Changed
+        } else {
+            Upsert::Unchanged
+        }
+    }
+}
+
 /// Result of an ORR/DKMS announcement. `accepted == false` is not an error: it
 /// means the anchor (the QKC of an ORR, the ORR of a DKMS) has not registered
 /// yet, so the announcer should keep retrying.
@@ -220,6 +245,11 @@ pub struct DkmsPeer {
 pub struct AnnounceOutcome {
     pub id: String,
     pub accepted: bool,
+    /// Por qué no se aceptó, cuando no es simplemente que falte el ancla
+    /// (p. ej. el QKC ya tiene otro ORR). Informativo: el anunciante
+    /// reintenta igual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Whether the topology changed (and therefore the version was bumped).
     pub changed: bool,
     /// Id of the anchor we are still waiting for, when `accepted` is false.
@@ -630,6 +660,40 @@ impl Topology {
 // All mutating methods return whether anything actually changed, so writers
 // can decide whether to bump the version / re-publish.
 
+/// Un segundo ORR/DKMS anclándose a un QKC ocupado se rechaza en cada
+/// anuncio, y el anuncio es también el heartbeat (cada 30 s, para siempre si
+/// la config está mal). Se avisa una vez por tripla y el resto va a `debug`.
+/// Vive fuera de [`Topology`] a propósito: el snapshot se compara entero para
+/// detectar cambios, y un conjunto "ya avisado" dentro haría subir la versión.
+fn warn_anchor_conflict_once(kind: &str, qkc: &str, holder: &str, rejected: &str) {
+    use std::{
+        collections::HashSet,
+        sync::{Mutex, OnceLock},
+    };
+    static SEEN: OnceLock<Mutex<HashSet<(String, String, String)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = seen.lock().unwrap_or_else(|e| e.into_inner()).insert((
+        qkc.to_owned(),
+        holder.to_owned(),
+        rejected.to_owned(),
+    ));
+    if first {
+        warn!(
+            kind,
+            qkc,
+            holder,
+            rejected,
+            "two {kind}s on the same QKC: the model is one per QKC and the index is 1:1. The \
+             second is rejected (it will keep retrying) — give each QKC its own {kind}",
+        );
+    } else {
+        debug!(
+            kind,
+            qkc, holder, rejected, "anchor conflict, still rejecting"
+        );
+    }
+}
+
 impl Topology {
     pub fn upsert_qkc(&mut self, qkc: Qkc) -> bool {
         let key = qkc.id.clone();
@@ -639,12 +703,25 @@ impl Topology {
         changed
     }
 
-    pub fn upsert_orr(&mut self, orr: Orr) -> bool {
+    pub fn upsert_orr(&mut self, orr: Orr) -> Upsert {
         if !self.qkcs.contains_key(&orr.qkc_id) {
             warn!(orr=%orr.id, qkc=%orr.qkc_id, "ORR references unknown QKC; skipping");
-            return false;
+            return Upsert::Rejected;
         }
         let key = orr.id.clone();
+        // `orr_by_qkc` es 1:1. Que dos ORR cuelguen del mismo QKC no lo
+        // soporta el modelo, y con "gana el último" fallaba en silencio: el
+        // desplazado dejaba de ser resoluble por su QKC y el material salía
+        // cifrado para el ORR equivocado (medido el 2026-08-20: `recv_corrupt`
+        // al 100 % con la topología perfecta). El segundo se rechaza — antes
+        // de tocar nada — igual que un ancla ausente: el anunciante reintenta
+        // y entra si el primero caduca o se mueve.
+        if let Some(other) = self.orr_by_qkc.get(&orr.qkc_id) {
+            if other != &key {
+                warn_anchor_conflict_once("ORR", &orr.qkc_id, other, &key);
+                return Upsert::Rejected;
+            }
+        }
         let changed = self.orrs.get(&key) != Some(&orr);
         // Si se ha movido de QKC, el de origen se quedó sin ORR y no puede
         // seguir apuntando a este. `orr_by_qkc` es lo que `GetOrrPath` usa
@@ -657,35 +734,26 @@ impl Topology {
                 self.orr_by_qkc.remove(&old);
             }
         }
-        // `orr_by_qkc` es 1:1 y se queda con el último. Que dos ORR cuelguen
-        // del mismo QKC no lo soporta el modelo, y falla en silencio: el
-        // desplazado deja de ser resoluble por su QKC, así que el material
-        // sale cifrado para el ORR equivocado. Medido el 2026-08-20 al
-        // re-anclar un ORR sobre un QKC ocupado — `recv_corrupt` al 100 % en
-        // todo lo que enviaba un DKMS, mientras lo que recibía estaba bien y
-        // la topología se veía perfecta.
-        if let Some(other) = self.orr_by_qkc.get(&orr.qkc_id) {
-            if other != &key {
-                warn!(
-                    qkc = %orr.qkc_id, displaced = %other, new = %key,
-                    "two ORRs on the same QKC: the index is 1:1 and keeps the last one. The \
-                     displaced ORR stops being resolvable by its QKC and its DKMS will get key \
-                     material encrypted for the wrong ORR — give each QKC its own ORR",
-                );
-            }
-        }
         self.orr_by_qkc.insert(orr.qkc_id.clone(), key.clone());
         self.orrs.insert(key, orr);
-        changed
+        Upsert::from_changed(changed)
     }
 
-    pub fn upsert_dkms(&mut self, dkms: Dkms) -> bool {
+    pub fn upsert_dkms(&mut self, dkms: Dkms) -> Upsert {
         let Some(orr) = self.orrs.get(&dkms.orr_id) else {
             warn!(dkms=%dkms.id, orr=%dkms.orr_id, "DKMS references unknown ORR; skipping");
-            return false;
+            return Upsert::Rejected;
         };
         let qkc_id = orr.qkc_id.clone();
         let key = dkms.id.clone();
+        // Mismo modelo 1:1 que `upsert_orr`: el segundo DKMS que resuelve al
+        // mismo QKC se rechaza antes de tocar los índices.
+        if let Some(other) = self.dkms_by_qkc.get(&qkc_id) {
+            if other != &key {
+                warn_anchor_conflict_once("DKMS", &qkc_id, other, &key);
+                return Upsert::Rejected;
+            }
+        }
         let changed = self.dkms.get(&key) != Some(&dkms);
         // El índice va por el QKC del ORR del que cuelga, así que cambiar de
         // ORR puede cambiar de QKC. Igual que en `upsert_orr`: el de origen se
@@ -700,21 +768,9 @@ impl Topology {
                 self.dkms_by_qkc.remove(&old);
             }
         }
-        // El índice es 1:1 por QKC: si cuelgan varios DKMS del mismo, gana el
-        // último en anunciarse y el otro deja de ser resoluble por su QKC.
-        // Mismo fallo silencioso que en `upsert_orr`.
-        if let Some(other) = self.dkms_by_qkc.get(&qkc_id) {
-            if other != &key {
-                warn!(
-                    qkc = %qkc_id, displaced = %other, new = %key,
-                    "two DKMS resolve to the same QKC: the index is 1:1 and keeps the last one. \
-                     The displaced one stops being reachable through it",
-                );
-            }
-        }
         self.dkms_by_qkc.insert(qkc_id, key.clone());
         self.dkms.insert(key, dkms);
-        changed
+        Upsert::from_changed(changed)
     }
 
     pub fn upsert_sae(&mut self, sae: Sae) -> bool {
@@ -1076,27 +1132,42 @@ impl TopologyStore {
             ..Default::default()
         };
         let mut accepted = false;
+        let mut occupied = false;
         let changed = self.mutate(|t| {
             if !t.qkcs.contains_key(&reg.qkc_id) {
                 return false;
             }
-            accepted = true;
             // Keep the synthetic host id if we already had one, so a heartbeat
             // does not look like a change.
             let host = HostEndpoint {
                 id: t.orrs.get(&reg.id).map_or(reg.host.id, |o| o.host.id),
                 ..reg.host.clone()
             };
-            t.upsert_orr(Orr {
+            match t.upsert_orr(Orr {
                 id: reg.id.clone(),
                 host,
                 qkc_id: reg.qkc_id.clone(),
-            })
+            }) {
+                Upsert::Rejected => {
+                    occupied = true;
+                    false
+                }
+                r => {
+                    accepted = true;
+                    r.changed()
+                }
+            }
         });
         out.accepted = accepted;
         out.changed = changed;
         if !accepted {
             out.waiting_for = Some(reg.qkc_id.clone());
+            if occupied {
+                out.reason = Some(format!(
+                    "QKC {} ya tiene otro ORR anclado; el modelo es uno por QKC",
+                    reg.qkc_id
+                ));
+            }
         }
         out
     }
@@ -1109,24 +1180,31 @@ impl TopologyStore {
             ..Default::default()
         };
         let mut accepted = false;
+        let mut occupied = false;
         let changed = self.mutate(|t| {
             if !t.orrs.contains_key(&reg.orr_id) {
                 return false;
             }
-            accepted = true;
             let existing = t.dkms.get(&reg.id);
             let host = HostEndpoint {
                 id: existing.map_or(reg.host.id, |d| d.host.id),
                 ..reg.host.clone()
             };
             let tls_id = existing.and_then(|d| d.tls_id);
-            let mut changed = t.upsert_dkms(Dkms {
+            let mut changed = match t.upsert_dkms(Dkms {
                 id: reg.id.clone(),
                 host,
                 peer_addr: reg.peer_addr.clone(),
                 tls_id,
                 orr_id: reg.orr_id.clone(),
-            });
+            }) {
+                Upsert::Rejected => {
+                    occupied = true;
+                    return false;
+                }
+                r => r.changed(),
+            };
+            accepted = true;
             // Los SAE van después del DKMS a propósito: `upsert_sae` exige que
             // su DKMS exista, y acabamos de meterlo.
             for sae_id in &reg.saes {
@@ -1141,6 +1219,12 @@ impl TopologyStore {
         out.changed = changed;
         if !accepted {
             out.waiting_for = Some(reg.orr_id.clone());
+            if occupied {
+                out.reason = Some(format!(
+                    "el QKC del ORR {} ya tiene otro DKMS; el modelo es uno por QKC",
+                    reg.orr_id
+                ));
+            }
         }
         out
     }
@@ -1703,14 +1787,26 @@ mod tests {
     #[test]
     fn update_sae_rebinds_to_target_by_ip_port() {
         let mut t = make_topo();
-        // Second DKMS, anchored to same ORR for simplicity.
-        t.upsert_dkms(Dkms {
-            id: "d2".into(),
-            host: dummy_host(22, 9202),
-            peer_addr: None,
-            tls_id: None,
-            orr_id: "o1".into(),
-        });
+        // Second DKMS behind its own ORR on QKC "2": the model is one ORR and
+        // one DKMS per QKC, so sharing o1 would be rejected.
+        assert_eq!(
+            t.upsert_orr(Orr {
+                id: "o2".into(),
+                host: dummy_host(12, 9102),
+                qkc_id: "2".into(),
+            }),
+            Upsert::Changed
+        );
+        assert_eq!(
+            t.upsert_dkms(Dkms {
+                id: "d2".into(),
+                host: dummy_host(22, 9202),
+                peer_addr: None,
+                tls_id: None,
+                orr_id: "o2".into(),
+            }),
+            Upsert::Changed
+        );
         let store = TopologyStore::new(t);
         let sae = store
             .update_sae("sae-a", None, Some(("10.0.0.22", 9202)))
@@ -2103,6 +2199,80 @@ mod tests {
         // Y la arista conserva el valor del que llegó primero.
         let meta = store.load().edge("1", "2").cloned().unwrap();
         assert_eq!(meta.r0_keys_per_second, 2000.0);
+    }
+
+    /// Un QKC tiene un ORR y un DKMS. El segundo que se ancla se rechaza — y
+    /// vuelve como `accepted = false`, para que siga reintentando — en vez de
+    /// desplazar al primero en silencio: así el material salía cifrado para
+    /// el ORR equivocado con la topología perfecta (medido 2026-08-20).
+    #[test]
+    fn a_second_orr_on_an_occupied_qkc_is_rejected_not_swapped_in() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        let first = OrrAnnounce {
+            id: "orr_1".into(),
+            host: dummy_host(201, 20003),
+            qkc_id: "1".into(),
+        };
+        let second = OrrAnnounce {
+            id: "orr_9".into(),
+            host: dummy_host(209, 20003),
+            qkc_id: "1".into(),
+        };
+        assert!(store.announce_orr(&first).accepted);
+        let version = store.load().version;
+
+        let out = store.announce_orr(&second);
+        assert!(!out.accepted && !out.changed);
+        assert!(
+            out.reason.as_deref().unwrap_or("").contains("otro ORR"),
+            "el rechazo tiene que decir por qué: {:?}",
+            out.reason
+        );
+        let t = store.load();
+        assert_eq!(t.orr_by_qkc.get("1").map(String::as_str), Some("orr_1"));
+        assert!(!t.orrs.contains_key("orr_9"), "el rechazado no entra");
+        assert_eq!(t.version, version, "un rechazo no sube la versión");
+
+        // El primero sigue latiendo sin novedad, y el segundo entra en cuanto
+        // el QKC queda libre.
+        let again = store.announce_orr(&first);
+        assert!(again.accepted && !again.changed);
+        store.delete_orr("orr_1").unwrap();
+        assert!(store.announce_orr(&second).accepted);
+        assert_eq!(
+            store.load().orr_by_qkc.get("1").map(String::as_str),
+            Some("orr_9")
+        );
+    }
+
+    #[test]
+    fn a_second_dkms_behind_the_same_qkc_is_rejected_not_swapped_in() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        assert!(
+            store
+                .announce_orr(&OrrAnnounce {
+                    id: "orr_1".into(),
+                    host: dummy_host(201, 20003),
+                    qkc_id: "1".into(),
+                })
+                .accepted
+        );
+        let dkms = |id: &str, hid: i64| DkmsAnnounce {
+            id: id.into(),
+            host: dummy_host(hid, 20005),
+            peer_addr: Some(format!("10.0.0.{hid}:20006")),
+            orr_id: "orr_1".into(),
+            saes: vec![],
+        };
+        assert!(store.announce_dkms(&dkms("dkms-1", 301)).accepted);
+        let out = store.announce_dkms(&dkms("dkms-9", 309));
+        assert!(!out.accepted && !out.changed);
+        assert!(out.reason.is_some());
+        let t = store.load();
+        assert_eq!(t.dkms_by_qkc.get("1").map(String::as_str), Some("dkms-1"));
+        assert!(!t.dkms.contains_key("dkms-9"));
     }
 
     #[test]

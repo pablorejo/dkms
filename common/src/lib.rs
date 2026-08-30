@@ -17,6 +17,7 @@ pub mod error;
 pub mod http;
 pub mod ids;
 pub mod ipc;
+pub mod log_throttle;
 pub mod logging;
 pub mod metrics;
 pub mod net;

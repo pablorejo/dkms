@@ -236,11 +236,28 @@ impl SdnService {
         let period = Duration::from_secs((ttl_secs / 3).max(1));
         let presence = self.presence.clone();
         let topology = self.topology.clone();
+        // El registro de demanda caduca en el mismo barrido: una entrada que
+        // nadie renueva es una comodity fantasma para el solver.
+        let demand = self.demand_registry.clone();
+        let demand_ttl_ms =
+            i64::try_from(self.cfg.demand_ttl_secs.unwrap_or(ttl_secs) * 1000).unwrap_or(i64::MAX);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(period);
             tick.tick().await; // el primero es inmediato
             loop {
                 tick.tick().await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let evicted = demand.evict_older_than(now_ms, demand_ttl_ms);
+                if evicted > 0 {
+                    info!(
+                        evicted,
+                        ttl_ms = demand_ttl_ms,
+                        "demand: informes sin renovar retirados del registro"
+                    );
+                }
                 for (kind, id) in presence.take_expired(ttl) {
                     let res = match kind {
                         // delete_qkc ya hace la cascada del grafo: quita el
@@ -655,6 +672,7 @@ pub(crate) mod tests {
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
                 presence_ttl_secs: 90,
+                demand_ttl_secs: None,
                 rate_allocator: "lp".into(),
                 num_alpha: 1.0,
                 num_gamma: 0.2,

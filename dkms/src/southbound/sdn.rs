@@ -23,7 +23,7 @@ use common::ids::NodeId;
 use common::proto::{
     common::v1::NodeId as ProtoNodeId,
     sdn::v1::{
-        sdn_control_client::SdnControlClient, ComputePathRequest, ComputePathResponse, DkmsMetric,
+        sdn_control_client::SdnControlClient, ComputePathRequest, ComputePathResponse,
         GetSaeBindingRequest, GetSaeBindingResponse, PathPolicy, StreamTopologyRequest,
         TopologyEvent,
     },
@@ -120,19 +120,5 @@ impl SdnClient {
             .map_err(|s| DkmsError::SdnUnreachable(anyhow!(s)))?
             .into_inner();
         Ok(stream)
-    }
-
-    /// Push de una métrica de delivery al SDN (informativo, fire-and-forget).
-    pub async fn report_metric(&self, metric: DkmsMetric) -> Result<()> {
-        let mut c = self.client();
-        // ReportDkmsMetrics es un stream cliente; para una métrica suelta
-        // abrimos un stream de un solo elemento.
-        let stream = tokio_stream::once(metric);
-        let req = tonic::Request::new(stream);
-        tokio::time::timeout(self.rpc_timeout, c.report_dkms_metrics(req))
-            .await
-            .map_err(|_| DkmsError::SdnUnreachable(anyhow!("report_metric timeout")))?
-            .map_err(|s| DkmsError::SdnUnreachable(anyhow!(s)))?;
-        Ok(())
     }
 }

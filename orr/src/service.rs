@@ -701,13 +701,21 @@ impl OrrService {
         let ms = match self.peers.master_for_epoch(&from, epoch_id) {
             Some(ms) => ms,
             None => {
-                warn!(
-                    from = %from,
-                    epoch_id,
-                    latest = ?self.peers.latest_epoch_for(&from),
-                    "orr.incoming master_secret missing for epoch (drop)",
-                );
-                OrrStats::bump(&self.stats.dropped_no_secret);
+                // Es cada frame mientras dure: el re-bootstrap que dispara ya
+                // va limitado, el log habla en las potencias de dos.
+                let n = self
+                    .stats
+                    .dropped_no_secret
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    warn!(
+                        from = %from,
+                        epoch_id,
+                        latest = ?self.peers.latest_epoch_for(&from),
+                        dropped = n + 1,
+                        "orr.incoming master_secret missing for epoch (drop)",
+                    );
+                }
                 self.trigger_passive_rebootstrap(&from);
                 return Ok(());
             }
@@ -735,8 +743,13 @@ impl OrrService {
             .onion_replay
             .check(&header.from, header.session, header.counter)
         {
-            warn!(from = %header.from, error = %e, "orr.onion replay descartado");
-            OrrStats::bump(&self.stats.replay_dropped);
+            let n = self
+                .stats
+                .replay_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(from = %header.from, error = %e, dropped = n + 1, "orr.onion replay descartado");
+            }
             return Ok(());
         }
         match peeled {
@@ -808,7 +821,7 @@ impl OrrService {
     // ─── delivery helpers ──────────────────────────────────────────────
 
     fn broadcast_self(&self, payload: Vec<u8>, app_header: BTreeMap<String, String>) {
-        let _ = self.deliveries_tx.send(DeliveredMessage {
+        let sent = self.deliveries_tx.send(DeliveredMessage {
             origin: Some(NodeId {
                 value: self.cfg.orr_id.clone(),
             }),
@@ -820,6 +833,10 @@ impl OrrService {
             received_at_unix_ms: now_unix_ms(),
             pqc_decapsulated: false,
         });
+        if sent.is_err() {
+            // Sin suscriptor no hay a quién entregar: se pierde, y se cuenta.
+            OrrStats::bump(&self.stats.delivery_no_subscriber);
+        }
     }
 
     fn broadcast_delivery(

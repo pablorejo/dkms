@@ -135,7 +135,7 @@ pub struct OrrConfig {
     /// MITM aunque la identidad ML-KEM sea efímera. Solo config local; la clave
     /// pública correspondiente se reparte a los peers como su `peer_verify_keys`.
     #[serde(default)]
-    pub sign_secret_seed: Option<String>,
+    pub sign_secret_seed: Option<common::config::SecretString>,
 
     /// Mapa `orr_id -> base64(ML-DSA verifying key)` de los peers, para
     /// verificar la firma de su anuncio de pubkey. Si falta la de un peer, su

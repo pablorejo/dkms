@@ -26,7 +26,7 @@ use dkms::{
     peer_client::PeerHttpClient,
     sae_binding::{SaeBindingCache, SaeResolver, SdnSaeResolver, StaticSaeResolver},
     service::DkmsService,
-    southbound::{OrrClient, QkcClient, SdnClient, SdnHttpClient},
+    southbound::{OrrClient, SdnClient, SdnHttpClient},
     state::{BufferPool, PendingStore},
     token_bucket::SaeBuckets,
 };
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
     // Provider PQC (ML-DSA + clásicos) como default del proceso: así reqwest
     // (peer_client, announcers) y tonic pueden cargar/verificar certs ML-DSA,
     // no solo `common::tls`. Idempotente. Ver common::tls_pqc.
-    let _ = common::tls_pqc::install_process_default();
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     let mut cfg: DkmsConfig = common::config::load_config("dkms")?;
     // El gRPC hacia el ORR va con mTLS por defecto (`southbound.orr_tls`):
@@ -157,6 +157,19 @@ async fn main() -> Result<()> {
     }
 
     // ─── Estado ───────────────────────────────────────────────────────
+    // Fail-closed con la lista vacía es "no sirvo a nadie": una instalación
+    // sin `sae_bindings` devolvía 404 a todo SAE y no lo decía hasta la
+    // primera petición. Se avisa aquí, donde el operador está mirando.
+    if cfg.sae.enforce_authorization && !cfg.sae_bindings.values().any(|n| n == &cfg.node_id) {
+        warn!(
+            node = %cfg.node_id,
+            bindings = cfg.sae_bindings.len(),
+            "sae.enforce_authorization está activo y ningún `sae_bindings` apunta a este \
+             nodo: TODA petición SAE recibirá 404 UnknownSae. Declara `sae_bindings` en el \
+             node.yml (o `sae_authorization: false` si la pertenencia SAE→DKMS es solo \
+             dinámica vía SDN)"
+        );
+    }
     let cfg = Arc::new(cfg);
     let pool = Arc::new(BufferPool::new(cfg.buffer.capacity_per_peer));
     let pending = Arc::new(PendingStore::new(cfg.pending.default_ttl_secs));
@@ -296,29 +309,12 @@ async fn main() -> Result<()> {
             }
         });
     }
-    // Same K8s parallel-startup race as ORR below: QKC sidecar may not
-    // be ready when DKMS hits this. Retry up to 20×1s.
-    let qkc = {
-        let mut last_err: Option<String> = None;
-        let mut connected: Option<std::sync::Arc<QkcClient>> = None;
-        for attempt in 0..20 {
-            match QkcClient::connect(&cfg.southbound, None).await {
-                Ok(c) => {
-                    info!(endpoint = %cfg.southbound.qkc_endpoint, attempt = attempt + 1, "qkc client connected");
-                    connected = Some(std::sync::Arc::new(c));
-                    break;
-                }
-                Err(e) => {
-                    last_err = Some(e.to_string());
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                }
-            }
-        }
-        if let (None, Some(err)) = (&connected, &last_err) {
-            warn!(error = %err, endpoint = %cfg.southbound.qkc_endpoint, "qkc unreachable after 20 retries; continuing without it");
-        }
-        connected
-    };
+    if let Some(ep) = &cfg.southbound.qkc_endpoint {
+        warn!(
+            endpoint = %ep,
+            "southbound.qkc_endpoint ya no se usa (el material entra por el ORR); ignorado"
+        );
+    }
     // ORR es opcional por config: si `southbound.orr_endpoint` está
     // vacío/ausente, `connect_opt` devuelve `Ok(None)` sin loguear.
     // En despliegues K8s con sidecars ORR/QKC en el mismo Pod, los
@@ -362,7 +358,6 @@ async fn main() -> Result<()> {
         sae_binding,
         peers.clone(),
         sdn,
-        qkc,
         orr.clone(),
         peer_client,
     );

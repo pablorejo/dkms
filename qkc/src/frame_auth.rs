@@ -237,13 +237,21 @@ impl LinkFrameAuth {
             _ => self.mode.rejects_plaintext(),
         };
         if reject {
-            self.stats
+            // Con la PSK puesta solo en un extremo esto es CADA frame: el
+            // contador (`plain_rej` en la línea `qkc.frame_auth`) lleva la
+            // escala; el log habla en las potencias de dos.
+            let n = self
+                .stats
                 .plaintext_rejected
                 .fetch_add(1, Ordering::Relaxed);
-            warn!(
-                peer = self.peer_id,
-                kind, "qkc.frame_auth: frame sin MAC en un enlace autenticado; descarto"
-            );
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    peer = self.peer_id,
+                    kind,
+                    rejected = n + 1,
+                    "qkc.frame_auth: frame sin MAC en un enlace autenticado; descarto"
+                );
+            }
             return Err(FrameAuthError::PlaintextRejected);
         }
         self.stats
@@ -274,12 +282,18 @@ pub fn authenticate(
         (Some(fa), true) => fa.open(frame),
         (Some(fa), false) => fa.accept_plaintext(frame.kind),
         (None, true) => {
-            warn!(
-                sender = frame.sender_id,
-                kind = frame.kind,
-                "qkc.frame_auth: frame autenticado en un enlace sin link_psk; \
-                 no se puede comprobar (config asimétrica)"
-            );
+            // La config asimétrica inversa: también es cada frame.
+            static UNCHECKED: AtomicU64 = AtomicU64::new(0);
+            let n = UNCHECKED.fetch_add(1, Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    sender = frame.sender_id,
+                    kind = frame.kind,
+                    unchecked = n + 1,
+                    "qkc.frame_auth: frame autenticado en un enlace sin link_psk; \
+                     no se puede comprobar (config asimétrica)"
+                );
+            }
             let cut = frame
                 .payload
                 .len()

@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         .init();
 
     // Proveedor rustls: necesario si el anuncio al SDN va por mTLS (https).
-    let _ = common::tls_pqc::install_process_default();
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     let cli = Cli::parse();
     let cfg = QkcConfig::load(&cli.config)?;

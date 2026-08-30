@@ -118,7 +118,7 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Certificados ML-DSA en el mTLS del ORR: hace falta el proveedor PQC.
-    let _ = common::tls_pqc::install_process_default();
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Send {

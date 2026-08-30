@@ -32,7 +32,6 @@ control_plane_ca = "__ROOT__/scripts/demo-star/tls/net-ca.crt"
 sdn_endpoint       = "http://127.0.0.1:50053"
 # QKC: no lo usamos aún (el ETSI 020 HTTP es lo que mantenía el cliente
 # QKC; con transport=orr no hace falta).
-qkc_endpoint       = "http://127.0.0.1:1"
 orr_endpoint       = "http://127.0.0.1:505__NN__"
 connect_timeout_ms = 1500
 rpc_timeout_ms     = 5000

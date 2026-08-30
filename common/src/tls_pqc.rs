@@ -218,10 +218,57 @@ pub fn install_process_default() -> bool {
     installed
 }
 
+/// Como [`install_process_default`], pero sin tragarse el fallo: si ya había
+/// otro provider, comprueba que sea equivalente al PQC (verifica ML-DSA-65 y
+/// ofrece exactamente los mismos grupos de intercambio) y, si no, devuelve
+/// error. Los binarios abortan con él. Seguir con un provider clásico haría
+/// que cada cert ML-DSA fallase después como un `transport error` opaco — y,
+/// peor, que el TLS negociase algo que no es post-cuántico sin que nadie lo
+/// viera.
+pub fn ensure_process_default() -> Result<(), String> {
+    if install_process_default() {
+        return Ok(());
+    }
+    let Some(current) = CryptoProvider::get_default() else {
+        return Err(
+            "no se pudo instalar el provider PQC y el proceso no tiene ninguno".to_string(),
+        );
+    };
+    let ours = build_provider();
+    let verifies_ml_dsa = current
+        .signature_verification_algorithms
+        .mapping
+        .iter()
+        .any(|(scheme, _)| *scheme == SignatureScheme::ML_DSA_65);
+    let same_kx = current
+        .kx_groups
+        .iter()
+        .map(|g| g.name())
+        .eq(ours.kx_groups.iter().map(|g| g.name()));
+    if verifies_ml_dsa && same_kx {
+        Ok(())
+    } else {
+        Err(format!(
+            "el crypto provider default del proceso no es el PQC \
+             (verifica ML-DSA-65: {verifies_ml_dsa}, mismos grupos KX: {same_kx}); \
+             algo instaló otro provider antes que tls_pqc"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn ensure_process_default_is_idempotent() {
+        // Otro test del mismo binario puede haber instalado ya el provider:
+        // en ese caso `install` falla y `ensure` tiene que reconocerlo como
+        // el nuestro. Dos llamadas seguidas cubren los dos caminos.
+        ensure_process_default().expect("primera llamada");
+        ensure_process_default().expect("segunda llamada: ya instalado, equivalente");
+    }
     use std::sync::Arc;
 
     #[test]

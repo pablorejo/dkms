@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     // Proveedor criptográfico de rustls: obligatorio antes de cualquier
     // handshake TLS (el plano de control mTLS opcional lo usa). Sin esto
     // rustls hace panic en el primer handshake. Idempotente si ya estaba.
-    let _ = common::tls_pqc::install_process_default();
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     let cfg: SdnConfig = common::config::load_config("sdn")?;
     info!(?cfg, "sdn starting");

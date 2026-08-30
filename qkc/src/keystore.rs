@@ -117,6 +117,13 @@ pub struct KeyStore {
     n_dec_lookups: AtomicU64,
     n_dec_misses: AtomicU64,
     n_refills_enc: AtomicU64,
+    /// Claves ENC que el KME ya entregó (material QKD pagado) y no cupieron
+    /// en el anillo. "No debería pasar" — y por eso se cuenta.
+    n_enc_dropped_full: AtomicU64,
+    /// `enc_keys` al KME que fallaron (KME caído, TLS, timeout).
+    n_refill_enc_failed: AtomicU64,
+    /// NOTIFY que no salieron porque la cola hacia el peer estaba llena.
+    n_notify_dropped: AtomicU64,
     n_refills_dec: AtomicU64,
     n_wait_enc_called: AtomicU64,
     n_wait_enc_succeeded: AtomicU64,
@@ -157,6 +164,9 @@ impl KeyStore {
             n_dec_lookups: AtomicU64::new(0),
             n_dec_misses: AtomicU64::new(0),
             n_refills_enc: AtomicU64::new(0),
+            n_enc_dropped_full: AtomicU64::new(0),
+            n_refill_enc_failed: AtomicU64::new(0),
+            n_notify_dropped: AtomicU64::new(0),
             n_refills_dec: AtomicU64::new(0),
             n_wait_enc_called: AtomicU64::new(0),
             n_wait_enc_succeeded: AtomicU64::new(0),
@@ -250,7 +260,7 @@ impl KeyStore {
             let now = Instant::now();
             if now >= deadline {
                 self.n_wait_enc_timeouts.fetch_add(1, Ordering::Relaxed);
-                warn!(
+                debug!(
                     peer = self.peer_id,
                     missing = n - out.len(),
                     timeout_ms = timeout.as_millis() as u64,
@@ -284,7 +294,7 @@ impl KeyStore {
                 _ = notified => {}
                 _ = tokio::time::sleep(remaining) => {
                     self.n_wait_enc_timeouts.fetch_add(1, Ordering::Relaxed);
-                    warn!(
+                    debug!(
                         peer = self.peer_id,
                         missing = n - out.len(),
                         timeout_ms = timeout.as_millis() as u64,
@@ -340,7 +350,7 @@ impl KeyStore {
             let now = Instant::now();
             if now >= deadline {
                 self.n_wait_dec_timeouts.fetch_add(1, Ordering::Relaxed);
-                warn!(
+                debug!(
                     peer = self.peer_id,
                     id = %id,
                     timeout_ms = timeout.as_millis() as u64,
@@ -363,7 +373,7 @@ impl KeyStore {
                 _ = notified => {}
                 _ = tokio::time::sleep(remaining) => {
                     self.n_wait_dec_timeouts.fetch_add(1, Ordering::Relaxed);
-                    warn!(
+                    debug!(
                         peer = self.peer_id,
                         id = %id,
                         timeout_ms = timeout.as_millis() as u64,
@@ -404,9 +414,12 @@ impl KeyStore {
                         let mut ids_raw = Vec::with_capacity(keys.len());
                         for k in keys {
                             ids_raw.push(*k.key_id.as_bytes());
-                            // Si la cola está llena (no debería),
-                            // dropeamos en silencio — caso raro.
-                            let _ = self.enc.push(k);
+                            // Si el anillo está lleno (no debería) la clave
+                            // se pierde: material QKD ya pagado, así que
+                            // queda contado en `keystore.levels`.
+                            if self.enc.push(k).is_err() {
+                                self.n_enc_dropped_full.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         // Despierta UN solo waiter (notify_one es FIFO en
                         // tokio). El waiter que se despierta, tras coger
@@ -425,7 +438,18 @@ impl KeyStore {
                         );
                     }
                     Err(e) => {
-                        warn!(peer = self.peer_id, error = %e, "keystore.enc_refill failed");
+                        // Bucle a 100 ms mientras el KME esté caído: el
+                        // contador va a `keystore.levels`, el log habla en
+                        // las potencias de dos.
+                        let n = self.n_refill_enc_failed.fetch_add(1, Ordering::Relaxed);
+                        if common::log_throttle::nth_is_loud(n) {
+                            warn!(
+                                peer = self.peer_id,
+                                error = %e,
+                                failures = n + 1,
+                                "keystore.enc_refill failed"
+                            );
+                        }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
@@ -496,7 +520,14 @@ impl KeyStore {
         }
         let ok = self.peer_out.send(self.peer_id, &self.peer_addr, frame);
         if !ok {
-            warn!(peer = self.peer_id, "keystore.send_notify queue full");
+            let n = self.n_notify_dropped.fetch_add(1, Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    peer = self.peer_id,
+                    dropped = n + 1,
+                    "keystore.send_notify queue full"
+                );
+            }
         }
     }
 
@@ -509,6 +540,9 @@ impl KeyStore {
             dec_lookups: self.n_dec_lookups.load(Ordering::Relaxed),
             dec_misses: self.n_dec_misses.load(Ordering::Relaxed),
             refills_enc: self.n_refills_enc.load(Ordering::Relaxed),
+            enc_dropped_full: self.n_enc_dropped_full.load(Ordering::Relaxed),
+            refill_enc_failed: self.n_refill_enc_failed.load(Ordering::Relaxed),
+            notify_dropped: self.n_notify_dropped.load(Ordering::Relaxed),
             refills_dec: self.n_refills_dec.load(Ordering::Relaxed),
             wait_enc_called: self.n_wait_enc_called.load(Ordering::Relaxed),
             wait_enc_succeeded: self.n_wait_enc_succeeded.load(Ordering::Relaxed),
@@ -536,6 +570,9 @@ pub struct KeyStoreLevels {
     pub dec_lookups: u64,
     pub dec_misses: u64,
     pub refills_enc: u64,
+    pub enc_dropped_full: u64,
+    pub refill_enc_failed: u64,
+    pub notify_dropped: u64,
     pub refills_dec: u64,
     pub wait_enc_called: u64,
     pub wait_enc_succeeded: u64,
@@ -567,9 +604,63 @@ pub fn spawn_level_logger(stores: Vec<(u32, Arc<KeyStore>)>, every: Duration) {
                     wenc_to = l.wait_enc_timeouts,
                     wdec = l.wait_dec_called,
                     wdec_to = l.wait_dec_timeouts,
+                    enc_drop = l.enc_dropped_full,
+                    refill_fail = l.refill_enc_failed,
+                    notify_drop = l.notify_dropped,
                     "keystore.levels"
                 );
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un KME que devuelve más claves de las pedidas: la única forma de que
+    /// el anillo ENC se desborde, porque el refill pide justo el hueco.
+    struct OverflowingKme;
+
+    #[async_trait::async_trait]
+    impl KeySource for OverflowingKme {
+        async fn enc_keys(&self, number: u32) -> crate::error::Result<Vec<OtpKey>> {
+            Ok((0..number as usize + BUFFER_TARGET * 2)
+                .map(|_| OtpKey {
+                    key_id: Uuid::new_v4(),
+                    material: vec![0u8; 32],
+                })
+                .collect())
+        }
+        async fn dec_keys(&self, _ids: &[Uuid]) -> crate::error::Result<Vec<OtpKey>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Material QKD que el KME ya entregó y no cupo es material pagado que se
+    /// pierde: "no debería pasar" no es razón para no contarlo.
+    #[tokio::test]
+    async fn keys_the_kme_already_delivered_are_counted_when_the_ring_is_full() {
+        let ks = KeyStore::new(
+            Arc::new(OverflowingKme),
+            Arc::new(PeerOut::new()),
+            2,
+            "127.0.0.1:1".into(),
+            1,
+            256,
+            None,
+        );
+        ks.spawn_workers();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let l = ks.levels();
+            if l.enc_dropped_full > 0 {
+                assert_eq!(l.enc_buffered, BUFFER_TARGET * 2, "el anillo quedó lleno");
+                assert!(l.refills_enc >= 1);
+                break;
+            }
+            assert!(Instant::now() < deadline, "el contador no subió: {l:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }

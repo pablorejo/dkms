@@ -1034,10 +1034,10 @@ impl McmcfSolver {
         }
 
         // Un par (src,dst) repetido entre las commodities activas es una
-        // entrada fantasma: el registro de demanda nunca expira
-        // (`evict_older_than` sin cablear), así que si un DKMS cambia el
-        // grade con el que reporta a un peer (flip de qkd_available), la
-        // entrada del grade antiguo se queda y el par cuenta doble.
+        // entrada fantasma: si un DKMS cambia el grade con el que reporta a
+        // un peer (flip de qkd_available), la del grade antiguo sigue hasta
+        // que el sweeper la retire (`demand_ttl_secs`), y mientras tanto el
+        // par cuenta doble. Sostenido en el tiempo, ya no es transitorio.
         let mut pair_counts: HashMap<(&str, &str), usize> = HashMap::new();
         for c in &active {
             *pair_counts

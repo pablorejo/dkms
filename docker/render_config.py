@@ -270,7 +270,10 @@ def render_dkms(n, out):
         "[listen]",
         "sae_addr = " + q(bind + ":" + str(p["sae"])),
         "peer_addr = " + q(bind + ":" + str(p["peer"])),
-        "grpc_addr = " + q(bind + ":" + str(p["grpc"])),
+        # Plano de operador (DkmsControl). Sin auth y su RPC Drain borra todo
+        # el material de una llamada: localhost, salvo que el node.yml lo
+        # abra a propósito con `control_addr: <ip>[:puerto]`.
+        "grpc_addr = " + q(with_port(n.get("control_addr", "127.0.0.1"), p["grpc"])),
         "metrics_addr = " + q(bind + ":" + str(p["metrics"])),
         "",
         "[tls]",
@@ -285,7 +288,6 @@ def render_dkms(n, out):
         "",
         "[southbound]",
         "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
-        "qkc_endpoint = " + q("http://127.0.0.1:1"),   # dead by design (transport=orr)
         # orr_tls (default true): el ORR corre con grpc_tls y se le habla por
         # https con el cert de nodo de este DKMS. `orr_tls: false` va en claro,
         # y hay que escribirlo también en el TOML: el binario sube http→https
@@ -307,7 +309,17 @@ def render_dkms(n, out):
     fr = n.get("fill_rate")
     if fr is not None:
         lines.append("default_fill_rate_keys_per_s = " + str(float(fr)))
+    # Autorización de SAEs: fail-closed contra `sae_bindings` (los SAE que este
+    # nodo declara servir). Con la lista vacía el DKMS no sirve a nadie, así
+    # que se avisa aquí, en el render, antes del primer 404.
+    authz = bool(n.get("sae_authorization", True))
+    lines += ["", "[sae]", "enforce_authorization = " + ("true" if authz else "false")]
     binds = n.get("sae_bindings") or {}
+    if authz and not any(str(v) == str(node_id) for v in binds.values()):
+        sys.stderr.write(
+            "render_config: AVISO dkms " + str(node_id) + ": sae_authorization está activo y "
+            "ningún sae_bindings apunta a este nodo — toda petición SAE recibirá 404. "
+            "Añade `sae_bindings: {<sae_id>: " + str(node_id) + "}` o `sae_authorization: false`.\n")
     if binds:
         lines += ["", "[sae_bindings]"] + [q(k) + " = " + q(v) for k, v in binds.items()]
     for pid, pc in (n.get("peers") or {}).items():

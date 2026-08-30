@@ -69,6 +69,12 @@ pub struct PeerFlow {
     pub recv_no_epoch: AtomicU64,
     /// Claves con tag válido pero ya vistas: alguien en el camino reinyecta.
     pub recv_replayed: AtomicU64,
+    /// Claves recibidas que `buffer_dec` no admitió. Hoy `try_push` no
+    /// rechaza nunca (capacidad = soft-hint), así que un valor > 0 es una
+    /// regresión, no un régimen.
+    pub dec_dropped: AtomicU64,
+    /// Lotes de ACK recibidos por la ruta ETSI-020 (mTLS) de este peer.
+    pub ack_recv: AtomicU64,
 }
 
 macro_rules! bump {

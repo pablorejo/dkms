@@ -50,6 +50,9 @@ pub struct OrrStats {
     /// Capas con tag válido pero `(session, counter)` ya visto: un mensaje
     /// reinyectado. Distinto de `peel_failed`, que es el tag que no cuadra.
     pub replay_dropped: AtomicU64,
+    /// Mensajes dirigidos a este mismo ORR que no tenían a quién entregarse
+    /// (ningún DKMS suscrito a `StreamDeliveries` en ese momento).
+    pub delivery_no_subscriber: AtomicU64,
 }
 
 impl OrrStats {
@@ -91,6 +94,7 @@ pub fn spawn_state_logger(stats: Arc<OrrStats>, peers: Arc<PeerRegistry>, every:
                 dropped_no_secret = g(&stats.dropped_no_secret),
                 peel_failed = g(&stats.peel_failed),
                 replay_dropped = g(&stats.replay_dropped),
+                delivery_no_subscriber = g(&stats.delivery_no_subscriber),
                 "orr.state",
             );
             // Orden estable: si no, dos vueltas seguidas parecen distintas y

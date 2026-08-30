@@ -94,7 +94,7 @@ pub struct QkcConfig {
     /// vecinos como su `peer_verify_key`. Solo config local. Sin ella, los
     /// enlaces en modo `sign` no pueden emitir handshakes firmados.
     #[serde(default)]
-    pub sign_secret_seed: Option<String>,
+    pub sign_secret_seed: Option<common::config::SecretString>,
 
     /// Un entry por enlace QKC↔QKC con este vecino directo.
     #[serde(default)]
@@ -200,7 +200,7 @@ pub struct LinkConfig {
     /// transporta secretos. Sin él, el handshake va sin autenticar (frames
     /// 0x21/0x22), como hasta ahora. Debe ser idéntico en ambos extremos.
     #[serde(default)]
-    pub link_psk: Option<String>,
+    pub link_psk: Option<common::config::SecretString>,
 
     /// Política de autenticación del handshake PQC de este enlace. Ver `PqcAuth`
     /// (`off` | `prefer` | `require` = HMAC-PSK; `sign` = firma ML-DSA).
@@ -393,6 +393,27 @@ mod tests {
 
     fn parse(toml_str: &str) -> QkcConfig {
         toml::from_str(toml_str).expect("valid TOML")
+    }
+
+    /// El QKC hace `info!(?cfg, "qkc starting")` al arrancar y `docker logs`
+    /// es el canal de diagnóstico documentado: ni la PSK de un enlace ni la
+    /// semilla de firma pueden salir por ahí.
+    #[test]
+    fn debug_output_never_contains_secrets() {
+        let cfg = parse(&format!(
+            "{BASE}sign_secret_seed = \"SEMILLA-SECRETA\"\n\
+             sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\n\
+             link_psk = \"PSK-SECRETA\"\n"
+        ));
+        assert_eq!(cfg.links[0].link_psk.as_deref(), Some("PSK-SECRETA"));
+        assert_eq!(cfg.sign_secret_seed.as_deref(), Some("SEMILLA-SECRETA"));
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("PSK-SECRETA"), "link_psk en el Debug: {dbg}");
+        assert!(
+            !dbg.contains("SEMILLA-SECRETA"),
+            "sign_secret_seed en el Debug: {dbg}"
+        );
     }
 
     /// Un vecino se puede declarar solo por id: la dirección la pone la SDN,

@@ -113,8 +113,12 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<Streaming<CapacityReport>>,
     ) -> std::result::Result<Response<ProtoStatus>, Status> {
-        // TODO: consume the stream, feed into link_admission state.
-        Ok(Response::new(ProtoStatus::default()))
+        // Nadie lo llama y nada lo consumiría: la capacidad de las aristas
+        // la declara el QKC en su anuncio HTTP (`POST /register/qkc`). Decir
+        // OK a un stream que se tira era peor que decir que no existe.
+        Err(Status::unimplemented(
+            "ReportCapacity: la capacidad viaja en el anuncio HTTP del QKC, no por gRPC",
+        ))
     }
 
     #[instrument(skip_all)]
@@ -122,8 +126,11 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<Streaming<DkmsMetric>>,
     ) -> std::result::Result<Response<ProtoStatus>, Status> {
-        // TODO: feed into MCF demands.
-        Ok(Response::new(ProtoStatus::default()))
+        // La demanda entra por `POST /demand` (HTTP admin). Este stream no
+        // tenía consumidor y devolvía OK.
+        Err(Status::unimplemented(
+            "ReportDkmsMetrics: la demanda se reporta por POST /demand, no por gRPC",
+        ))
     }
 
     #[instrument(skip_all, fields(sae = %req.get_ref().sae_id))]

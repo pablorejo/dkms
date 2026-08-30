@@ -157,6 +157,16 @@ impl DkmsControl for DkmsGrpc {
 
 pub async fn serve(svc: DkmsService, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     info!(%addr, "dkms gRPC listening");
+    if !addr.ip().is_loopback() {
+        // El plano de operador no tiene autenticación y `Drain` borra todo el
+        // material de una llamada. Fuera de localhost solo con firewall.
+        warn!(
+            %addr,
+            "dkms gRPC (DkmsControl) escucha fuera de localhost SIN autenticación: \
+             Drain borra todos los buffers de una llamada; firewalea el puerto o \
+             quita `control_addr`"
+        );
+    }
     let listener = common::net::bind_reuse_addr(addr).await?;
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     Server::builder()
