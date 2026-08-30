@@ -206,7 +206,11 @@ impl SdnAnnouncer {
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
             svc,
             local_links: cfg.links.iter().map(|l| l.neighbor_id).collect(),
-            local_cfgs: cfg.links.iter().map(|l| (l.neighbor_id, l.clone())).collect(),
+            local_cfgs: cfg
+                .links
+                .iter()
+                .map(|l| (l.neighbor_id, l.clone()))
+                .collect(),
             // Si el node.yml declara enlaces, sus ajustes PQC son la
             // referencia local; si no, los defaults del propio config.
             link_defaults: cfg.links.first().cloned().unwrap_or_else(|| LinkConfig {

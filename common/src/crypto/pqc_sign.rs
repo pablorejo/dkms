@@ -66,8 +66,8 @@ pub fn sign(secret_seed: &[u8], msg: &[u8]) -> Result<Vec<u8>, SignError> {
 
 /// Verifica `sig` sobre `msg` con la clave pública de verificación.
 pub fn verify(verifying_key: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), SignError> {
-    let vk_enc =
-        EncodedVerifyingKey::<MlDsa65>::try_from(verifying_key).map_err(|_| SignError::BadLength)?;
+    let vk_enc = EncodedVerifyingKey::<MlDsa65>::try_from(verifying_key)
+        .map_err(|_| SignError::BadLength)?;
     let vk = VerifyingKey::<MlDsa65>::decode(&vk_enc);
     let sig_enc = EncodedSignature::<MlDsa65>::try_from(sig).map_err(|_| SignError::BadLength)?;
     let signature = Signature::<MlDsa65>::decode(&sig_enc).ok_or(SignError::Invalid)?;
@@ -118,7 +118,15 @@ pub fn sign_handshake(
     suite_id: &str,
     key_size_bits: u32,
 ) -> Result<Vec<u8>, SignError> {
-    let msg = canonical_msg(tag, epoch, sender_id, receiver_id, blob, suite_id, key_size_bits);
+    let msg = canonical_msg(
+        tag,
+        epoch,
+        sender_id,
+        receiver_id,
+        blob,
+        suite_id,
+        key_size_bits,
+    );
     sign(secret_seed, &msg)
 }
 
@@ -136,7 +144,15 @@ pub fn verify_handshake(
     key_size_bits: u32,
     sig: &[u8],
 ) -> Result<(), SignError> {
-    let msg = canonical_msg(tag, epoch, sender_id, receiver_id, blob, suite_id, key_size_bits);
+    let msg = canonical_msg(
+        tag,
+        epoch,
+        sender_id,
+        receiver_id,
+        blob,
+        suite_id,
+        key_size_bits,
+    );
     verify(verifying_key, &msg, sig)
 }
 
@@ -148,7 +164,8 @@ const TAG_ORR_PUBKEY: &[u8] = b"ORRPUBKEY";
 fn announcement_msg(orr_id: &str, suite: &str, public_key: &[u8]) -> Vec<u8> {
     let id = orr_id.as_bytes();
     let s = suite.as_bytes();
-    let mut m = Vec::with_capacity(TAG_ORR_PUBKEY.len() + 6 + id.len() + s.len() + public_key.len());
+    let mut m =
+        Vec::with_capacity(TAG_ORR_PUBKEY.len() + 6 + id.len() + s.len() + public_key.len());
     m.extend_from_slice(TAG_ORR_PUBKEY);
     m.extend_from_slice(&(id.len() as u16).to_be_bytes());
     m.extend_from_slice(id);
@@ -177,7 +194,11 @@ pub fn verify_orr_pubkey(
     public_key: &[u8],
     sig: &[u8],
 ) -> Result<(), SignError> {
-    verify(verifying_key, &announcement_msg(orr_id, suite, public_key), sig)
+    verify(
+        verifying_key,
+        &announcement_msg(orr_id, suite, public_key),
+        sig,
+    )
 }
 
 #[cfg(test)]
@@ -207,15 +228,24 @@ mod tests {
         let msg = b"original message";
         let sig = sign(&kp.secret_seed, msg).unwrap();
         // Mensaje alterado.
-        assert_eq!(verify(&kp.verifying_key, b"other message", &sig), Err(SignError::Invalid));
+        assert_eq!(
+            verify(&kp.verifying_key, b"other message", &sig),
+            Err(SignError::Invalid)
+        );
         // Clave de verificación equivocada.
-        assert_eq!(verify(&other.verifying_key, msg, &sig), Err(SignError::Invalid));
+        assert_eq!(
+            verify(&other.verifying_key, msg, &sig),
+            Err(SignError::Invalid)
+        );
     }
 
     #[test]
     fn bad_lengths_rejected_cleanly() {
         assert_eq!(sign(&[0u8; 8], b"m"), Err(SignError::BadLength));
-        assert_eq!(verify(&[0u8; 8], b"m", &[0u8; SIGNATURE_LEN]), Err(SignError::BadLength));
+        assert_eq!(
+            verify(&[0u8; 8], b"m", &[0u8; SIGNATURE_LEN]),
+            Err(SignError::BadLength)
+        );
     }
 
     #[test]
@@ -231,7 +261,13 @@ mod tests {
         );
         // pubkey sustituida (el ataque MITM real) → inválido.
         assert_eq!(
-            verify_orr_pubkey(&kp.verifying_key, "orr_1", "ml-kem-768", &[0x22; 1184], &sig),
+            verify_orr_pubkey(
+                &kp.verifying_key,
+                "orr_1",
+                "ml-kem-768",
+                &[0x22; 1184],
+                &sig
+            ),
             Err(SignError::Invalid),
         );
     }
@@ -241,20 +277,87 @@ mod tests {
         use crate::crypto::link_mac::{TAG_INIT, TAG_RESP};
         let kp = keygen();
         let blob = vec![0xAB; 1184];
-        let sig = sign_handshake(&kp.secret_seed, TAG_INIT, 7, 1, 2, &blob, "ml-kem-768", 1024)
-            .unwrap();
+        let sig = sign_handshake(
+            &kp.secret_seed,
+            TAG_INIT,
+            7,
+            1,
+            2,
+            &blob,
+            "ml-kem-768",
+            1024,
+        )
+        .unwrap();
         // Correcto.
         assert!(verify_handshake(
-            &kp.verifying_key, TAG_INIT, 7, 1, 2, &blob, "ml-kem-768", 1024, &sig
+            &kp.verifying_key,
+            TAG_INIT,
+            7,
+            1,
+            2,
+            &blob,
+            "ml-kem-768",
+            1024,
+            &sig
         )
         .is_ok());
         // Cualquier campo distinto invalida (tag, época, ids, suite, key_size).
         for bad in [
-            verify_handshake(&kp.verifying_key, TAG_RESP, 7, 1, 2, &blob, "ml-kem-768", 1024, &sig),
-            verify_handshake(&kp.verifying_key, TAG_INIT, 8, 1, 2, &blob, "ml-kem-768", 1024, &sig),
-            verify_handshake(&kp.verifying_key, TAG_INIT, 7, 2, 1, &blob, "ml-kem-768", 1024, &sig),
-            verify_handshake(&kp.verifying_key, TAG_INIT, 7, 1, 2, &blob, "ml-kem-512", 1024, &sig),
-            verify_handshake(&kp.verifying_key, TAG_INIT, 7, 1, 2, &blob, "ml-kem-768", 256, &sig),
+            verify_handshake(
+                &kp.verifying_key,
+                TAG_RESP,
+                7,
+                1,
+                2,
+                &blob,
+                "ml-kem-768",
+                1024,
+                &sig,
+            ),
+            verify_handshake(
+                &kp.verifying_key,
+                TAG_INIT,
+                8,
+                1,
+                2,
+                &blob,
+                "ml-kem-768",
+                1024,
+                &sig,
+            ),
+            verify_handshake(
+                &kp.verifying_key,
+                TAG_INIT,
+                7,
+                2,
+                1,
+                &blob,
+                "ml-kem-768",
+                1024,
+                &sig,
+            ),
+            verify_handshake(
+                &kp.verifying_key,
+                TAG_INIT,
+                7,
+                1,
+                2,
+                &blob,
+                "ml-kem-512",
+                1024,
+                &sig,
+            ),
+            verify_handshake(
+                &kp.verifying_key,
+                TAG_INIT,
+                7,
+                1,
+                2,
+                &blob,
+                "ml-kem-768",
+                256,
+                &sig,
+            ),
         ] {
             assert_eq!(bad, Err(SignError::Invalid));
         }

@@ -143,9 +143,9 @@ fn build_client_as(args: &Args, sae: &str) -> Result<reqwest::Client> {
         .pool_max_idle_per_host(1)
         .tcp_keepalive(Duration::from_secs(30))
         .timeout(Duration::from_secs_f64(args.timeout));
-    for ca in split_pem(&std::fs::read(&ca_path)
-        .with_context(|| format!("leyendo CA {}", ca_path.display()))?)?
-    {
+    for ca in split_pem(
+        &std::fs::read(&ca_path).with_context(|| format!("leyendo CA {}", ca_path.display()))?,
+    )? {
         b = b.add_root_certificate(ca);
     }
     b.build().context("construyendo el cliente HTTPS")
@@ -410,7 +410,9 @@ async fn run_roundtrip(args: &Args) -> Result<i32> {
             } else if slave_key == master_key {
                 ok += 1;
             } else {
-                fails.push(format!("sae_{m}→sae_{s} LOS BYTES NO COINCIDEN key_ID={kid}"));
+                fails.push(format!(
+                    "sae_{m}→sae_{s} LOS BYTES NO COINCIDEN key_ID={kid}"
+                ));
                 bad += 1;
             }
         }
@@ -443,7 +445,10 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    let out_path = args.out.clone().context("--out es obligatorio sin --roundtrip")?;
+    let out_path = args
+        .out
+        .clone()
+        .context("--out es obligatorio sin --roundtrip")?;
     anyhow::ensure!(!args.sae.is_empty(), "--sae es obligatorio sin --roundtrip");
     let slave_list: Vec<String> = if !args.slaves.is_empty() {
         args.slaves
@@ -489,8 +494,8 @@ fn main() -> Result<()> {
         drop(tx); // el writer termina cuando todos los workers sueltan su tx
 
         // Escritor único: el CSV se escribe en un sitio, sin contención.
-        let out = File::create(&out_path)
-            .with_context(|| format!("creando {}", out_path.display()))?;
+        let out =
+            File::create(&out_path).with_context(|| format!("creando {}", out_path.display()))?;
         let mut csv = BufWriter::new(out);
         writeln!(csv, "t_unix,thread,status,latency_ms,n_keys,key_id,slave")?;
         let mut keyfiles: Vec<(String, BufWriter<File>)> = Vec::new();

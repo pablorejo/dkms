@@ -98,7 +98,9 @@ impl KeyProvider for PqcKeyProvider {
                 return Ok(Arc::new(k));
             }
         }
-        tracing::debug!("tls_pqc: clave no-ML-DSA; delego en el provider clásico (RSA/ECDSA/EdDSA)");
+        tracing::debug!(
+            "tls_pqc: clave no-ML-DSA; delego en el provider clásico (RSA/ECDSA/EdDSA)"
+        );
         aws_lc_rs::default_provider()
             .key_provider
             .load_private_key(key_der)
@@ -205,7 +207,9 @@ pub fn pqc_crypto_provider() -> Arc<CryptoProvider> {
 pub fn install_process_default() -> bool {
     let installed = build_provider().install_default().is_ok();
     if installed {
-        tracing::info!("tls_pqc: provider PQC (ML-DSA + clásicos) instalado como default del proceso");
+        tracing::info!(
+            "tls_pqc: provider PQC (ML-DSA + clásicos) instalado como default del proceso"
+        );
     } else {
         // Ya había un provider (p. ej. otro install anterior). reqwest/tonic
         // usarán ESE: si no es el PQC, los certs ML-DSA fallarán al cargar.
@@ -259,17 +263,29 @@ mod tests {
         // sabe cargar (la forma expandida/both de openssl por defecto no).
         let gen_key = |f: &str| {
             openssl(&[
-                "genpkey", "-algorithm", "ML-DSA-65",
-                "-provparam", "ml-dsa.output_formats=seed-only",
-                "-out", &p(f),
+                "genpkey",
+                "-algorithm",
+                "ML-DSA-65",
+                "-provparam",
+                "ml-dsa.output_formats=seed-only",
+                "-out",
+                &p(f),
             ])
         };
 
         // CA ML-DSA autofirmada.
         if !gen_key("ca.key")
             || !openssl(&[
-                "req", "-x509", "-key", &p("ca.key"), "-out", &p("ca.crt"),
-                "-days", "2", "-subj", "/CN=mldsa-ca",
+                "req",
+                "-x509",
+                "-key",
+                &p("ca.key"),
+                "-out",
+                &p("ca.crt"),
+                "-days",
+                "2",
+                "-subj",
+                "/CN=mldsa-ca",
             ])
         {
             eprintln!("openssl sin ML-DSA (¿<3.5?); salto el test de handshake");
@@ -283,15 +299,33 @@ mod tests {
         ] {
             assert!(gen_key(&format!("{name}.key")));
             assert!(openssl(&[
-                "req", "-new", "-key", &p(&format!("{name}.key")),
-                "-out", &p(&format!("{name}.csr")), "-subj", &format!("/CN={name}"),
+                "req",
+                "-new",
+                "-key",
+                &p(&format!("{name}.key")),
+                "-out",
+                &p(&format!("{name}.csr")),
+                "-subj",
+                &format!("/CN={name}"),
             ]));
             let ext = dir.join(format!("{name}.ext"));
             std::fs::write(&ext, format!("{san}\nextendedKeyUsage={eku}\n")).unwrap();
             assert!(openssl(&[
-                "x509", "-req", "-in", &p(&format!("{name}.csr")), "-CA", &p("ca.crt"),
-                "-CAkey", &p("ca.key"), "-CAcreateserial", "-days", "2",
-                "-out", &p(&format!("{name}.crt")), "-extfile", ext.to_str().unwrap(),
+                "x509",
+                "-req",
+                "-in",
+                &p(&format!("{name}.csr")),
+                "-CA",
+                &p("ca.crt"),
+                "-CAkey",
+                &p("ca.key"),
+                "-CAcreateserial",
+                "-days",
+                "2",
+                "-out",
+                &p(&format!("{name}.crt")),
+                "-extfile",
+                ext.to_str().unwrap(),
             ]));
         }
 
@@ -311,10 +345,12 @@ mod tests {
         let roots = Arc::new(roots);
 
         // Servidor: exige cert cliente (mTLS), cadena de servidor ML-DSA.
-        let client_verifier =
-            rustls::server::WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
-                .build()
-                .unwrap();
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            roots.clone(),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
         let server_config = rustls::ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
@@ -333,8 +369,7 @@ mod tests {
         // Handshake in-memory.
         let mut server = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
         let name = ServerName::try_from("localhost").unwrap();
-        let mut client =
-            rustls::ClientConnection::new(Arc::new(client_config), name).unwrap();
+        let mut client = rustls::ClientConnection::new(Arc::new(client_config), name).unwrap();
 
         // Los flights ML-DSA son grandes (cert ~4 KB + CertVerify ~3.3 KB), así
         // que `read_tls` no cabe en una sola llamada: hay que drenar el buffer
@@ -396,7 +431,10 @@ mod tests {
             kx.name()
         );
         // El servidor recibió y verificó el cert cliente ML-DSA.
-        assert!(server.peer_certificates().is_some(), "mTLS: cert cliente ML-DSA verificado");
+        assert!(
+            server.peer_certificates().is_some(),
+            "mTLS: cert cliente ML-DSA verificado"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

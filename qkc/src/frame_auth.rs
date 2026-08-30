@@ -93,12 +93,7 @@ impl LinkFrameAuth {
         // los logs cuesta nada y evita confusiones al leerlos.
         let session = u64::from_be_bytes(session_bytes).max(1);
         let send_key = Zeroizing::new(frame_mac::derive_key(&root, session));
-        info!(
-            peer = peer_id,
-            ?mode,
-            session,
-            "qkc.frame_auth.enabled"
-        );
+        info!(peer = peer_id, ?mode, session, "qkc.frame_auth.enabled");
         Some(Self {
             mode,
             peer_id,
@@ -188,8 +183,8 @@ impl LinkFrameAuth {
     /// QKC no se entere de nada.
     pub fn open(&self, frame: &mut Frame) -> Result<(), FrameAuthError> {
         let (session, counter) = {
-            let (body, session, counter, tag) = wire::split_auth_trailer(&frame.payload)
-                .map_err(|_| FrameAuthError::Truncated)?;
+            let (body, session, counter, tag) =
+                wire::split_auth_trailer(&frame.payload).map_err(|_| FrameAuthError::Truncated)?;
             let mut st = self.recv.lock();
             let key = Self::peer_key(&mut st, &self.root, session);
             let aad = FrameAad {
@@ -242,14 +237,18 @@ impl LinkFrameAuth {
             _ => self.mode.rejects_plaintext(),
         };
         if reject {
-            self.stats.plaintext_rejected.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .plaintext_rejected
+                .fetch_add(1, Ordering::Relaxed);
             warn!(
                 peer = self.peer_id,
                 kind, "qkc.frame_auth: frame sin MAC en un enlace autenticado; descarto"
             );
             return Err(FrameAuthError::PlaintextRejected);
         }
-        self.stats.plaintext_accepted.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .plaintext_accepted
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }

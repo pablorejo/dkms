@@ -750,9 +750,7 @@ fn readonly_routes() -> Router<SdnService> {
 }
 
 fn full_router(svc: SdnService) -> Router {
-    mutating_routes()
-        .merge(readonly_routes())
-        .with_state(svc)
+    mutating_routes().merge(readonly_routes()).with_state(svc)
 }
 
 pub async fn serve(svc: SdnService, addr: &str) -> anyhow::Result<()> {
@@ -775,7 +773,8 @@ pub async fn serve_with_tls(
         return Ok(());
     };
 
-    let server_cfg = common::tls::server_config(&tls.cert_path, &tls.key_path, Some(&tls.client_ca))?;
+    let server_cfg =
+        common::tls::server_config(&tls.cert_path, &tls.key_path, Some(&tls.client_ca))?;
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "sdn HTTP listening (mTLS)");
     let mtls = crate::mtls::serve_mtls(listener, server_cfg, full_router(svc.clone()));
@@ -823,7 +822,10 @@ mod tests {
         // Cert cuyo SAN casa: permitido.
         assert!(identity_authorizes(Some(&ident("dkms://dkms-1")), "dkms-1"));
         // Cert de OTRO nodo intentando anunciar dkms-1: denegado.
-        assert!(!identity_authorizes(Some(&ident("dkms://dkms-2")), "dkms-1"));
+        assert!(!identity_authorizes(
+            Some(&ident("dkms://dkms-2")),
+            "dkms-1"
+        ));
         // Cert sin SAN: denegado.
         assert!(!identity_authorizes(
             Some(&PeerCertIdentity { san: None }),

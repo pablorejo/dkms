@@ -136,12 +136,7 @@ pub enum PubkeyVerdict {
 
 impl PeerRegistry {
     pub fn new(seed_qkc: HashMap<String, u32>, local_orr_id: String, local_qkc_id: u32) -> Self {
-        Self::with_pubkeys(
-            seed_qkc,
-            HashMap::new(),
-            local_orr_id,
-            local_qkc_id,
-        )
+        Self::with_pubkeys(seed_qkc, HashMap::new(), local_orr_id, local_qkc_id)
     }
 
     /// Constructor con ambos sembrados a la vez. Lo usa `OrrService::new`
@@ -651,30 +646,65 @@ mod tests {
         // Con verify key configurada: firma válida → Valid; inválida/pubkey
         // sustituida → Reject.
         let reg = PeerRegistry::with_all(
-            HashMap::new(), HashMap::new(), vks.clone(), "orr_1".into(), 1, Tofu,
+            HashMap::new(),
+            HashMap::new(),
+            vks.clone(),
+            "orr_1".into(),
+            1,
+            Tofu,
         );
-        assert_eq!(reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig), SigVerdict::Valid);
+        assert_eq!(
+            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &sig),
+            SigVerdict::Valid
+        );
         assert_eq!(
             reg.verify_announcement("orr_2", "ml-kem-768", &[0x44; 1184], &sig),
             SigVerdict::Reject,
             "un MITM que sustituye la pubkey no puede reproducir la firma",
         );
         // Sin firma, tofu → Unsigned; strict → Reject.
-        assert_eq!(reg.verify_announcement("orr_2", "ml-kem-768", &pk, &[]), SigVerdict::Unsigned);
-        let reg_strict = PeerRegistry::with_all(
-            HashMap::new(), HashMap::new(), vks, "orr_1".into(), 1, Strict,
+        assert_eq!(
+            reg.verify_announcement("orr_2", "ml-kem-768", &pk, &[]),
+            SigVerdict::Unsigned
         );
-        assert_eq!(reg_strict.verify_announcement("orr_2", "ml-kem-768", &pk, &[]), SigVerdict::Reject);
+        let reg_strict = PeerRegistry::with_all(
+            HashMap::new(),
+            HashMap::new(),
+            vks,
+            "orr_1".into(),
+            1,
+            Strict,
+        );
+        assert_eq!(
+            reg_strict.verify_announcement("orr_2", "ml-kem-768", &pk, &[]),
+            SigVerdict::Reject
+        );
 
         // Sin verify key: tofu → NoKey; strict → Reject.
         let reg_nokey = PeerRegistry::with_all(
-            HashMap::new(), HashMap::new(), HashMap::new(), "orr_1".into(), 1, Tofu,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            "orr_1".into(),
+            1,
+            Tofu,
         );
-        assert_eq!(reg_nokey.verify_announcement("orr_9", "ml-kem-768", &pk, &sig), SigVerdict::NoKey);
+        assert_eq!(
+            reg_nokey.verify_announcement("orr_9", "ml-kem-768", &pk, &sig),
+            SigVerdict::NoKey
+        );
         let reg_nokey_strict = PeerRegistry::with_all(
-            HashMap::new(), HashMap::new(), HashMap::new(), "orr_1".into(), 1, Strict,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            "orr_1".into(),
+            1,
+            Strict,
         );
-        assert_eq!(reg_nokey_strict.verify_announcement("orr_9", "ml-kem-768", &pk, &sig), SigVerdict::Reject);
+        assert_eq!(
+            reg_nokey_strict.verify_announcement("orr_9", "ml-kem-768", &pk, &sig),
+            SigVerdict::Reject
+        );
     }
 
     #[test]
@@ -688,19 +718,34 @@ mod tests {
         // tofu (default): acepta todo; avisa si difiere del pin.
         let tofu =
             PeerRegistry::with_pubkeys_trust(q.clone(), pins.clone(), "orr_1".into(), 1, Tofu);
-        assert_eq!(tofu.verify_fetched_pubkey("orr_2", &[0xAA; 8]), PubkeyVerdict::Accept);
+        assert_eq!(
+            tofu.verify_fetched_pubkey("orr_2", &[0xAA; 8]),
+            PubkeyVerdict::Accept
+        );
         assert_eq!(
             tofu.verify_fetched_pubkey("orr_2", &[0xBB; 8]),
             PubkeyVerdict::AcceptPinMismatch,
         );
         // sin pin: tofu acepta (TOFU).
-        assert_eq!(tofu.verify_fetched_pubkey("orr_9", &[1, 2, 3]), PubkeyVerdict::Accept);
+        assert_eq!(
+            tofu.verify_fetched_pubkey("orr_9", &[1, 2, 3]),
+            PubkeyVerdict::Accept
+        );
 
         // strict: solo si casa un pin.
         let strict = PeerRegistry::with_pubkeys_trust(q, pins, "orr_1".into(), 1, Strict);
-        assert_eq!(strict.verify_fetched_pubkey("orr_2", &[0xAA; 8]), PubkeyVerdict::Accept);
-        assert_eq!(strict.verify_fetched_pubkey("orr_2", &[0xBB; 8]), PubkeyVerdict::Reject);
-        assert_eq!(strict.verify_fetched_pubkey("orr_9", &[1, 2, 3]), PubkeyVerdict::Reject);
+        assert_eq!(
+            strict.verify_fetched_pubkey("orr_2", &[0xAA; 8]),
+            PubkeyVerdict::Accept
+        );
+        assert_eq!(
+            strict.verify_fetched_pubkey("orr_2", &[0xBB; 8]),
+            PubkeyVerdict::Reject
+        );
+        assert_eq!(
+            strict.verify_fetched_pubkey("orr_9", &[1, 2, 3]),
+            PubkeyVerdict::Reject
+        );
     }
 
     #[test]

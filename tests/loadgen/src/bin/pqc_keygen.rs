@@ -23,7 +23,10 @@ use base64::Engine as _;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "pqc_keygen", about = "Identidades de firma ML-DSA para la malla")]
+#[command(
+    name = "pqc_keygen",
+    about = "Identidades de firma ML-DSA para la malla"
+)]
 struct Args {
     /// Directorio de salida (se crea si no existe).
     #[arg(long)]
@@ -35,8 +38,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    fs::create_dir_all(&args.out)
-        .with_context(|| format!("creando {}", args.out.display()))?;
+    fs::create_dir_all(&args.out).with_context(|| format!("creando {}", args.out.display()))?;
     let b64 = base64::engine::general_purpose::STANDARD;
 
     for n in 1..=args.nodes {

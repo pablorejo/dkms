@@ -209,15 +209,27 @@ mod tests_detached {
         let key = [7u8; KEY_LEN];
         let nonce = [3u8; NONCE_LEN];
         let (mut ct, tag) = seal_detached(&key, &nonce, b"hola", b"aad").unwrap();
-        assert!(open_detached(&key, &nonce, &ct, &tag, b"otro").is_err(), "aad");
+        assert!(
+            open_detached(&key, &nonce, &ct, &tag, b"otro").is_err(),
+            "aad"
+        );
         ct[0] ^= 0xFF;
-        assert!(open_detached(&key, &nonce, &ct, &tag, b"aad").is_err(), "ct");
+        assert!(
+            open_detached(&key, &nonce, &ct, &tag, b"aad").is_err(),
+            "ct"
+        );
         let (ct2, mut tag2) = seal_detached(&key, &nonce, b"hola", b"aad").unwrap();
         tag2[0] ^= 0xFF;
-        assert!(open_detached(&key, &nonce, &ct2, &tag2, b"aad").is_err(), "tag");
+        assert!(
+            open_detached(&key, &nonce, &ct2, &tag2, b"aad").is_err(),
+            "tag"
+        );
         let mut n2 = nonce;
         n2[0] ^= 0xFF;
-        assert!(open_detached(&key, &n2, &ct2, &tag, b"aad").is_err(), "nonce");
+        assert!(
+            open_detached(&key, &n2, &ct2, &tag, b"aad").is_err(),
+            "nonce"
+        );
     }
 
     #[test]

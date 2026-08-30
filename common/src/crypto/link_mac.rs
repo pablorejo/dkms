@@ -196,7 +196,13 @@ mod tests {
     #[test]
     fn wrong_length_mac_rejected_cleanly() {
         let blob = vec![0; 4];
-        assert_eq!(v(TAG_INIT, 1, 1, 2, &blob, &[0u8; 16]), Err(MacError::Invalid));
-        assert_eq!(v(TAG_INIT, 1, 1, 2, &blob, &[0u8; 64]), Err(MacError::Invalid));
+        assert_eq!(
+            v(TAG_INIT, 1, 1, 2, &blob, &[0u8; 16]),
+            Err(MacError::Invalid)
+        );
+        assert_eq!(
+            v(TAG_INIT, 1, 1, 2, &blob, &[0u8; 64]),
+            Err(MacError::Invalid)
+        );
     }
 }

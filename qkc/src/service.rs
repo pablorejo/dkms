@@ -185,7 +185,10 @@ impl QkcService {
                             })
                             .ok()
                     };
-                    let psk = link.link_psk.as_deref().and_then(|b| decode_b64(b, "link_psk"));
+                    let psk = link
+                        .link_psk
+                        .as_deref()
+                        .and_then(|b| decode_b64(b, "link_psk"));
                     // Modo `sign` (Fase 5 upgrade, ML-DSA): seed de firma de este
                     // nodo + clave pública de verificación del peer.
                     let sign_seed = cfg
@@ -226,9 +229,10 @@ impl QkcService {
             // La clave del enlace autentica los NOTIFY (ver KeyStore::verify_notify).
             // Aplica a QKD y a PQC: es el plano de control del enlace, que el
             // material QKD no cubre.
-            let notify_psk = link.link_psk.as_deref().and_then(|b64| {
-                base64::engine::general_purpose::STANDARD.decode(b64).ok()
-            });
+            let notify_psk = link
+                .link_psk
+                .as_deref()
+                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
             // Los frames de datos usan la misma raíz que el handshake y los
             // NOTIFY. En `require` sin PSK se falla el arranque: seguir
             // adelante sería correr sin autenticar creyendo que sí, que es

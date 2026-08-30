@@ -77,7 +77,10 @@ pub fn announcer_client(
 /// `true` si el URL usa el esquema https (case-insensitive).
 pub fn url_is_https(url: &str) -> bool {
     let u = url.trim_start();
-    u.len() >= 5 && u[..u.len().min(8)].to_ascii_lowercase().starts_with("https://")
+    u.len() >= 5
+        && u[..u.len().min(8)]
+            .to_ascii_lowercase()
+            .starts_with("https://")
 }
 
 fn load_identity(cert_path: &Path, key_path: &Path) -> anyhow::Result<Identity> {

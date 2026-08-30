@@ -248,7 +248,10 @@ impl PqcHandshake {
                     }
                 },
                 None => {
-                    warn!(peer = self.peer_id, "qkc.pqc: modo sign sin sign_secret_seed; envío en claro");
+                    warn!(
+                        peer = self.peer_id,
+                        "qkc.pqc: modo sign sin sign_secret_seed; envío en claro"
+                    );
                     plain
                 }
             }
@@ -290,11 +293,17 @@ impl PqcHandshake {
         match recv {
             RecvAuth::Signed => {
                 let Some(vk) = self.peer_verify_key.as_deref() else {
-                    warn!(peer = self.peer_id, "qkc.pqc: frame firmado pero sin peer_verify_key; descarto");
+                    warn!(
+                        peer = self.peer_id,
+                        "qkc.pqc: frame firmado pero sin peer_verify_key; descarto"
+                    );
                     return None;
                 };
                 if payload.len() < 4 + SIGNATURE_LEN {
-                    warn!(peer = self.peer_id, "qkc.pqc: payload firmado demasiado corto");
+                    warn!(
+                        peer = self.peer_id,
+                        "qkc.pqc: payload firmado demasiado corto"
+                    );
                     return None;
                 }
                 let (msg, sig) = payload.split_at(payload.len() - SIGNATURE_LEN);
@@ -312,14 +321,20 @@ impl PqcHandshake {
                 )
                 .is_err()
                 {
-                    warn!(peer = self.peer_id, epoch, "qkc.pqc: firma ML-DSA inválida; descarto");
+                    warn!(
+                        peer = self.peer_id,
+                        epoch, "qkc.pqc: firma ML-DSA inválida; descarto"
+                    );
                     return None;
                 }
                 Some((epoch, blob))
             }
             RecvAuth::Hmac => {
                 let Some(psk) = self.psk.as_deref() else {
-                    warn!(peer = self.peer_id, "qkc.pqc: frame HMAC pero sin link_psk; descarto");
+                    warn!(
+                        peer = self.peer_id,
+                        "qkc.pqc: frame HMAC pero sin link_psk; descarto"
+                    );
                     return None;
                 };
                 if payload.len() < 4 + TAG_LEN {
@@ -329,12 +344,22 @@ impl PqcHandshake {
                 let (msg, mac) = payload.split_at(payload.len() - TAG_LEN);
                 let (epoch, blob) = split_epoch(msg)?;
                 if link_mac::verify(
-                    psk, tag_kind, epoch, self.peer_id, self.my_id, blob, &self.suite,
-                    self.key_size_bits, mac,
+                    psk,
+                    tag_kind,
+                    epoch,
+                    self.peer_id,
+                    self.my_id,
+                    blob,
+                    &self.suite,
+                    self.key_size_bits,
+                    mac,
                 )
                 .is_err()
                 {
-                    warn!(peer = self.peer_id, epoch, "qkc.pqc: MAC de handshake inválido; descarto");
+                    warn!(
+                        peer = self.peer_id,
+                        epoch, "qkc.pqc: MAC de handshake inválido; descarto"
+                    );
                     return None;
                 }
                 Some((epoch, blob))
@@ -751,15 +776,30 @@ mod tests {
         let mut plain = 9u32.to_be_bytes().to_vec();
         plain.extend_from_slice(&kp.public);
         resp.handle_init(&plain, RecvAuth::Plain);
-        assert!(resp.store.get(9).is_none(), "plaintext INIT rechazado en require");
+        assert!(
+            resp.store.get(9).is_none(),
+            "plaintext INIT rechazado en require"
+        );
 
         // 2) INIT autenticado con PSK equivocado → MAC inválido, descartado.
         let mut forged = 9u32.to_be_bytes().to_vec();
         forged.extend_from_slice(&kp.public);
-        let bad = link_mac::tag(b"wrong-psk", TAG_INIT, 9, 1, 2, &kp.public, "ml-kem-768", 1024);
+        let bad = link_mac::tag(
+            b"wrong-psk",
+            TAG_INIT,
+            9,
+            1,
+            2,
+            &kp.public,
+            "ml-kem-768",
+            1024,
+        );
         forged.extend_from_slice(&bad);
         resp.handle_init(&forged, RecvAuth::Hmac);
-        assert!(resp.store.get(9).is_none(), "MAC inválido rechazado, época intacta");
+        assert!(
+            resp.store.get(9).is_none(),
+            "MAC inválido rechazado, época intacta"
+        );
 
         // 3) INIT autenticado correcto → sí encapsula.
         resp.handle_init(&authed(TAG_INIT, 9, 1, 2, &kp.public), RecvAuth::Hmac);
@@ -777,23 +817,40 @@ mod tests {
         let b = pqc_sign::keygen(); // identidad del nodo 2 (respondedor)
 
         let ini = handshake_full(
-            1, 2, None, PqcAuth::Sign,
-            Some(a.secret_seed.to_vec()), Some(b.verifying_key.clone()),
+            1,
+            2,
+            None,
+            PqcAuth::Sign,
+            Some(a.secret_seed.to_vec()),
+            Some(b.verifying_key.clone()),
         );
         let resp = handshake_full(
-            2, 1, None, PqcAuth::Sign,
-            Some(b.secret_seed.to_vec()), Some(a.verifying_key.clone()),
+            2,
+            1,
+            None,
+            PqcAuth::Sign,
+            Some(b.secret_seed.to_vec()),
+            Some(a.verifying_key.clone()),
         );
         let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
         let kp = kem.keygen().unwrap();
-        ini.pending_sk.lock().insert(3, Zeroizing::new(kp.secret.clone()));
+        ini.pending_sk
+            .lock()
+            .insert(3, Zeroizing::new(kp.secret.clone()));
 
         // Construye un INIT firmado por el nodo 1 (sender=1, receiver=2).
         let signed_init = |epoch: u32, blob: &[u8]| {
             let mut p = epoch.to_be_bytes().to_vec();
             p.extend_from_slice(blob);
             let sig = pqc_sign::sign_handshake(
-                &a.secret_seed, TAG_INIT, epoch, 1, 2, blob, "ml-kem-768", 1024,
+                &a.secret_seed,
+                TAG_INIT,
+                epoch,
+                1,
+                2,
+                blob,
+                "ml-kem-768",
+                1024,
             )
             .unwrap();
             p.extend_from_slice(&sig);
@@ -804,19 +861,32 @@ mod tests {
         let mut plain = 3u32.to_be_bytes().to_vec();
         plain.extend_from_slice(&kp.public);
         resp.handle_init(&plain, RecvAuth::Plain);
-        assert!(resp.store.get(3).is_none(), "sign: frame en claro rechazado");
+        assert!(
+            resp.store.get(3).is_none(),
+            "sign: frame en claro rechazado"
+        );
 
         // 2) INIT firmado pero por la clave EQUIVOCADA (nodo b firmando como a)
         //    → firma inválida contra a.verifying_key → rechazado.
         let mut wrong = 3u32.to_be_bytes().to_vec();
         wrong.extend_from_slice(&kp.public);
         let bad_sig = pqc_sign::sign_handshake(
-            &b.secret_seed, TAG_INIT, 3, 1, 2, &kp.public, "ml-kem-768", 1024,
+            &b.secret_seed,
+            TAG_INIT,
+            3,
+            1,
+            2,
+            &kp.public,
+            "ml-kem-768",
+            1024,
         )
         .unwrap();
         wrong.extend_from_slice(&bad_sig);
         resp.handle_init(&wrong, RecvAuth::Signed);
-        assert!(resp.store.get(3).is_none(), "sign: firma con clave equivocada rechazada");
+        assert!(
+            resp.store.get(3).is_none(),
+            "sign: firma con clave equivocada rechazada"
+        );
 
         // 3) INIT firmado correctamente → encapsula.
         resp.handle_init(&signed_init(3, &kp.public), RecvAuth::Signed);
@@ -826,10 +896,9 @@ mod tests {
         // con b.verifying_key (su peer_verify_key).
         let mut resp_payload = 3u32.to_be_bytes().to_vec();
         resp_payload.extend_from_slice(&ct);
-        let resp_sig = pqc_sign::sign_handshake(
-            &b.secret_seed, TAG_RESP, 3, 2, 1, &ct, "ml-kem-768", 1024,
-        )
-        .unwrap();
+        let resp_sig =
+            pqc_sign::sign_handshake(&b.secret_seed, TAG_RESP, 3, 2, 1, &ct, "ml-kem-768", 1024)
+                .unwrap();
         resp_payload.extend_from_slice(&resp_sig);
         ini.handle_resp(&resp_payload, RecvAuth::Signed);
 

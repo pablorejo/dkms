@@ -130,12 +130,13 @@ impl OrrService {
         //
         // Semilla ML-DSA de FIRMA (§Fase 6 PQC): de config, estable. Con ella
         // el ORR firma su anuncio de pubkey aunque la ML-KEM sea efímera.
-        let sign_seed = match &cfg.sign_secret_seed {
-            Some(b64) => Some(BASE64.decode(b64).map_err(|e| {
-                OrrError::Relay(format!("sign_secret_seed base64 inválido: {e}"))
-            })?),
-            None => None,
-        };
+        let sign_seed =
+            match &cfg.sign_secret_seed {
+                Some(b64) => Some(BASE64.decode(b64).map_err(|e| {
+                    OrrError::Relay(format!("sign_secret_seed base64 inválido: {e}"))
+                })?),
+                None => None,
+            };
         let identity = Arc::new(
             OrrIdentity::generate(cfg.orr_id.clone(), &cfg.default_pqc_suite)?
                 .with_sign_seed(sign_seed),

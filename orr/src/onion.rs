@@ -636,7 +636,18 @@ mod tests {
         assert_eq!(onion.first_hop_orr, "orr_dst");
         assert_eq!(onion.first_epoch_id, 7);
         assert_eq!(onion.max_hops, 0);
-        let peeled = peel(&ms_dst, &onion.first_key_id, &onion.payload, &onion.tag, 0, 7, 42, 1, b"hdr").unwrap();
+        let peeled = peel(
+            &ms_dst,
+            &onion.first_key_id,
+            &onion.payload,
+            &onion.tag,
+            0,
+            7,
+            42,
+            1,
+            b"hdr",
+        )
+        .unwrap();
         assert_eq!(peeled, Peeled::Deliver(body));
     }
 
@@ -671,7 +682,18 @@ mod tests {
 
         // B pela: max_hops=2 ⇒ Forward(InnerLayer apuntando a C con
         // epoch_id=22, que es el de C).
-        let peeled_b = peel(&ms_b, &onion.first_key_id, &onion.payload, &onion.tag, 2, 11, 42, 1, b"hdr").unwrap();
+        let peeled_b = peel(
+            &ms_b,
+            &onion.first_key_id,
+            &onion.payload,
+            &onion.tag,
+            2,
+            11,
+            42,
+            1,
+            b"hdr",
+        )
+        .unwrap();
         let inner_b = match peeled_b {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -681,7 +703,18 @@ mod tests {
 
         // C pela: max_hops=1 ⇒ Forward(InnerLayer apuntando a D con
         // epoch_id=33).
-        let peeled_c = peel(&ms_c, &inner_b.key_id, &inner_b.xor_ct, &inner_b.tag, 1, 22, 42, 1, b"hdr").unwrap();
+        let peeled_c = peel(
+            &ms_c,
+            &inner_b.key_id,
+            &inner_b.xor_ct,
+            &inner_b.tag,
+            1,
+            22,
+            42,
+            1,
+            b"hdr",
+        )
+        .unwrap();
         let inner_c = match peeled_c {
             Peeled::Forward(l) => l,
             _ => panic!("expected Forward"),
@@ -690,7 +723,18 @@ mod tests {
         assert_eq!(inner_c.epoch_id, 33);
 
         // D pela: max_hops=0 ⇒ Deliver(body_dkms).
-        let peeled_d = peel(&ms_d, &inner_c.key_id, &inner_c.xor_ct, &inner_c.tag, 0, 33, 42, 1, b"hdr").unwrap();
+        let peeled_d = peel(
+            &ms_d,
+            &inner_c.key_id,
+            &inner_c.xor_ct,
+            &inner_c.tag,
+            0,
+            33,
+            42,
+            1,
+            b"hdr",
+        )
+        .unwrap();
         assert_eq!(peeled_d, Peeled::Deliver(body));
     }
 
@@ -746,6 +790,17 @@ mod tests {
             epoch_id: 0,
         }];
         let onion = build_onion(&path, body, 42, 1, b"hdr").unwrap();
-        assert!(peel(&wrong, &onion.first_key_id, &onion.payload, &onion.tag, 0, 0, 42, 1, b"hdr").is_err());
+        assert!(peel(
+            &wrong,
+            &onion.first_key_id,
+            &onion.payload,
+            &onion.tag,
+            0,
+            0,
+            42,
+            1,
+            b"hdr"
+        )
+        .is_err());
     }
 }

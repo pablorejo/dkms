@@ -151,15 +151,29 @@ mod tests {
         let p = |f: &str| dir.join(f).to_str().unwrap().to_string();
         let key = |f: &str| {
             openssl(&[
-                "genpkey", "-algorithm", "ML-DSA-65",
-                "-provparam", "ml-dsa.output_formats=seed-only", "-out", &p(f),
+                "genpkey",
+                "-algorithm",
+                "ML-DSA-65",
+                "-provparam",
+                "ml-dsa.output_formats=seed-only",
+                "-out",
+                &p(f),
             ])
         };
         if !key("ca.key")
             || !openssl(&[
-                "req", "-x509", "-key", &p("ca.key"), "-out", &p("ca.crt"),
-                "-days", "2", "-subj", "/CN=ca",
-                "-addext", "basicConstraints=critical,CA:TRUE",
+                "req",
+                "-x509",
+                "-key",
+                &p("ca.key"),
+                "-out",
+                &p("ca.crt"),
+                "-days",
+                "2",
+                "-subj",
+                "/CN=ca",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
             ])
         {
             eprintln!("openssl sin ML-DSA; salto");
@@ -168,24 +182,53 @@ mod tests {
         for (n, eku) in [("srv", "serverAuth"), ("cli", "clientAuth")] {
             assert!(key(&format!("{n}.key")));
             assert!(openssl(&[
-                "req", "-new", "-key", &p(&format!("{n}.key")),
-                "-out", &p(&format!("{n}.csr")), "-subj", &format!("/CN={n}"),
+                "req",
+                "-new",
+                "-key",
+                &p(&format!("{n}.key")),
+                "-out",
+                &p(&format!("{n}.csr")),
+                "-subj",
+                &format!("/CN={n}"),
             ]));
             let ext = dir.join(format!("{n}.ext"));
-            std::fs::write(&ext, format!("subjectAltName=DNS:localhost\nextendedKeyUsage={eku}\n"))
-                .unwrap();
+            std::fs::write(
+                &ext,
+                format!("subjectAltName=DNS:localhost\nextendedKeyUsage={eku}\n"),
+            )
+            .unwrap();
             assert!(openssl(&[
-                "x509", "-req", "-in", &p(&format!("{n}.csr")), "-CA", &p("ca.crt"),
-                "-CAkey", &p("ca.key"), "-CAcreateserial", "-days", "2",
-                "-out", &p(&format!("{n}.crt")), "-extfile", ext.to_str().unwrap(),
+                "x509",
+                "-req",
+                "-in",
+                &p(&format!("{n}.csr")),
+                "-CA",
+                &p("ca.crt"),
+                "-CAkey",
+                &p("ca.key"),
+                "-CAcreateserial",
+                "-days",
+                "2",
+                "-out",
+                &p(&format!("{n}.crt")),
+                "-extfile",
+                ext.to_str().unwrap(),
             ]));
         }
 
         // Las funciones públicas cargan y construyen las configs con certs ML-DSA.
-        server_config(&dir.join("srv.crt"), &dir.join("srv.key"), Some(&dir.join("ca.crt")))
-            .expect("server_config con cert ML-DSA");
-        client_config_mtls(Some(&dir.join("ca.crt")), &dir.join("cli.crt"), &dir.join("cli.key"))
-            .expect("client_config_mtls con cert ML-DSA");
+        server_config(
+            &dir.join("srv.crt"),
+            &dir.join("srv.key"),
+            Some(&dir.join("ca.crt")),
+        )
+        .expect("server_config con cert ML-DSA");
+        client_config_mtls(
+            Some(&dir.join("ca.crt")),
+            &dir.join("cli.crt"),
+            &dir.join("cli.key"),
+        )
+        .expect("client_config_mtls con cert ML-DSA");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

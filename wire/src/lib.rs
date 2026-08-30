@@ -714,7 +714,10 @@ mod tests {
         assert_eq!(auth_kind_for(FRAME_ACK), None);
         assert_eq!(base_kind_of(FRAME_RECV_AUTH), FRAME_RECV);
         assert_eq!(base_kind_of(FRAME_RELAY_AUTH), FRAME_RELAY);
-        assert_eq!(base_kind_of(FRAME_KEY_IDS_NOTIFY_AUTH), FRAME_KEY_IDS_NOTIFY);
+        assert_eq!(
+            base_kind_of(FRAME_KEY_IDS_NOTIFY_AUTH),
+            FRAME_KEY_IDS_NOTIFY
+        );
         // base_kind_of es identidad en todo lo demás.
         assert_eq!(base_kind_of(FRAME_LOCAL_SEND), FRAME_LOCAL_SEND);
         assert!(is_auth_kind(FRAME_RECV_AUTH) && is_auth_kind(FRAME_RELAY_AUTH));
