@@ -34,12 +34,14 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hkdf::Hkdf;
 use parking_lot::Mutex;
 use sha2::Sha256;
-use tokio::sync::Notify;
+// `tokio::time::Instant` y no `std`: mismo reloj en producción, pausable en
+// los tests (los que esperan SECRET_WAIT tardaban 10 s reales cada uno).
+use tokio::{sync::Notify, time::Instant};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -286,6 +288,13 @@ impl SecretStore {
 
 // ─────────────────────────── RekeyClock ─────────────────────────────────
 
+/// Qué disparó una rotación: el plazo o el volumen de claves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotateTrigger {
+    Time,
+    Volume,
+}
+
 /// Disparador de rotación de época, compartido entre el [`PqcKeySource`]
 /// emisor (que cuenta claves) y el bucle de rotación del iniciador en
 /// [`crate::pqc_handshake`] (que espera). Solo lo usa el lado iniciador.
@@ -322,17 +331,27 @@ impl RekeyClock {
     }
 
     /// Espera a una condición de rotación: cruce de `n` claves O `t_secs`
-    /// transcurridos (lo que ocurra primero). Si ambos disparadores están
-    /// desactivados (`n==0 && t_secs==0`) no rota nunca (espera indefinida).
-    pub async fn wait_rotate(&self, t_secs: u64) {
+    /// transcurridos (lo que ocurra primero), y dice cuál fue. Si ambos
+    /// disparadores están desactivados (`n==0 && t_secs==0`) no rota nunca
+    /// (espera indefinida).
+    ///
+    /// El futuro se crea UNA vez por rotación (ver el bucle en
+    /// `pqc_handshake`): recrearlo reinicia el plazo.
+    pub async fn wait_rotate(&self, t_secs: u64) -> RotateTrigger {
         match (self.n, t_secs) {
-            (0, 0) => std::future::pending::<()>().await,
-            (_, 0) => self.notify.notified().await,
-            (0, _) => tokio::time::sleep(Duration::from_secs(t_secs)).await,
+            (0, 0) => std::future::pending::<RotateTrigger>().await,
+            (_, 0) => {
+                self.notify.notified().await;
+                RotateTrigger::Volume
+            }
+            (0, _) => {
+                tokio::time::sleep(Duration::from_secs(t_secs)).await;
+                RotateTrigger::Time
+            }
             (_, _) => {
                 tokio::select! {
-                    _ = self.notify.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(t_secs)) => {}
+                    _ = self.notify.notified() => RotateTrigger::Volume,
+                    _ = tokio::time::sleep(Duration::from_secs(t_secs)) => RotateTrigger::Time,
                 }
             }
         }
@@ -537,7 +556,7 @@ mod tests {
         assert!(store.get(0).is_none(), "oldest epoch evicted");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn await_epoch_waits_then_resolves() {
         let store = SecretStore::new(2, 1000);
         let s2 = Arc::clone(&store);
@@ -551,7 +570,7 @@ mod tests {
     /// Gate principal: tras un round-trip ML-KEM real por época, los dos
     /// extremos derivan material byte-idéntico para los mismos `key_id`, y
     /// distinto entre épocas.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn both_ends_derive_identical_material_across_epochs() {
         let kem = kem_for(suite::ML_KEM_768).unwrap();
         // Dos épocas con secretos ML-KEM independientes.
@@ -601,7 +620,7 @@ mod tests {
     /// Es el fallo que dejaba un enlace PQC muerto en un solo sentido: el
     /// `?` abortaba las 128 claves del lote y, de paso, bloqueaba el
     /// `dec_refill_loop` 10 s esperando un secreto que no iba a llegar.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn one_unrecoverable_id_does_not_kill_the_batch() {
         let store = SecretStore::new(0, 1000);
         // Ventana viva = épocas 5 y 6. La 1 se perdió.
@@ -614,7 +633,7 @@ mod tests {
         let mut ids = vec![stale];
         ids.extend(good.iter().copied());
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let out = src.dec_keys(&ids).await.unwrap();
 
         assert_eq!(out.len(), 4, "las 4 derivables sobreviven al id envenenado");
@@ -636,7 +655,7 @@ mod tests {
     /// Un extremo recién reiniciado sólo tiene las épocas negociadas desde
     /// que volvió. `enc` debe elegir una que TENGA, no `highest − lookahead`
     /// a ciegas: si no, no encripta hasta pasadas `lookahead + 1` rotaciones.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn enc_after_a_restart_uses_an_epoch_this_end_actually_has() {
         let store = SecretStore::new(2, 1000);
         // Ventana tras reiniciar: sólo 8 y 9. La 7 (= 9 − lookahead) falta.
@@ -644,7 +663,7 @@ mod tests {
         store.insert(9, fresh_secret(9));
         let src = PqcKeySource::new(256, Arc::clone(&store), 2, None);
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let keys = src.enc_keys(3).await.unwrap();
 
         assert_eq!(keys.len(), 3);
@@ -665,7 +684,7 @@ mod tests {
     /// poda las viejas. El invariante que hace que el enlace vuelva a
     /// funcionar es que `enc` acabe eligiendo `base`, que es justo lo único
     /// que el respondedor recién reiniciado tiene.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn after_a_relink_both_ends_land_on_the_same_epoch() {
         const LOOKAHEAD: u32 = 2;
         let base = 3u32;
@@ -701,7 +720,7 @@ mod tests {
     }
 
     /// Con la ventana completa, la cota no cambia nada.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn enc_still_honours_lookahead_when_the_window_is_complete() {
         let store = SecretStore::new(2, 1000);
         for e in 0..=9u32 {
@@ -717,7 +736,7 @@ mod tests {
     }
 
     /// Varios ids de una misma época ausente cuestan UNA espera, no N.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_missing_epoch_is_waited_for_once_per_batch() {
         let store = SecretStore::new(0, 1000);
         store.insert(5, fresh_secret(5));
@@ -726,7 +745,7 @@ mod tests {
         // sólo la primera vez. Con SECRET_WAIT=10 s, tres esperas serían
         // 30 s; una sola son 10 s.
         let ids: Vec<Uuid> = (0..3).map(|_| make_key_id(9)).collect();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let out = src.dec_keys(&ids).await.unwrap();
         assert!(out.is_empty());
         assert!(
@@ -741,7 +760,7 @@ mod tests {
     /// recibe y no se recupera solo. Pedir resincronización con la época MÁS
     /// ALTA vista es lo que permite al iniciador negociar por encima de las
     /// dos ventanas.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_unknown_peer_epoch_asks_for_a_resync_with_that_epoch() {
         let store = SecretStore::new(0, 1000);
         store.insert(5, fresh_secret(5));
@@ -760,7 +779,7 @@ mod tests {
 
     /// Sin frames indescifrables no se pide nada: el bucle de rotación no
     /// debe despertarse ni renegociar porque sí.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_decryptable_batch_asks_for_nothing() {
         let store = SecretStore::new(0, 1000);
         store.insert(5, fresh_secret(5));

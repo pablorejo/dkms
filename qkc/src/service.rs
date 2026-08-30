@@ -204,7 +204,7 @@ impl QkcService {
                         cfg.qkc_id,
                         link.neighbor_id,
                         link.neighbor_peer_addr.clone(),
-                        Arc::clone(peer_out),
+                        Arc::clone(peer_out) as Arc<dyn crate::pqc_handshake::HandshakeTransport>,
                         Arc::clone(&store),
                         Arc::clone(&clock),
                         lookahead,

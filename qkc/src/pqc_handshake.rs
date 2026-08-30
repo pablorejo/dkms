@@ -35,13 +35,19 @@
 
 use std::collections::HashMap;
 use std::{
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use common::crypto::link_mac::{self, TAG_INIT, TAG_LEN, TAG_RESP};
 use common::crypto::pqc_sign::{self, SIGNATURE_LEN};
 use parking_lot::Mutex;
+// `tokio::time::Instant` y no `std`: es el mismo reloj en producción y el
+// reloj pausable de los tests del bucle de rotación.
+use tokio::{sync::Notify, time::Instant};
 use tracing::{debug, info, warn};
 use wire::{
     Frame, FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED,
@@ -62,13 +68,42 @@ const INIT_RETRY: Duration = Duration::from_millis(300);
 /// ML-KEM por cada rebote del socket.
 const RELINK_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Tope de un `establish`: pasado esto sin RESP se devuelve el control al
+/// bucle de rotación, que es el mismo que atiende reconexiones y resyncs.
+/// Sin tope, un peer mudo congelaba las tres cosas y el enlace parecía sano.
+const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Cuánto espera el bucle antes de volver a intentar un `establish` que
+/// agotó su tiempo.
+const ESTABLISH_RETRY: Duration = Duration::from_secs(30);
+
+/// Por dónde salen los frames de handshake y por dónde llega la señal de
+/// reconexión. En producción es [`PeerOut`]; en los tests, un bucle en
+/// proceso hacia el otro extremo, que es lo que permite probar el bucle de
+/// rotación entero con el reloj de tokio pausado.
+pub trait HandshakeTransport: Send + Sync {
+    /// Encola un frame hacia el peer. `false` si no cupo.
+    fn send(&self, peer_id: u32, peer_addr: &str, frame: Frame) -> bool;
+    /// Señal que se dispara en cada RE-conexión con el peer.
+    fn reconnect_signal(&self, peer_id: u32, peer_addr: &str) -> Arc<Notify>;
+}
+
+impl HandshakeTransport for PeerOut {
+    fn send(&self, peer_id: u32, peer_addr: &str, frame: Frame) -> bool {
+        PeerOut::send(self, peer_id, peer_addr, frame)
+    }
+    fn reconnect_signal(&self, peer_id: u32, peer_addr: &str) -> Arc<Notify> {
+        PeerOut::reconnect_signal(self, peer_id, peer_addr)
+    }
+}
+
 /// Coordinador del handshake ML-KEM (multi-época) de UN enlace PQC.
 pub struct PqcHandshake {
     suite: String,
     my_id: u32,
     peer_id: u32,
     peer_addr: String,
-    peer_out: Arc<PeerOut>,
+    peer_out: Arc<dyn HandshakeTransport>,
     store: Arc<SecretStore>,
     /// Disparador de rotación (lo alimenta el `PqcKeySource` emisor).
     clock: Arc<RekeyClock>,
@@ -78,6 +113,17 @@ pub struct PqcHandshake {
     rekey_secs: u64,
     /// Decap keys del iniciador por época, vivas hasta que llega el RESP.
     pending_sk: Mutex<HashMap<u32, Zeroizing<Vec<u8>>>>,
+    /// Pubkey de cada keypair pendiente, para reenviar el MISMO INIT cuando
+    /// `establish` agotó su tiempo y se reintenta. Un keypair nuevo para la
+    /// misma época dejaría en vuelo un RESP que decapsularíamos con la sk
+    /// equivocada — implicit rejection: secreto distinto, sin error.
+    pending_pk: Mutex<HashMap<u32, Vec<u8>>>,
+    /// Frames de handshake que `peer_out` no encoló (cola del peer llena).
+    handshake_drops: AtomicU64,
+    /// Veces que `establish` agotó [`ESTABLISH_TIMEOUT`] sin RESP.
+    establish_timeouts: AtomicU64,
+    /// Rotaciones por reloj (tiempo o volumen) completadas por el bucle.
+    rotations: AtomicU64,
     /// Por época, lo que el respondedor encapsuló: `(pubkey del iniciador,
     /// ciphertext)`. La pubkey va en la clave porque el ciphertext SOLO sirve
     /// para esa pubkey — ver [`PqcHandshake::handle_init`].
@@ -124,7 +170,7 @@ impl PqcHandshake {
         my_id: u32,
         peer_id: u32,
         peer_addr: String,
-        peer_out: Arc<PeerOut>,
+        peer_out: Arc<dyn HandshakeTransport>,
         store: Arc<SecretStore>,
         clock: Arc<RekeyClock>,
         lookahead: u32,
@@ -146,6 +192,10 @@ impl PqcHandshake {
             lookahead,
             rekey_secs,
             pending_sk: Mutex::new(HashMap::new()),
+            pending_pk: Mutex::new(HashMap::new()),
+            handshake_drops: AtomicU64::new(0),
+            establish_timeouts: AtomicU64::new(0),
+            rotations: AtomicU64::new(0),
             resp_cache: Mutex::new(HashMap::new()),
             last_relink: Mutex::new(None),
             psk,
@@ -206,7 +256,7 @@ impl PqcHandshake {
     /// - `sign` + seed → 0x26/0x27 con `payload = época‖blob‖firma_MLDSA`.
     /// - `prefer`/`require` + psk → 0x23/0x24 con `payload = época‖blob‖tag_HMAC`.
     /// - resto → 0x21/0x22 en claro.
-    fn send_handshake(&self, is_init: bool, epoch: u32, blob: &[u8]) {
+    fn send_handshake(&self, is_init: bool, epoch: u32, blob: &[u8]) -> bool {
         let (plain, hmac_kind, signed_kind, tag_kind) = if is_init {
             (
                 FRAME_PQC_KEM_INIT,
@@ -276,7 +326,23 @@ impl PqcHandshake {
         f.receiver_id = self.peer_id;
         f.dest_final = self.peer_id;
         f.payload = payload;
-        self.peer_out.send(self.peer_id, &self.peer_addr, f);
+        let ok = self.peer_out.send(self.peer_id, &self.peer_addr, f);
+        if !ok {
+            // Un INIT que no sale es indistinguible de uno que salió y no
+            // tuvo respuesta, salvo por esto.
+            let n = self.handshake_drops.fetch_add(1, Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    me = self.my_id,
+                    peer = self.peer_id,
+                    epoch,
+                    kind,
+                    dropped = n + 1,
+                    "qkc.pqc: frame de handshake no encolado (cola hacia el peer llena)"
+                );
+            }
+        }
+        ok
     }
 
     /// Extrae `(época, blob)` de un payload de handshake aplicando la política.
@@ -417,35 +483,98 @@ impl PqcHandshake {
             .reconnect_signal(self.peer_id, &self.peer_addr);
         let me = self.clone();
         tokio::spawn(async move {
+            // Época más alta que queremos negociada: arranca en el lookahead,
+            // cada rotación la sube en uno y un re-enlace la lleva a
+            // `base + lookahead`.
+            let mut target: u32 = me.lookahead;
+            // Queda trabajo cuando un `establish` agotó su tiempo: se
+            // reintenta pasado ESTABLISH_RETRY, atendiendo mientras tanto
+            // reconexiones y resyncs.
+            let mut need_work = true;
+            // Poda pendiente de un re-enlace que no pudo completarse.
+            let mut prune_after: Option<u32> = None;
+            let mut last_rotation = Instant::now();
+            // El temporizador vive FUERA del bucle. Reconstruirlo en cada
+            // vuelta lo reiniciaba con cada reconexión o resync, y un enlace
+            // con algún bache no llegaba a rotar nunca (una rotación en 15 h,
+            // 2026-08-24). Solo el brazo de rotación lo rearma. Con la
+            // rotación desactivada `wait_rotate` no resuelve jamás, que es
+            // exactamente lo que queremos.
+            let mut rotate = std::pin::pin!(me.clock.wait_rotate(me.rekey_secs));
+            let mut retry = std::pin::pin!(tokio::time::sleep(Duration::ZERO));
             for epoch in 0..=me.lookahead {
-                me.establish(epoch).await;
+                if !me.establish(epoch).await {
+                    // Arranque sin peer: el bucle sigue intentándolo sin
+                    // dejar de escuchar. Antes esto bloqueaba aquí para
+                    // siempre.
+                    retry.as_mut().set(tokio::time::sleep(ESTABLISH_RETRY));
+                    break;
+                }
+                need_work = false;
             }
             loop {
                 // Un único dueño de `establish`: este bucle. El re-enlace
                 // NO puede ir en su propia task o dos `establish` de la
                 // misma época pisarían `pending_sk` y el RESP se
                 // decapsularía con la sk equivocada.
-                if me.clock_disabled() {
-                    // Sin rotación configurada seguimos atendiendo
-                    // reconexiones y peticiones de resincronización: son lo
-                    // que resucita un enlace cuyo respondedor se reinició.
-                    tokio::select! {
-                        _ = reconnect.notified() => me.relink(0).await,
-                        peer_epoch = me.store.resync_requested() => me.relink(peer_epoch).await,
-                    }
-                    continue;
-                }
                 tokio::select! {
-                    _ = me.clock.wait_rotate(me.rekey_secs) => {
-                        let next = me.store.highest().unwrap_or(0).saturating_add(1);
-                        me.establish(next).await;
+                    biased;
+                    _ = &mut retry, if need_work => {
+                        if me.establish_up_to(target).await {
+                            need_work = false;
+                            if let Some(base) = prune_after.take() {
+                                let dropped = me.prune_below(base);
+                                info!(me = me.my_id, peer = me.peer_id, base, epocas_descartadas = dropped,
+                                      "qkc.pqc.relink completado en el reintento");
+                            }
+                        } else {
+                            retry.as_mut().set(tokio::time::sleep(ESTABLISH_RETRY));
+                        }
                     }
-                    _ = reconnect.notified() => me.relink(0).await,
+                    trigger = &mut rotate => {
+                        let next = me.store.highest().map_or(target, |h| h.saturating_add(1));
+                        target = target.max(next);
+                        let n = me.rotations.fetch_add(1, Ordering::Relaxed);
+                        // La línea que cuenta el soak: una por rotación, con
+                        // el intervalo real desde la anterior.
+                        info!(
+                            me = me.my_id,
+                            peer = me.peer_id,
+                            epoch = target,
+                            rotation = n + 1,
+                            since_last_s = last_rotation.elapsed().as_secs(),
+                            trigger = ?trigger,
+                            "qkc.pqc.rotation"
+                        );
+                        last_rotation = Instant::now();
+                        rotate.as_mut().set(me.clock.wait_rotate(me.rekey_secs));
+                        need_work = true;
+                        retry.as_mut().set(tokio::time::sleep(Duration::ZERO));
+                    }
+                    _ = reconnect.notified() => {
+                        if let Some((aim, complete)) = me.relink(0).await {
+                            target = target.max(aim);
+                            if !complete {
+                                prune_after = Some(aim.saturating_sub(me.lookahead));
+                                need_work = true;
+                                retry.as_mut().set(tokio::time::sleep(ESTABLISH_RETRY));
+                            }
+                        }
+                    }
                     // El lado DEC ha visto al peer cifrar con épocas que no
                     // tenemos. Es la única forma de enterarse: las ventanas de
                     // los dos extremos pueden separarse tras un reinicio y
                     // nadie lo nota hasta que llega un frame indescifrable.
-                    peer_epoch = me.store.resync_requested() => me.relink(peer_epoch).await,
+                    peer_epoch = me.store.resync_requested() => {
+                        if let Some((aim, complete)) = me.relink(peer_epoch).await {
+                            target = target.max(aim);
+                            if !complete {
+                                prune_after = Some(aim.saturating_sub(me.lookahead));
+                                need_work = true;
+                                retry.as_mut().set(tokio::time::sleep(ESTABLISH_RETRY));
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -475,7 +604,7 @@ impl PqcHandshake {
     /// ventana está más alta— seguiría cifrando con las suyas y el enlace
     /// no convergería nunca. Es exactamente lo que se vio en el testbed el
     /// 2026-08-03: `dec_misses == dec_lookups` de forma permanente.
-    async fn relink(&self, peer_epoch: u32) {
+    async fn relink(&self, peer_epoch: u32) -> Option<(u32, bool)> {
         let now = Instant::now();
         {
             let mut last = self.last_relink.lock();
@@ -485,13 +614,14 @@ impl PqcHandshake {
                         peer = self.peer_id,
                         "qkc.pqc.relink omitido (demasiado seguido)"
                     );
-                    return;
+                    return None;
                 }
             }
             *last = Some(now);
         }
         let mine = self.store.highest().map(|h| h + 1).unwrap_or(0);
         let base = mine.max(peer_epoch.saturating_add(1));
+        let aim = base.saturating_add(self.lookahead);
         warn!(
             me = self.my_id,
             peer = self.peer_id,
@@ -499,55 +629,130 @@ impl PqcHandshake {
             peer_epoch,
             "qkc.pqc.relink: renegocio el enlace (reconexión del peer o épocas suyas que no tengo)",
         );
-        for epoch in base..=base.saturating_add(self.lookahead) {
-            self.establish(epoch).await;
+        let mut complete = true;
+        for epoch in base..=aim {
+            if !self.establish(epoch).await {
+                complete = false;
+                break;
+            }
         }
-        // Podamos DESPUÉS de negociar: si vaciáramos antes, `enc_keys` se
-        // quedaría sin ninguna época mientras dura el handshake.
-        let dropped = self.store.prune_below(base);
-        self.pending_sk.lock().retain(|e, _| *e >= base);
-        self.resp_cache.lock().retain(|e, _| *e >= base);
-        info!(
-            me = self.my_id,
-            peer = self.peer_id,
-            base,
-            epocas_descartadas = dropped,
-            "qkc.pqc.relink completado",
-        );
+        if complete {
+            // Podamos DESPUÉS de negociar: si vaciáramos antes, `enc_keys` se
+            // quedaría sin ninguna época mientras dura el handshake.
+            let dropped = self.prune_below(base);
+            info!(
+                me = self.my_id,
+                peer = self.peer_id,
+                base,
+                epocas_descartadas = dropped,
+                "qkc.pqc.relink completado",
+            );
+        } else {
+            warn!(
+                me = self.my_id,
+                peer = self.peer_id,
+                base,
+                aim,
+                "qkc.pqc.relink incompleto: el peer no contesta; el bucle reintenta y poda al terminar",
+            );
+        }
+        Some((aim, complete))
     }
 
+    /// Poda las épocas por debajo de `base` en el store y en los pendientes.
+    fn prune_below(&self, base: u32) -> usize {
+        let dropped = self.store.prune_below(base);
+        self.pending_sk.lock().retain(|e, _| *e >= base);
+        self.pending_pk.lock().retain(|e, _| *e >= base);
+        self.resp_cache.lock().retain(|e, _| *e >= base);
+        dropped
+    }
+
+    /// Establece, en orden, todas las épocas que faltan hasta `target`.
+    /// `false` si alguna agotó su tiempo (las anteriores quedan hechas).
+    async fn establish_up_to(&self, target: u32) -> bool {
+        let from = self.store.highest().map_or(0, |h| h.saturating_add(1));
+        for epoch in from..=target {
+            if !self.establish(epoch).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Sin volumen (`n == 0`) ni tiempo (`rekey_secs == 0`) no hay rotación:
+    /// `wait_rotate` queda pendiente para siempre y el bucle solo atiende
+    /// reconexiones y resyncs.
+    #[cfg(test)]
     fn clock_disabled(&self) -> bool {
-        // n==0 (sin volumen) y rekey_secs==0 (sin tiempo) ⇒ no rota.
         self.rekey_secs == 0 && self.clock.is_volume_disabled()
     }
 
     /// Iniciador: establece el secreto de `epoch` (idempotente). Genera el
-    /// keypair, reenvía INIT{epoch,pk} con backoff hasta que el RESP llega y
-    /// `store` tiene la época.
-    async fn establish(&self, epoch: u32) {
+    /// keypair —o reutiliza el de un intento anterior que agotó su tiempo—,
+    /// reenvía INIT{epoch,pk} cada [`INIT_RETRY`] hasta que llega el RESP y
+    /// `store` tiene la época, o hasta [`ESTABLISH_TIMEOUT`]. Devuelve si la
+    /// época quedó establecida.
+    ///
+    /// Acotado a propósito: este es el único dueño del handshake y el bucle
+    /// que lo llama es el mismo que atiende reconexiones y resyncs. Un
+    /// `establish` sin límite contra un peer mudo congelaba las tres cosas y
+    /// se veía desde fuera como un enlace sano que nunca rota.
+    async fn establish(&self, epoch: u32) -> bool {
         if self.store.contains(epoch) {
-            return;
+            return true;
         }
-        let kem = match common::crypto::pqc::kem_for(&self.suite) {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(peer = self.peer_id, error = %e, "qkc.pqc: kem_for failed");
-                return;
+        let pubkey = {
+            let reuse = self.pending_sk.lock().contains_key(&epoch);
+            let pk = if reuse {
+                self.pending_pk.lock().get(&epoch).cloned()
+            } else {
+                None
+            };
+            match pk {
+                Some(pk) => pk,
+                None => {
+                    let kem = match common::crypto::pqc::kem_for(&self.suite) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!(peer = self.peer_id, error = %e, "qkc.pqc: kem_for failed");
+                            return false;
+                        }
+                    };
+                    let kp = match kem.keygen() {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!(peer = self.peer_id, error = %e, "qkc.pqc: keygen failed");
+                            return false;
+                        }
+                    };
+                    self.pending_sk
+                        .lock()
+                        .insert(epoch, Zeroizing::new(kp.secret));
+                    self.pending_pk.lock().insert(epoch, kp.public.clone());
+                    kp.public
+                }
             }
         };
-        let kp = match kem.keygen() {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(peer = self.peer_id, error = %e, "qkc.pqc: keygen failed");
-                return;
-            }
-        };
-        self.pending_sk
-            .lock()
-            .insert(epoch, Zeroizing::new(kp.secret));
-        let pubkey = kp.public;
+        let started = Instant::now();
         let mut attempts: u64 = 0;
         while !self.store.contains(epoch) {
+            if started.elapsed() >= ESTABLISH_TIMEOUT {
+                let n = self.establish_timeouts.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    me = self.my_id,
+                    peer = self.peer_id,
+                    epoch,
+                    attempts,
+                    timeouts = n + 1,
+                    handshake_drops = self.handshake_drops.load(Ordering::Relaxed),
+                    "qkc.pqc.establish: sin RESP del peer en {} s; devuelvo el control al bucle \
+                     (reconexiones y resyncs) y reintento en {} s",
+                    ESTABLISH_TIMEOUT.as_secs(),
+                    ESTABLISH_RETRY.as_secs(),
+                );
+                return false;
+            }
             self.send_handshake(true, epoch, &pubkey);
             attempts += 1;
             if attempts.is_multiple_of(20) {
@@ -559,6 +764,8 @@ impl PqcHandshake {
             tokio::time::sleep(INIT_RETRY).await;
         }
         self.pending_sk.lock().remove(&epoch);
+        self.pending_pk.lock().remove(&epoch);
+        true
     }
 
     /// Respondedor: llegó un INIT `época‖pubkey` (`authed` = frame 0x23).
@@ -1006,5 +1213,163 @@ mod tests {
             epoch_of(&[0, 0, 0, 5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]),
             5
         );
+    }
+
+    // ─── Bucle de rotación, con el reloj de tokio pausado ─────────────
+
+    /// Transporte en proceso: lo que un extremo manda se entrega al otro en
+    /// la misma llamada. `deliver = false` traga los frames (peer caído);
+    /// `reject_first = n` hace que las primeras `n` colas "estén llenas".
+    struct Loopback {
+        other: Mutex<Option<Arc<PqcHandshake>>>,
+        deliver: std::sync::atomic::AtomicBool,
+        reject_first: AtomicU64,
+        reconnect: Arc<Notify>,
+    }
+
+    impl Loopback {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                other: Mutex::new(None),
+                deliver: std::sync::atomic::AtomicBool::new(true),
+                reject_first: AtomicU64::new(0),
+                reconnect: Arc::new(Notify::new()),
+            })
+        }
+    }
+
+    impl HandshakeTransport for Loopback {
+        fn send(&self, _peer_id: u32, _peer_addr: &str, frame: Frame) -> bool {
+            if self.reject_first.load(Ordering::Relaxed) > 0 {
+                self.reject_first.fetch_sub(1, Ordering::Relaxed);
+                return false;
+            }
+            if !self.deliver.load(Ordering::Relaxed) {
+                return true;
+            }
+            let other = self.other.lock().clone();
+            if let Some(o) = other {
+                match frame.kind {
+                    FRAME_PQC_KEM_INIT => o.handle_init(&frame.payload, RecvAuth::Plain),
+                    FRAME_PQC_KEM_RESP => o.handle_resp(&frame.payload, RecvAuth::Plain),
+                    _ => {}
+                }
+            }
+            true
+        }
+        fn reconnect_signal(&self, _peer_id: u32, _peer_addr: &str) -> Arc<Notify> {
+            self.reconnect.clone()
+        }
+    }
+
+    /// Iniciador (1) y respondedor (2) unidos por dos `Loopback`; se devuelve
+    /// el del iniciador, que es donde se simulan caídas y reconexiones.
+    fn linked_pair(rekey_secs: u64) -> (Arc<PqcHandshake>, Arc<PqcHandshake>, Arc<Loopback>) {
+        let to_resp = Loopback::new();
+        let to_ini = Loopback::new();
+        let mk = |my: u32, peer: u32, out: Arc<Loopback>| {
+            PqcHandshake::new(
+                common::crypto::pqc::suite::ML_KEM_768.to_string(),
+                my,
+                peer,
+                "127.0.0.1:1".to_string(),
+                out,
+                SecretStore::new(2, 1000),
+                RekeyClock::new(0),
+                2,
+                rekey_secs,
+                1024,
+                None,
+                PqcAuth::Off,
+                None,
+                None,
+            )
+        };
+        let ini = mk(1, 2, to_resp.clone());
+        let resp = mk(2, 1, to_ini.clone());
+        *to_resp.other.lock() = Some(resp.clone());
+        *to_ini.other.lock() = Some(ini.clone());
+        (ini, resp, to_resp)
+    }
+
+    /// Un enlace sin tráfico rota igual: el disparo por tiempo no depende de
+    /// que pase nada más por el enlace.
+    #[tokio::test(start_paused = true)]
+    async fn rotation_fires_on_idle_link() {
+        let (ini, resp, _t) = linked_pair(100);
+        ini.spawn_rotation();
+        tokio::time::sleep(Duration::from_secs(1005)).await;
+        assert_eq!(ini.rotations.load(Ordering::Relaxed), 10);
+        // 0..=2 al arrancar y una época más por rotación.
+        assert_eq!(ini.store.highest(), Some(12));
+        assert_eq!(resp.store.highest(), Some(12));
+        assert_eq!(ini.establish_timeouts.load(Ordering::Relaxed), 0);
+    }
+
+    /// El soak de 15 h del 2026-08-24: una rotación en vez de catorce. Con el
+    /// temporizador reconstruido en cada vuelta del `select!`, cada reconexión
+    /// o resync reiniciaba la hora. Tres horas con un rebote cada diez minutos
+    /// tienen que dar tres rotaciones, no cero.
+    #[tokio::test(start_paused = true)]
+    async fn time_rotation_survives_spurious_wakeups() {
+        let (ini, resp, t) = linked_pair(3600);
+        ini.spawn_rotation();
+        for _ in 0..18 {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            t.reconnect.notify_one();
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(
+            ini.rotations.load(Ordering::Relaxed),
+            3,
+            "3 h → 3 rotaciones aunque el enlace rebote cada 10 min"
+        );
+        assert_eq!(ini.store.highest(), resp.store.highest());
+        assert!(ini.store.highest().unwrap() >= 2 + 3);
+    }
+
+    /// Un peer mudo no congela el bucle: `establish` agota su tiempo, el
+    /// bucle vuelve a escuchar, y la reconexión que llega después se
+    /// atiende. Antes se quedaba dentro de `establish` para siempre.
+    #[tokio::test(start_paused = true)]
+    async fn establish_timeout_keeps_loop_responsive() {
+        let (ini, resp, t) = linked_pair(3600);
+        t.deliver.store(false, Ordering::Relaxed);
+        ini.spawn_rotation();
+        tokio::time::sleep(ESTABLISH_TIMEOUT + Duration::from_secs(5)).await;
+        assert_eq!(ini.establish_timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(ini.store.highest(), None);
+
+        // El peer vuelve: la señal de reconexión se atiende y el re-enlace
+        // negocia por encima de las dos ventanas (base = 1 con peer_epoch 0).
+        t.deliver.store(true, Ordering::Relaxed);
+        t.reconnect.notify_one();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(ini.store.highest(), Some(3));
+        assert_eq!(resp.store.highest(), Some(3));
+        assert!(
+            ini.pending_pk.lock().is_empty(),
+            "nada pendiente tras el re-enlace"
+        );
+
+        // El reintento que quedó programado no rompe nada.
+        tokio::time::sleep(ESTABLISH_RETRY + Duration::from_secs(5)).await;
+        assert_eq!(ini.store.highest(), Some(3));
+        assert_eq!(ini.establish_timeouts.load(Ordering::Relaxed), 1);
+    }
+
+    /// Un INIT que no cabe en la cola se cuenta y se reintenta con el MISMO
+    /// keypair, y la época acaba establecida.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_init_is_counted_and_retried() {
+        let (ini, resp, t) = linked_pair(3600);
+        t.reject_first.store(3, Ordering::Relaxed);
+        ini.spawn_rotation();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(ini.handshake_drops.load(Ordering::Relaxed), 3);
+        assert_eq!(ini.store.highest(), Some(2));
+        assert_eq!(resp.store.highest(), Some(2));
+        assert!(ini.pending_pk.lock().is_empty(), "sin keypairs colgando");
+        assert_eq!(*ini.store.get(0).unwrap(), *resp.store.get(0).unwrap());
     }
 }
