@@ -577,7 +577,10 @@ mod tests {
     use crate::config::PeerCfg;
 
     fn pair() -> (Arc<E2e>, Arc<E2e>) {
-        let cfg = TransportE2eCfg::default();
+        pair_with(TransportE2eCfg::default())
+    }
+
+    fn pair_with(cfg: TransportE2eCfg) -> (Arc<E2e>, Arc<E2e>) {
         let reg = || Arc::new(PeerRegistry::from_config(HashMap::<String, PeerCfg>::new()));
         let a = Arc::new(E2e::new("dkms-a", cfg.clone(), None, reg()));
         let b = Arc::new(E2e::new("dkms-b", cfg, None, reg()));
@@ -684,6 +687,47 @@ mod tests {
         assert!(matches!(
             b.open("dkms-a", &m, "k1", &ct).unwrap_err(),
             E2eError::Replay(ReplayError::Replayed { .. })
+        ));
+    }
+
+    /// La ventana anti-replay por peer emisor: lo que llega desordenado
+    /// dentro de la anchura se acepta una vez; lo que queda por debajo del
+    /// suelo se rechaza como viejo aunque nunca se hubiera visto. Espejo de
+    /// las pruebas de `frame_mac::ReplayWindow`, aquí sobre `seal`/`open`.
+    #[test]
+    fn replay_window_accepts_out_of_order_within_width_and_rejects_below_the_floor() {
+        let (a, b) = pair_with(TransportE2eCfg {
+            replay_window: 4,
+            ..TransportE2eCfg::default()
+        });
+        agree(&a, &b);
+        // La anchura pedida (4) queda por debajo del suelo de la ventana
+        // (64, ver `frame_mac::ReplayWindow::new`): hacen falta más de 64
+        // contadores para dejar algo por debajo del suelo.
+        let sealed: Vec<_> = (1..=70u8)
+            .map(|i| {
+                let id = format!("k{i}");
+                let mut h = header(&id);
+                let ct = a.seal("dkms-b", &id, &mut h, &[i; 32]).unwrap();
+                (id, as_map(&h), ct)
+            })
+            .collect();
+        let open = |i: usize| {
+            let (id, m, ct) = &sealed[i];
+            b.open("dkms-a", m, id, ct)
+        };
+        // Llega primero el último: el suelo de la ventana sube con él.
+        assert_eq!(open(69).unwrap(), [70u8; 32]);
+        // Los que quedan dentro de la anchura entran, desordenados y una vez.
+        assert_eq!(open(65).unwrap(), [66u8; 32]);
+        assert!(matches!(
+            open(65).unwrap_err(),
+            E2eError::Replay(ReplayError::Replayed { .. })
+        ));
+        // Los de más abajo del suelo, nunca vistos, se rechazan por viejos.
+        assert!(matches!(
+            open(0).unwrap_err(),
+            E2eError::Replay(ReplayError::TooOld { .. })
         ));
     }
 

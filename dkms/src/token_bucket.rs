@@ -16,7 +16,8 @@
 //! SAEs es un `DashMap`). En el camino caliente solo se toca el `Mutex` del
 //! SAE concreto, no el `DashMap` global.
 
-use std::time::Instant;
+// `tokio::time::Instant`: el mismo reloj en producción, pausable en tests.
+use tokio::time::Instant;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -95,6 +96,13 @@ impl Bucket {
         let s = self.state.lock();
         (s.tokens, self.capacity)
     }
+
+    /// Como [`Self::snapshot`] pero aplicando primero el refill pendiente.
+    pub fn snapshot_now(&self) -> (u64, u64) {
+        let mut s = self.state.lock();
+        self.refill_inplace(&mut s, Instant::now());
+        (s.tokens, self.capacity)
+    }
 }
 
 /// Mapa SAE → bucket, con creación perezosa por valores por defecto.
@@ -150,6 +158,45 @@ impl SaeBuckets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// El refill es proporcional al tiempo y se detiene en la capacidad.
+    #[tokio::test(start_paused = true)]
+    async fn tokens_refill_over_time_and_stop_at_capacity() {
+        let b = Bucket::new(10, 4); // 10 de capacidad, 4 tokens/s
+        assert!(b.try_consume(10).is_ok());
+        assert_eq!(b.try_consume(1), Err(0), "vacío");
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        assert_eq!(b.try_consume(3), Err(2), "0,5 s → 2 tokens");
+        assert!(b.try_consume(2).is_ok());
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        assert_eq!(
+            b.snapshot_now(),
+            (10, 10),
+            "un minuto no pasa de la capacidad"
+        );
+        assert!(b.try_consume(10).is_ok());
+    }
+
+    /// Los límites por SAE se aplican al bucket vivo y los nuevos parten de
+    /// los defaults.
+    #[test]
+    fn per_sae_limits_replace_the_bucket_and_defaults_apply_to_new_saes() {
+        let saes = SaeBuckets::new(100, 400);
+        let a = SaeId::new("sae_a".to_string());
+        assert!(saes.try_consume(&a, 400).is_ok());
+        assert_eq!(saes.try_consume(&a, 1), Err(0));
+        saes.set_limits(&a, 1, 5);
+        assert_eq!(
+            saes.snapshot(&a),
+            Some((5, 5)),
+            "bucket nuevo con la capacidad nueva"
+        );
+        let b = SaeId::new("sae_b".to_string());
+        assert!(
+            saes.try_consume(&b, 400).is_ok(),
+            "el default sigue siendo 400"
+        );
+    }
 
     #[test]
     fn cost_uses_ceil_div_per_dkms_and_per_key() {

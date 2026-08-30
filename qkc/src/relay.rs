@@ -102,15 +102,7 @@ async fn handle_incoming_inner(svc: &QkcService, mut frame: Frame) -> Result<()>
     // (el QKC no añade headers; sólo propaga orr_mp + dkms_mp en el siguiente
     // hop).
     if frame.dest_final == svc.qkc_id() {
-        let mut out = Frame::empty(FRAME_LOCAL_DELIVER);
-        out.sender_id = frame.sender_id;
-        out.receiver_id = svc.qkc_id();
-        out.dest_final = svc.qkc_id();
-        out.key_size_bits = 0;
-        out.key_ids = Vec::new();
-        out.header_orr_mp = frame.header_orr_mp;
-        out.header_dkms_mp = frame.header_dkms_mp;
-        out.payload = plaintext;
+        let out = local_deliver_frame(svc.qkc_id(), &frame, plaintext);
         svc.deliver_local(out);
         svc.stats.incoming_delivered.fetch_add(1, Ordering::Relaxed);
         return Ok(());
@@ -128,6 +120,7 @@ async fn handle_incoming_inner(svc: &QkcService, mut frame: Frame) -> Result<()>
         frame.dest_final,
         &plaintext,
         grade,
+        frame.epoch_id,
         frame.header_orr_mp,
         frame.header_dkms_mp,
     )
@@ -170,18 +163,21 @@ async fn handle_local_send_inner(svc: &QkcService, frame: Frame) -> Result<()> {
         dest,
         &frame.payload,
         grade,
+        frame.epoch_id,
         frame.header_orr_mp,
         frame.header_dkms_mp,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward_plaintext(
     svc: &QkcService,
     next_hop: u32,
     dest_final: u32,
     plaintext: &[u8],
     grade: u8,
+    epoch_id: u32,
     header_orr_mp: Vec<u8>,
     header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
@@ -199,6 +195,7 @@ async fn forward_plaintext(
         ciphertext,
         ids,
         grade,
+        epoch_id,
         header_orr_mp,
         header_dkms_mp,
     )
@@ -212,27 +209,25 @@ fn send_frame_to_peer(
     ciphertext: Vec<u8>,
     key_ids: Vec<Uuid>,
     grade: u8,
+    epoch_id: u32,
     header_orr_mp: Vec<u8>,
     header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
     let out_link = svc
         .link_to(next_hop)
         .ok_or(QkcError::UnknownNeighbor(next_hop))?;
-    let kind = if next_hop == dest_final {
-        FRAME_RECV
-    } else {
-        FRAME_RELAY
-    };
-    let mut out = Frame::empty(kind);
-    out.sender_id = svc.qkc_id();
-    out.receiver_id = next_hop;
-    out.dest_final = dest_final;
-    out.grade = grade; // preserve the key grade across the relay hop
-    out.key_size_bits = out_link.cfg.key_size_bits as u16;
-    out.key_ids = key_ids.iter().map(|u| u.to_string()).collect();
-    out.header_orr_mp = header_orr_mp;
-    out.header_dkms_mp = header_dkms_mp;
-    out.payload = ciphertext;
+    let mut out = outbound_frame(
+        svc.qkc_id(),
+        next_hop,
+        dest_final,
+        grade,
+        epoch_id,
+        out_link.cfg.key_size_bits as u16,
+        key_ids.iter().map(|u| u.to_string()).collect(),
+        header_orr_mp,
+        header_dkms_mp,
+        ciphertext,
+    );
 
     // El MAC va sobre el frame ya montado: cubre el ciphertext, las identidades
     // y los dos headers que el QKC propaga sin mirar. Después de esto el kind
@@ -251,6 +246,64 @@ fn send_frame_to_peer(
         )));
     }
     Ok(())
+}
+
+/// Lo que el QKC PROPAGA de un frame que atraviesa, sin mirarlo: los dos
+/// headers de las capas de arriba, el grado, y **`epoch_id`** — la época del
+/// `master_secret` con la que el ORR de destino pela la cebolla. No es del
+/// QKC (el OTP del enlace lleva sus épocas dentro de los `key_id`), pero
+/// viaja en el prefijo del wire y aquí es donde se perdía: los frames se
+/// reconstruían con `Frame::empty` y llegaban siempre con época 0. Mientras
+/// el ORR no rotaba nadie lo vio; en cuanto rotó, cada frame fallaba el tag
+/// (medido 2026-08-30: `peel_failed` ≈ 25 % y re-bootstraps en bucle).
+fn local_deliver_frame(qkc_id: u32, frame: &Frame, plaintext: Vec<u8>) -> Frame {
+    let mut out = Frame::empty(FRAME_LOCAL_DELIVER);
+    out.sender_id = frame.sender_id;
+    out.receiver_id = qkc_id;
+    out.dest_final = qkc_id;
+    out.grade = frame.grade;
+    out.epoch_id = frame.epoch_id;
+    out.key_size_bits = 0;
+    out.key_ids = Vec::new();
+    out.header_orr_mp = frame.header_orr_mp.clone();
+    out.header_dkms_mp = frame.header_dkms_mp.clone();
+    out.payload = plaintext;
+    out
+}
+
+/// Frame hacia el siguiente QKC (`FRAME_RECV` si es el último salto,
+/// `FRAME_RELAY` si no), con todo lo que se propaga (ver
+/// [`local_deliver_frame`]) y lo propio del enlace de salida.
+#[allow(clippy::too_many_arguments)]
+fn outbound_frame(
+    me: u32,
+    next_hop: u32,
+    dest_final: u32,
+    grade: u8,
+    epoch_id: u32,
+    key_size_bits: u16,
+    key_ids: Vec<String>,
+    header_orr_mp: Vec<u8>,
+    header_dkms_mp: Vec<u8>,
+    ciphertext: Vec<u8>,
+) -> Frame {
+    let kind = if next_hop == dest_final {
+        FRAME_RECV
+    } else {
+        FRAME_RELAY
+    };
+    let mut out = Frame::empty(kind);
+    out.sender_id = me;
+    out.receiver_id = next_hop;
+    out.dest_final = dest_final;
+    out.grade = grade;
+    out.epoch_id = epoch_id;
+    out.key_size_bits = key_size_bits;
+    out.key_ids = key_ids;
+    out.header_orr_mp = header_orr_mp;
+    out.header_dkms_mp = header_dkms_mp;
+    out.payload = ciphertext;
+    out
 }
 
 fn parse_key_ids(strs: &[String]) -> Result<Vec<Uuid>> {
@@ -308,6 +361,34 @@ async fn lookup_or_fetch_dec(link: &LinkRuntime, ids: &[Uuid]) -> Result<Vec<Otp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La época del ORR y los headers de arriba atraviesan el QKC intactos,
+    /// tanto al entregar en local como al reenviar. Es lo que hace posible
+    /// que el ORR rote su `master_secret`.
+    #[test]
+    fn the_orr_epoch_and_headers_survive_the_qkc_hop() {
+        let mut inbound = Frame::empty(FRAME_RECV);
+        inbound.sender_id = 7;
+        inbound.dest_final = 3;
+        inbound.grade = 1;
+        inbound.epoch_id = 42;
+        inbound.header_orr_mp = vec![1, 2, 3];
+        inbound.header_dkms_mp = vec![4, 5];
+
+        let delivered = local_deliver_frame(3, &inbound, vec![9; 32]);
+        assert_eq!(delivered.kind, FRAME_LOCAL_DELIVER);
+        assert_eq!((delivered.epoch_id, delivered.grade), (42, 1));
+        assert_eq!(delivered.header_orr_mp, vec![1, 2, 3]);
+        assert_eq!(delivered.header_dkms_mp, vec![4, 5]);
+        assert_eq!((delivered.sender_id, delivered.dest_final), (7, 3));
+
+        let relayed = outbound_frame(3, 5, 9, 1, 42, 256, vec![], vec![1], vec![2], vec![0; 32]);
+        assert_eq!(relayed.kind, FRAME_RELAY);
+        assert_eq!((relayed.epoch_id, relayed.grade), (42, 1));
+        let last_hop = outbound_frame(3, 9, 9, 1, 42, 256, vec![], vec![1], vec![2], vec![0; 32]);
+        assert_eq!(last_hop.kind, FRAME_RECV);
+        assert_eq!(last_hop.epoch_id, 42);
+    }
 
     #[test]
     fn parse_key_ids_round_trip() {

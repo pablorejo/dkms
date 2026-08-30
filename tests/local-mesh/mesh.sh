@@ -41,6 +41,10 @@
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
 #
+#   DKMS_MESH_PQC_REKEY_SECS    pqc_rekey_secs de los enlaces PQC (default 3600)
+#   DKMS_MESH_E2E_REKEY_SECS    transport_e2e.rekey_secs del DKMS (default 3600)
+#   DKMS_MESH_ROTATION_MS       rotation_period_ms del ORR (default 1 h)
+#   DKMS_MESH_MAX_HOPS          default_max_hops del DKMS (0 = relé; 1 = cebolla e2e)
 #   DKMS_MESH_BOOTSTRAP_TRUST   tofu (default) | strict: el ORR exige anuncios de
 #                              pubkey firmados con el cert de nodo (sin verify keys)
 #   DKMS_MESH_LINK_TYPE         pqc (default) o qkd. En modo qkd se levanta un
@@ -274,6 +278,9 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                     if [ "$PQC_AUTH" = sign ]; then
                         auth=", pqc_auth: sign, peer_verify_key: \"$(cat "$SIGNDIR/qkc-$nb.vk")\""
                     fi
+                    if [ -n "${DKMS_MESH_PQC_REKEY_SECS:-}" ]; then
+                        auth="$auth, pqc_rekey_secs: $DKMS_MESH_PQC_REKEY_SECS"
+                    fi
                     if [ "$FRAME_AUTH" != off ]; then
                         auth="$auth, link_psk: \"$(link_psk "$n" "$nb")\", frame_auth: $FRAME_AUTH"
                     fi
@@ -301,6 +308,17 @@ patch_dkms_toml() {
     local toml=$1
     if [ -n "$TOKENS_PER_TICK" ]; then
         sed -i "/^\[generator\]/a max_tokens_per_peer_per_tick = $TOKENS_PER_TICK" "$toml"
+    fi
+    # Brazo cebolla: max_hops != 0 mete el bootstrap ORR↔ORR y sus épocas en
+    # el camino de datos, que es lo que hay que ejercitar para ver la
+    # rotación del master_secret con tráfico real encima.
+    if [ -n "${DKMS_MESH_MAX_HOPS:-}" ]; then
+        sed -i "/^\[southbound\]/a default_max_hops = $DKMS_MESH_MAX_HOPS" "$toml"
+    fi
+    # Rotación de la época e2e DKMS↔DKMS (default 3600 s). Tabla nueva al final:
+    # es una cabecera, así que no cae dentro de la anterior.
+    if [ -n "${DKMS_MESH_E2E_REKEY_SECS:-}" ]; then
+        printf '\n[transport_e2e]\nrekey_secs = %s\n' "$DKMS_MESH_E2E_REKEY_SECS" >> "$toml"
     fi
     if [ -n "$SAE_MIN_TOKENS" ]; then
         printf '\n[sae]\nmin_capacity_tokens = %s\n' "$SAE_MIN_TOKENS" >> "$toml"
@@ -386,6 +404,13 @@ EOF
             printf 'bootstrap_trust: %s\n' "$DKMS_MESH_BOOTSTRAP_TRUST" >> "$DIR/yml/node$n.orr.yml"
         fi
         python3 "$RENDER" orr "$DIR/yml/node$n.orr.yml" "$DIR/cfg/orr$n" >/dev/null
+        # Periodo de rotación del master_secret (default 1 h): para ver varias
+        # rotaciones en una sesión corta. Se inserta tras `orr_id`, arriba del
+        # todo — el fichero acaba en [tls] y una clave suelta al final caería
+        # dentro de esa tabla.
+        if [ -n "${DKMS_MESH_ROTATION_MS:-}" ]; then
+            sed -i "/^orr_id = /a rotation_period_ms = $DKMS_MESH_ROTATION_MS" "$DIR/cfg/orr$n/default.toml"
+        fi
 
         cat > "$DIR/yml/node$n.dkms.yml" <<EOF
 node_id: "dkms-$n"

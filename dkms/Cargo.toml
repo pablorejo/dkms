@@ -85,4 +85,5 @@ arc-swap           = { workspace = true }
 moka               = { version = "0.12", features = ["future"] }
 
 [dev-dependencies]
+tokio              = { workspace = true, features = ["test-util"] }  # reloj pausable en tests
 tempfile           = "3.10"

@@ -305,6 +305,12 @@ def render_dkms(n, out):
         # máquina; una IP concreta si varios DKMS comparten host, p.ej. tests).
         "ack_socket_addr = " + q(bind + ":" + str(p["ack"])),
         "ack_advertised_endpoint = " + q(adv + ":" + str(p["ack"])),
+        # Transporte de los ACK salientes: `socket` (TCP plano, heredado) o
+        # `etsi020` (POST mTLS, identidad = cert). Y si se ESCUCHA el socket:
+        # en un despliegue mixto hay que seguir escuchando a los peers que
+        # aún acusan por él; con todos en etsi020 se apaga.
+        "ack_transport = " + q(str(n.get("ack_transport", "socket"))),
+        "ack_socket_listen = " + ("true" if n.get("ack_socket_listen", True) else "false"),
     ]
     fr = n.get("fill_rate")
     if fr is not None:

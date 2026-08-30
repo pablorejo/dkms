@@ -444,15 +444,24 @@ async fn main() -> Result<()> {
                 ack_etsi020,
             ));
 
-            // Servidor TCP de ACKs entrantes.
-            if let Some(addr) = ack_socket_addr {
-                let gen_for_socket = gen_arc.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
-                        warn!(error = %e, "ack_socket server exited");
-                    }
-                });
-                info!(%addr, "dkms.ack_socket configured");
+            // Servidor TCP de ACKs entrantes: sin autenticación, así que
+            // solo mientras haya peers que acusen por socket
+            // (`generator.ack_socket_listen`).
+            match (cfg.generator.ack_socket_listen, ack_socket_addr) {
+                (true, Some(addr)) => {
+                    let gen_for_socket = gen_arc.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ack_socket::serve(gen_for_socket, addr).await {
+                            warn!(error = %e, "ack_socket server exited");
+                        }
+                    });
+                    info!(%addr, "dkms.ack_socket configured");
+                }
+                (false, _) => info!(
+                    "dkms.ack_socket: listener apagado (ack_socket_listen = false); los ACK \
+                     entrantes solo se aceptan por ETSI-020 (mTLS)"
+                ),
+                (true, None) => {}
             }
 
             // SAE buffer buckets dinámicos: comparten el handle de rates SDN

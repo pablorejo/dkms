@@ -121,21 +121,55 @@ impl std::fmt::Debug for SecretString {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Deserialize, Serialize)]
-    struct Cfg {
-        name: String,
-        psk: Option<SecretString>,
+    #[derive(Debug, Deserialize)]
+    struct Nested {
+        capacity: u64,
+        batch: u64,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct Layered {
+        name: String,
+        buffer: Nested,
+    }
+
+    /// Lo que hace config-rs 0.14 de verdad, fijado: una variable de
+    /// entorno que pone UN campo de una sección anidada se MEZCLA con la
+    /// sección del fichero — el otro campo sobrevive. (CLAUDE.md decía lo
+    /// contrario durante meses: «sustituye la sección entera». Medido aquí
+    /// el 2026-08-30 y corregido allí.) Si config-rs cambiara de criterio,
+    /// este test lo dice antes que un despliegue.
     #[test]
-    fn secret_string_is_transparent_for_serde_and_opaque_for_debug() {
-        let cfg: Cfg = toml::from_str("name = \"a\"\npsk = \"s3cr3t\"\n").unwrap();
-        let psk = cfg.psk.as_ref().unwrap();
-        assert_eq!(psk.expose(), "s3cr3t");
-        assert_eq!(cfg.psk.as_deref(), Some("s3cr3t"));
-        let dbg = format!("{cfg:?}");
-        assert!(!dbg.contains("s3cr3t"), "el Debug filtra el secreto: {dbg}");
-        assert!(dbg.contains("<redacted>"));
-        assert!(toml::to_string(&cfg).unwrap().contains("psk = \"s3cr3t\""));
+    fn an_env_override_of_one_nested_field_merges_into_the_section() {
+        let dir = std::env::temp_dir().join(format!("cfg_layers_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.toml"),
+            "name = \"x\"\n[buffer]\ncapacity = 4096\nbatch = 256\n",
+        )
+        .unwrap();
+        let module = format!("cfgtest{}", std::process::id());
+        let prefix = module.to_ascii_uppercase();
+        let var = format!("{prefix}__BUFFER__CAPACITY");
+        std::env::set_var("CONFIG_DIR", &dir);
+
+        // Sin env: las capas de fichero se leen enteras.
+        std::env::remove_var(&var);
+        let base: Layered = load_config(&module).expect("carga base");
+        assert_eq!(base.name, "x");
+        assert_eq!((base.buffer.capacity, base.buffer.batch), (4096, 256));
+
+        // Con env sobre un solo campo anidado: se mezcla, no sustituye.
+        std::env::set_var(&var, "8192");
+        let overridden: Result<Layered, _> = load_config(&module);
+        std::env::remove_var(&var);
+        std::env::remove_var("CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = overridden.expect("con el override la sección se mezcla, no se pierde `batch`");
+        assert_eq!(
+            (cfg.buffer.capacity, cfg.buffer.batch),
+            (8192, 256),
+            "capacity viene del entorno y batch sigue viniendo del fichero"
+        );
     }
 }

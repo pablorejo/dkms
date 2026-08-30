@@ -11,7 +11,10 @@ ARG MODULE=qkc
 # Compila los 5 binarios de una pasada y SIN usar ARG MODULE: así la etapa es
 # idéntica para los 5 targets del bake y buildx la construye una sola vez.
 FROM rust:1.88-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler cmake \
+# cmake + clang/libclang: highs-sys (backend del LP del SDN) compila HiGHS con
+# cmake y genera sus bindings con bindgen, que carga libclang en tiempo de build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      protobuf-compiler cmake clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

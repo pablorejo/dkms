@@ -293,10 +293,20 @@ impl BatchedAckClient {
                         Err(e) => {
                             // No se cae al socket: si el operador pidió ACK
                             // autenticado, mandarlo en claro por detrás
-                            // anularía en silencio lo que pidió.
+                            // anularía en silencio lo que pidió. Un lote
+                            // cada 50 ms por peer mientras dure el fallo:
+                            // el contador va a `generator.state`, el log
+                            // habla en las potencias de dos.
                             self.stats.ack_send_failed(peer_id, n);
-                            warn!(peer = peer_id, error = %e, n, why,
-                                  "ack etsi020 falló; NO caigo al socket sin autenticar");
+                            let total = self
+                                .stats
+                                .peer(peer_id)
+                                .ack_send_failed
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            if common::log_throttle::nth_is_loud(total.saturating_sub(n)) {
+                                warn!(peer = peer_id, error = %e, n, why, failed_total = total,
+                                      "ack etsi020 falló; NO caigo al socket sin autenticar");
+                            }
                             return;
                         }
                     }

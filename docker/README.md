@@ -113,8 +113,12 @@ PQC QKC↔QKC. El resto **depende de que estos puertos vivan en red confiable**:
   aunque `listen_ip` sea `0.0.0.0`; solo `control_addr: <ip>` en el `node.yml`
   lo abre, y entonces el DKMS lo avisa al arrancar y toca firewalearlo a la red
   interna. Nunca entre instituciones.
-- **`ack` del DKMS (20009)**: TCP plano sin auth hoy (migración a ETSI-020
-  pendiente). Ábrelo solo entre los DKMS que se enlazan.
+- **`ack` del DKMS (20009)**: TCP plano sin auth. Ábrelo solo entre los DKMS
+  que se enlazan — o mejor, no lo uses: `ack_transport: etsi020` en el
+  `node.yml` manda los ACK por el ETSI-020 mTLS (20006, identidad = cert), y
+  con todos los peers así `ack_socket_listen: false` apaga el listener. Es
+  el último plano cross-institución sin autenticar; el default sigue en
+  `socket` hasta validar el cambio en el testbed, y después se retira.
 - **`local`/`admin` del QKC**: intra-institución. El `grpc` del ORR (20003) va
   con mTLS por defecto; sólo si lo apagas (`grpc_tls: false` en el ORR y
   `orr_tls: false` en el DKMS) DKMS↔ORR lleva material en claro, y entonces

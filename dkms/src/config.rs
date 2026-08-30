@@ -443,6 +443,13 @@ pub struct GeneratorCfg {
     /// extremos y comprobar que `generator.state` sigue moviendo `acked`.
     #[serde(default = "default_ack_transport")]
     pub ack_transport: String,
+    /// Si este DKMS **escucha** ACKs en el socket TCP plano (`ack_socket_addr`).
+    /// Independiente de `ack_transport`, que es la salida: durante un
+    /// despliegue mixto un peer que aún acuse por socket necesita que este
+    /// lado lo escuche. Con todos los peers en `etsi020` se apaga, y con él
+    /// el único plano cross-institución que quedaba sin autenticar.
+    #[serde(default = "default_true")]
+    pub ack_socket_listen: bool,
     /// Override del valor textual que se ANUNCIA a peers en el header
     /// ``ack_endpoint``. Cuando ``ack_socket_addr`` binda en ``0.0.0.0``
     /// (despliegues K8s), su ``to_string()`` produce ``0.0.0.0:PORT`` que
@@ -514,6 +521,7 @@ impl Default for GeneratorCfg {
             ack_reaper_ms: 1_000,
             ack_socket_addr: None,
             ack_transport: default_ack_transport(),
+            ack_socket_listen: true,
             ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
             max_emits_in_flight: 128,
