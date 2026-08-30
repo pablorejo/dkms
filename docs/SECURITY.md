@@ -9,7 +9,7 @@ Referencia y parcialmente sustituye a `audit_2026_05.md` (findings H-5, H-6,
 M-1) y `orr/TODO_SECURITY.md` (P2). Todo lo citado con `file:line` fue
 verificado el 2026-08-27.
 
-Estado global: **Fases 1, 2, 3, 5, 7 completas; 4 y 6 núcleo hecho**
+Estado global: **Fases 1, 2, 3, 5, 7, 8 y 9 completas; 4 y 6 hechas en código, con los flips de default (etsi020 / strict) y el borrado del socket de ACK pendientes de la validación en testbed**
 (2026-08-27). Todas las fases recorridas. Quedan diferidos, con requisitos
 claros: en 4, eliminar el socket de ACK (necesita testbed); en 6, pinning
 estable (necesita persistir la identidad ORR — decisión del usuario) y auth
@@ -360,7 +360,14 @@ propietario → 403.
 ### Fase 4 — Plano peer DKMS: eliminar el ACK socket + binding en ext_keys
 
 **Estado: NÚCLEO DE SEGURIDAD IMPLEMENTADO (2026-08-27); eliminación del
-socket diferida a testbed.**
+socket diferida a testbed.** Desde 2026-08-30 todo lo que hace falta para el
+rollout está en código: `ack_transport` (`socket` | `etsi020`) y
+`ack_socket_listen` se renderizan desde `node.yml`, el listener del socket es
+opcional (para un despliegue mixto hay que seguir escuchando a los peers que
+aún acusan por él), y el fallo del envío etsi020 habla en potencias de dos.
+Los defaults siguen en `socket`/`true` hasta medir en el testbed los brazos
+socket → etsi020+listener → etsi020 sin listener (t20); después, el flip y el
+borrado (`ack_socket.rs`, la derivación `+1000`, el header `ack_endpoint`).
 - **`ext_keys` ya está atado a la identidad del cert**: `handle_incoming_ext_keys`
   indexa `buffer_dec` por `peer` = `DkmsPeer.node_id` (SAN del cert), no por
   ningún campo del cuerpo. La Fase 1 (fin del header override) ya cerró la
@@ -569,8 +576,28 @@ o con tag inválido bajo `require` → epoch intacto.
 
 ### Fase 6 — ORR↔ORR: bootstrap con pinning + challenge (ejecuta TODO_SECURITY P2)
 
-**Estado: NÚCLEO HECHO (2026-08-27); pinning estable + auth del caller
-BLOQUEADOS por decisiones de diseño.**
+**Estado: HECHA (2026-08-30), salvo el flip del default a `strict`.** Las dos
+piezas bloqueadas se resolvieron sin persistir nada en disco:
+- **Ancla estable = el certificado de nodo.** El ORR firma el anuncio de
+  `GetPublicKey` con la clave ML-DSA-65 de `tls.key_path` y manda la cadena
+  (`signing_certs`); el par la encadena hasta la CA de red y comprueba el SAN
+  `dkms://<orr_id>` (`common::cert_identity::verify_node_cert`) antes de
+  verificar la firma con el SPKI. La identidad ML-KEM sigue siendo efímera:
+  el pin es el cert, que sobrevive a los reinicios. `strict` exige un anuncio
+  así (o, heredado, una `peer_verify_keys`) y por tanto funciona sin config
+  por par — también con los peers que añade la SDN en caliente. Verificado en
+  malla local con `bootstrap_trust: strict` y sin verify keys: 12/12
+  intercambios, `cert_bound=true` en los cuatro ORR.
+- **Auth del caller.** `EstablishSecret`, `RequestEphemeralKey` y
+  `EstablishEphemeralSecret` exigen que el `from` del cuerpo sea la identidad
+  del cert mTLS del que llama (`PERMISSION_DENIED` si no). Con mTLS cualquier
+  miembro de la red podía reclamar ser `orr_X`; el challenge HMAC queda
+  superado por esto más las RPC de rotación ya MACeadas.
+- Default `tofu` hasta que t30 (alta en caliente en strict) pase en el
+  testbed; entonces `strict`.
+
+**Estado anterior: NÚCLEO HECHO (2026-08-27); pinning estable + auth del
+caller BLOQUEADOS por decisiones de diseño.**
 
 Implementado (opt-in, tofu default = comportamiento actual):
 - `orr/src/config.rs`: `bootstrap_trust = tofu | strict` (default tofu).
@@ -813,14 +840,48 @@ Ver la gotcha del troceado en CLAUDE.md.
   a la vez porque el esquema de los pares lo decide cada ORR) es la
   suposición «misma máquina o red interna de confianza», y hay que escribirla.
   Lo que queda en claro de verdad: ORR↔QKC y QKC↔KME, dentro del nodo.
-- **El socket de ACK del DKMS sigue sin autenticar** (`ack_socket.rs`, Fase 4):
-  acepta TCP plano de cualquiera y saca el `from` del cuerpo. No compromete
-  material —es contabilidad del generador— pero sí es autenticación de origen
-  que falta, en un plano que cruza instituciones.
+- **El socket de ACK del DKMS sigue siendo el default** (`ack_socket.rs`,
+  Fase 4): acepta TCP plano de cualquiera y saca el `from` del cuerpo. No
+  compromete material —es contabilidad del generador— pero sí es
+  autenticación de origen que falta, en un plano que cruza instituciones. El
+  camino autenticado y el listener opcional están en código
+  (`ack_transport: etsi020`, `ack_socket_listen: false`); el flip espera al
+  testbed.
 - **Las claves de sesión SAE** ya llevan `session_key_digest` (una huella ligada
   al `key_id`, comprobada antes de guardar y de acusar recibo), así que el caso
   de "los dos SAE se llevan claves distintas en silencio" está cerrado. Lo que
   no hay es una comprobación que el propio SAE pueda hacer: se fía de su KME.
+
+### Fase 9 — Intercambio de claves solo híbrido, rotación ORR viva, propagación de época (HECHA 2026-08-30)
+
+Tres cosas que la auditoría del 2026-08-30 encontró donde la seguridad era
+una preferencia y no una garantía:
+
+1. **Solo `X25519MLKEM768`.** El provider PQC ofrecía X25519 y P-256/P-384
+   detrás del híbrido «para no romper a un peer antiguo»: bastaba un cliente
+   sin el híbrido para negociar X25519 a secas sin que nada lo dijera. Ya no
+   hay respaldo clásico en ningún plano; cada binario hace un handshake
+   consigo mismo al arrancar (`tls_pqc::self_check_hybrid_kx`) y aborta si
+   lo negociado no es el híbrido; `ensure_process_default` aborta si el
+   provider del proceso no es el PQC. Los listeners rustls registran el
+   grupo negociado en `tls.conn accepted`. Consecuencia: los SAE necesitan
+   OpenSSL ≥ 3.5 o rustls (`docker/README.md`, «Requisitos del cliente SAE»).
+2. **La rotación del `master_secret` ORR estaba desconectada** desde agosto
+   y la config prometía forward secrecy. Cableada con cuatro arreglos
+   (commit provisional antes del FIN, bootstrap que resetea la historia, un
+   establecimiento en vuelo y una task por par, poda por par) — ver
+   `rotation.rs`. Y la causa real de que pareciera rota: **el QKC no
+   propagaba `frame.epoch_id`** (reconstruía los frames con `Frame::empty`),
+   así que toda cebolla llegaba como época 0. Medido en la primera rotación
+   en vivo: `peel_failed` ≈ 25 %. Arreglado en `qkc/src/relay.rs` con test.
+3. **Secretos fuera del log** (`SecretString`), **DkmsControl en localhost**
+   (`Drain` sin auth se renderizaba en `0.0.0.0`), y el resync de épocas
+   PQC pedido por el respondedor (0x28) junto con el plazo de rekey del QKC
+   que se reiniciaba con cada reconexión (el soak de 15 h con una rotación).
+
+Residual conocido tras la fase: el socket de ACK (Fase 4, flip pendiente del
+testbed) y la comprobación que el propio SAE no puede hacer de su clave de
+sesión (por diseño: se fía de su KME).
 
 ## 4. Decisions log
 

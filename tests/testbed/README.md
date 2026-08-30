@@ -625,6 +625,50 @@ limita a dejarlo dicho en el log. En la práctica las ventanas se separan en los
 dos sentidos y el iniciador también lo ve, pero una separación en un solo
 sentido seguiría necesitando un reinicio manual.
 
+## Pendiente para la próxima campaña (preparado el 2026-08-30, VMs apagadas)
+
+Todo lo que sigue está en código y probado en malla local; lo que le falta es
+la red real. Precondiciones: imágenes de `docker/Dockerfile` (ya con
+`clang`/`libclang` para `highs-sys`), `provision_certs.sh` (ML-DSA), y en
+cada `node.yml`: `sae_bindings` (obligatorio desde hoy), `ack_transport:
+etsi020`, `ack_socket_listen: true`, `bootstrap_trust: strict`, sin
+`control_addr`. Cliente de carga: `target-bookworm/release/sae_load` (t20 y
+t41 lo suben a las VMs solos si existe; el Python exige OpenSSL ≥ 3.5).
+
+1. **t00** — además de `RestartCount` y `panicked at`, un binario con el
+   provider TLS equivocado o sin el híbrido ahora ABORTA en el arranque
+   (`tls_pqc: self-check OK` tiene que estar en cada log).
+2. **t10** con `sae_load --roundtrip`.
+3. **Negativos nuevos** (uno por cambio de seguridad):
+   - `Drain` desde otra VM contra `:20007` → conexión rechazada (se
+     renderiza en `127.0.0.1`).
+   - ACK forjado al socket `:20009` con `ack_socket_listen: true` → aceptado
+     (documenta por qué debe irse); con `false` → rechazado.
+   - `EstablishSecret` reclamando otro `orr_id` con un cert de DKMS
+     (`orr/src/bin/test_client.rs`) → `PERMISSION_DENIED`.
+   - `GetPublicKey` de un ORR con certs de una CA ajena
+     (`provision_certs.sh` sabe emitirla) → `strict` lo rechaza
+     (`orr.peer_pubkey: cadena del anuncio rechazada`).
+   - `sae_load.py` en una VM con OpenSSL < 3.5 → se niega a arrancar.
+4. **t20 en tres brazos**: `socket` + listener (base) → `etsi020` + listener
+   → `etsi020` sin listener. Comparar `acked`, `expired`, `ack_send_failed`,
+   keys/s y p95: es el on→off→delete de `docs/SECURITY.md` §Fase 4, y lo que
+   decide el flip de defaults.
+5. **t30/t31 en `strict`** — la propiedad clave del anclaje al cert: un nodo
+   nuevo entra sin config por par.
+6. **t40/t41** — relink (timer fuera del `select!`), resync pedido por el
+   respondedor, y la rotación del ORR con un extremo reiniciado a mitad
+   (`orr.rotation: el peer no tiene nuestro bootstrap_secret … rehago`).
+7. **t50** y **soak ≥ 24 h** (12 h en reposo + 12 h con `sae_load` a baja
+   tasa). Recuentos por hora de `qkc.pqc.rotation`, rekeys e2e,
+   `orr.rotation success`, `recv_corrupt`, `bad_mac`, `replayed`, RSS. Pasa si
+   las rotaciones QKC son floor(horas) ± 1 por iniciador, cero corruptos y
+   RSS plano. Resultados a `tests/results/testbed-<fecha>/ANALYSIS.md`.
+
+Después de eso, y solo después: `ack_transport = "etsi020"`,
+`ack_socket_listen = false` y `bootstrap_trust = strict` por defecto, y el
+borrado de `ack_socket.rs`.
+
 ## Resultados de la campaña `head-limits` (2026-08-02)
 
 Sobre HEAD `9a6ba14` más los arreglos de la tabla de arriba, PKI reemitido y
