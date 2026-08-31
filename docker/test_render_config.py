@@ -92,5 +92,20 @@ class OrrGrpcTlsPlacement(unittest.TestCase):
         self.assertEqual(cfg["orr_id"], "orr_1")
 
 
+class SdnControlTls(unittest.TestCase):
+    def test_cert_name_names_the_tls_paths(self):
+        cfg = render("sdn", "control_tls: true\ncert_name: sdn-madrid\n")
+        self.assertEqual(cfg["tls"]["cert_path"], "/config/certs/sdn-madrid.crt")
+        self.assertEqual(cfg["tls"]["key_path"], "/config/certs/sdn-madrid.key")
+        self.assertEqual(cfg["tls"]["client_ca"], "/config/certs/net-ca.crt")
+
+    def test_default_cert_name_is_sdn(self):
+        cfg = render("sdn", "control_tls: true\n")
+        self.assertEqual(cfg["tls"]["cert_path"], "/config/certs/sdn.crt")
+
+    def test_without_control_tls_no_tls_table(self):
+        self.assertNotIn("tls", render("sdn", "mcf_period_ms: 5000\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

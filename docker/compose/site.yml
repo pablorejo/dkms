@@ -8,7 +8,9 @@ services:
     image: ${IMAGE_PREFIX:-ORG}/qkc:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
-    volumes: [ "./node.qkc.yml:/config/node.yml:ro" ]
+    volumes:
+      - ./node.qkc.yml:/config/node.yml:ro
+      - ./certs:/config/certs:ro
   orr:
     image: ${IMAGE_PREFIX:-ORG}/orr:${TAG:-latest}
     network_mode: host

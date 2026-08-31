@@ -8,3 +8,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
+      # certs: necesarios con `control_tls: true` (anuncio a una SDN con mTLS)
+      # y para dialar un KME/quditto https: qkc-<n>.crt/.key + net-ca.crt.
+      - ./certs:/config/certs:ro

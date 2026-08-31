@@ -1,9 +1,13 @@
-# Despliegue de la SDN central. El "node.yml" de la SDN es la topology.yml
-# global (ver examples/topology.example.yml). Cópiala como node.yml junto a esto.
+# Despliegue de la SDN central. La SDN NO lleva topología: la infiere de los
+# anuncios de los módulos (POST /register/{qkc,orr,dkms}); su node.yml son solo
+# sus direcciones de escucha y timers (ver examples/node.sdn.yml).
 services:
   sdn:
     image: ${IMAGE_PREFIX:-ORG}/sdn:${TAG:-latest}
     network_mode: host
     restart: unless-stopped
     volumes:
-      - ./node.yml:/config/node.yml:ro    # = tu topology.yml
+      - ./node.yml:/config/node.yml:ro
+      # certs: necesarios con `control_tls: true` en su node.yml (mTLS en el
+      # admin HTTP/gRPC — recomendado en multi-host): sdn.crt/.key + net-ca.crt.
+      - ./certs:/config/certs:ro

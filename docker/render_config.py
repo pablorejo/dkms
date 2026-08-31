@@ -381,7 +381,8 @@ def render_sdn(n, out):
     ]
     if n.get("http_ro_port"):
         lines.append("http_ro_addr = " + q(bind + ":" + str(int(n["http_ro_port"]))))
-    lines += control_tls_lines(n, "sdn", "server")
+    # cert_name como en qkc/orr: por defecto "sdn" (gen-certs.sh sdn <ip>).
+    lines += control_tls_lines(n, n.get("cert_name", "sdn"), "server")
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
 
