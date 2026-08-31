@@ -102,7 +102,8 @@ async fn handle_incoming_inner(svc: &QkcService, mut frame: Frame) -> Result<()>
     // (el QKC no añade headers; sólo propaga orr_mp + dkms_mp en el siguiente
     // hop).
     if frame.dest_final == svc.qkc_id() {
-        let out = local_deliver_frame(svc.qkc_id(), &frame, plaintext);
+        let qkc_id = svc.qkc_id();
+        let out = local_deliver_frame(qkc_id, frame, plaintext);
         svc.deliver_local(out);
         svc.stats.incoming_delivered.fetch_add(1, Ordering::Relaxed);
         return Ok(());
@@ -190,6 +191,7 @@ async fn forward_plaintext(
     let (ciphertext, ids) = encrypt(plaintext, &enc_keys)?;
     send_frame_to_peer(
         svc,
+        &out_link,
         next_hop,
         dest_final,
         ciphertext,
@@ -204,6 +206,7 @@ async fn forward_plaintext(
 #[allow(clippy::too_many_arguments)]
 fn send_frame_to_peer(
     svc: &QkcService,
+    out_link: &crate::service::LinkRuntime,
     next_hop: u32,
     dest_final: u32,
     ciphertext: Vec<u8>,
@@ -213,9 +216,9 @@ fn send_frame_to_peer(
     header_orr_mp: Vec<u8>,
     header_dkms_mp: Vec<u8>,
 ) -> Result<()> {
-    let out_link = svc
-        .link_to(next_hop)
-        .ok_or(QkcError::UnknownNeighbor(next_hop))?;
+    // El enlace llega YA resuelto de forward_plaintext: resolverlo dos veces
+    // por frame era un load de ArcSwap + clone de Arc de más, y la dirección
+    // sale de su propia config en vez de otra búsqueda + clone de String.
     let mut out = outbound_frame(
         svc.qkc_id(),
         next_hop,
@@ -236,10 +239,9 @@ fn send_frame_to_peer(
         fa.seal(&mut out);
     }
 
-    let addr = svc
-        .neighbor_peer_addr(next_hop)
-        .ok_or(QkcError::UnknownNeighbor(next_hop))?;
-    let ok = svc.peer_out.send(next_hop, &addr, out);
+    let ok = svc
+        .peer_out
+        .send(next_hop, &out_link.cfg.neighbor_peer_addr, out);
     if !ok {
         return Err(QkcError::Quditto(format!(
             "peer_out queue full for {next_hop}"
@@ -256,7 +258,9 @@ fn send_frame_to_peer(
 /// reconstruían con `Frame::empty` y llegaban siempre con época 0. Mientras
 /// el ORR no rotaba nadie lo vio; en cuanto rotó, cada frame fallaba el tag
 /// (medido 2026-08-30: `peel_failed` ≈ 25 % y re-bootstraps en bucle).
-fn local_deliver_frame(qkc_id: u32, frame: &Frame, plaintext: Vec<u8>) -> Frame {
+fn local_deliver_frame(qkc_id: u32, frame: Frame, plaintext: Vec<u8>) -> Frame {
+    // Por valor: es el último uso del frame entrante, así que los dos headers
+    // se MUEVEN en vez de clonarse (eran dos allocs por frame entregado).
     let mut out = Frame::empty(FRAME_LOCAL_DELIVER);
     out.sender_id = frame.sender_id;
     out.receiver_id = qkc_id;
@@ -265,8 +269,8 @@ fn local_deliver_frame(qkc_id: u32, frame: &Frame, plaintext: Vec<u8>) -> Frame 
     out.epoch_id = frame.epoch_id;
     out.key_size_bits = 0;
     out.key_ids = Vec::new();
-    out.header_orr_mp = frame.header_orr_mp.clone();
-    out.header_dkms_mp = frame.header_dkms_mp.clone();
+    out.header_orr_mp = frame.header_orr_mp;
+    out.header_dkms_mp = frame.header_dkms_mp;
     out.payload = plaintext;
     out
 }
@@ -375,7 +379,7 @@ mod tests {
         inbound.header_orr_mp = vec![1, 2, 3];
         inbound.header_dkms_mp = vec![4, 5];
 
-        let delivered = local_deliver_frame(3, &inbound, vec![9; 32]);
+        let delivered = local_deliver_frame(3, inbound, vec![9; 32]);
         assert_eq!(delivered.kind, FRAME_LOCAL_DELIVER);
         assert_eq!((delivered.epoch_id, delivered.grade), (42, 1));
         assert_eq!(delivered.header_orr_mp, vec![1, 2, 3]);
