@@ -40,7 +40,7 @@ pub struct SdnConfig {
     /// antiguo como comodity fantasma (`dup_pairs` en `mcmcf.solve`). Por
     /// defecto el mismo TTL de presencia. Compara con el `timestamp_ms` que
     /// pone el DKMS, así que asume relojes razonablemente en hora (lo mismo
-    /// que ya exige el TLS).
+    /// que ya exige el TLS). `0` = sin expiración de demanda.
     #[serde(default)]
     pub demand_ttl_secs: Option<u64>,
 

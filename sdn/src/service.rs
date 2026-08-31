@@ -239,8 +239,10 @@ impl SdnService {
         // El registro de demanda caduca en el mismo barrido: una entrada que
         // nadie renueva es una comodity fantasma para el solver.
         let demand = self.demand_registry.clone();
-        let demand_ttl_ms =
-            i64::try_from(self.cfg.demand_ttl_secs.unwrap_or(ttl_secs) * 1000).unwrap_or(i64::MAX);
+        // `Some(0)` = demanda sin expiración (espejo de `presence_ttl_secs`,
+        // donde 0 apaga el sweeper): sin este mapeo, 0 evictaba TODOS los
+        // informes en cada barrido.
+        let demand_ttl_ms = demand_ttl_ms(self.cfg.demand_ttl_secs, ttl_secs);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(period);
             tick.tick().await; // el primero es inmediato
@@ -250,7 +252,9 @@ impl SdnService {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                let evicted = demand.evict_older_than(now_ms, demand_ttl_ms);
+                let evicted = demand_ttl_ms
+                    .map(|ttl| demand.evict_older_than(now_ms, ttl))
+                    .unwrap_or(0);
                 if evicted > 0 {
                     info!(
                         evicted,
@@ -534,6 +538,15 @@ impl SdnService {
 
 // ---------------- free-function helpers shared with the debouncer closure ----
 
+/// TTL de los informes de demanda en ms: el configurado, o el TTL de
+/// presencia si no hay; `Some(0)` configurado = `None` = sin expiración.
+fn demand_ttl_ms(cfg: Option<u64>, presence_ttl_secs: u64) -> Option<i64> {
+    match cfg.unwrap_or(presence_ttl_secs) {
+        0 => None,
+        secs => Some(i64::try_from(secs * 1000).unwrap_or(i64::MAX)),
+    }
+}
+
 /// Esquema del push de forwarding-tables: `https` sii el SDN tiene `[tls]`.
 /// Es una decisión de despliegue (como `grpc_tls`): el QKC sirve su admin con
 /// mTLS exactamente bajo la misma condición, así que o casan o fallan alto.
@@ -622,6 +635,14 @@ fn recompute_mcf_inner(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn demand_ttl_zero_means_no_expiry() {
+        assert_eq!(super::demand_ttl_ms(Some(0), 90), None);
+        assert_eq!(super::demand_ttl_ms(None, 90), Some(90_000));
+        assert_eq!(super::demand_ttl_ms(Some(30), 90), Some(30_000));
+        assert_eq!(super::demand_ttl_ms(None, 0), None);
+    }
+
     #[test]
     fn push_scheme_follows_the_tls_block() {
         assert_eq!(super::push_scheme(None), "http");
