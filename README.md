@@ -82,8 +82,7 @@ The Next.js web frontend from the Python project is reused unchanged. See
 ├── dkms/               # binary crate
 ├── quditto/            # binary crate
 ├── web/                # pointer to Next.js web (unchanged)
-├── docker/             # compose files (full + per-module)
-├── k8s/                # shared k8s manifests
+├── docker/             # deployable images + compose + node.yml renderer
 ├── scripts/            # build/run helpers
 └── docs/               # architecture, IPC, deployment
 ```
