@@ -339,6 +339,14 @@ async fn take_or_fetch_enc(link: &LinkRuntime, n: usize) -> Result<Vec<OtpKey>> 
 /// Busca cada `key_id` en el buffer DEC. Para los que no estén, espera
 /// a que el `dec_refill_loop` los inserte (el quditto ya entregó las
 /// claves al worker — un fallback HTTP daría 404).
+///
+/// `lookup_dec` CONSUME (semántica OTP: mueve la clave fuera del mapa), así
+/// que en un batch multi-clave un timeout en la clave i-ésima QUEMA las i-1
+/// ya sacadas — se van con `out`. No se reinsertan a propósito: esos ids no
+/// se vuelven a pedir jamás (el frame se pierde), y devolverlos al DashMap
+/// sería una fuga sin lector. Hoy la ventana es vacía: el payload de diseño
+/// son 32 B = 1 bloque = 1 clave (`needed == 1`); solo mordería si algún día
+/// un payload superase `key_size_bits / 8`.
 async fn lookup_or_fetch_dec(link: &LinkRuntime, ids: &[Uuid]) -> Result<Vec<OtpKey>> {
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {

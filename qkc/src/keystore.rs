@@ -321,7 +321,9 @@ impl KeyStore {
 
     /// Busca y CONSUME la clave por `key_id` en el buffer DEC.
     /// `None` si no la tiene → caller llama a [`wait_dec`] para esperar
-    /// al worker.
+    /// al worker. Consumir = mover fuera del mapa (un pad no se usa dos
+    /// veces); si el caller luego falla el batch, la clave está quemada —
+    /// ver la nota en `relay::lookup_or_fetch_dec`.
     #[inline]
     pub fn lookup_dec(&self, id: &Uuid) -> Option<Zeroizing<Vec<u8>>> {
         self.n_dec_lookups.fetch_add(1, Ordering::Relaxed);
