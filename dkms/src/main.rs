@@ -41,11 +41,22 @@ struct Cli {
 
 /// El cliente SDN gRPC apunta a un `http://host:port_grpc`. El endpoint
 /// HTTP-admin del SDN está en otro puerto (50055 en la demo-star).
-/// Como `SouthboundCfg` solo tiene el gRPC, derivamos a partir de él
-/// asumiendo la convención `puerto_grpc + 2 = puerto_http`. Si la demo
-/// usa otros valores, conviene leerlo de config; por simplicidad asumimos
-/// este offset igual al de la demo-star.
+/// Fallback cuando la config no trae `sdn_http_url`: derivar del gRPC con la
+/// convención `puerto_grpc + 2 = puerto_http`. El ESQUEMA se hereda del
+/// `sdn_endpoint` — esto re-emitía `http://` SIEMPRE, así que con la SDN en
+/// mTLS el /rate y el /demand hablaban claro contra un puerto TLS para
+/// siempre: rate 0, buckets vacíos, 429 en todos los SAE (cazado por la
+/// malla local con el plano de control en mTLS, 2026-08-31).
 fn derive_sdn_http_url(grpc_url: &str) -> String {
+    let scheme = if grpc_url
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        "https"
+    } else {
+        "http"
+    };
     // Quitar prefijo http(s)://
     let trimmed = grpc_url
         .trim_start_matches("https://")
@@ -58,7 +69,7 @@ fn derive_sdn_http_url(grpc_url: &str) -> String {
         .parse()
         .unwrap_or(50053);
     let http_port = if port == 50053 { 50055 } else { port + 2 };
-    format!("http://{host}:{http_port}")
+    format!("{scheme}://{host}:{http_port}")
 }
 
 /// `ClientTlsConfig` para el gRPC dkms→SDN si `sdn_endpoint` es https:
@@ -386,7 +397,13 @@ async fn main() -> Result<()> {
                 a.set_port(a.port().wrapping_add(1000));
                 ack_socket_addr = Some(a);
             }
-            let sdn_http_url = derive_sdn_http_url(&cfg.southbound.sdn_endpoint);
+            // La config ya trae el HTTP admin de la SDN (el renderer lo emite
+            // con el esquema correcto); el derive es solo el fallback.
+            let sdn_http_url = cfg
+                .southbound
+                .sdn_http_url
+                .clone()
+                .unwrap_or_else(|| derive_sdn_http_url(&cfg.southbound.sdn_endpoint));
             let ctrl_ca = cfg
                 .tls
                 .control_plane_ca
@@ -527,4 +544,22 @@ async fn main() -> Result<()> {
         _ = signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// El fallback hereda el ESQUEMA del sdn_endpoint: re-emitir siempre
+    /// `http://` dejaba /rate y /demand hablando claro contra la SDN mTLS
+    /// (rate 0 → buckets vacíos → 429 en todos los SAE; malla 2026-08-31).
+    #[test]
+    fn derived_sdn_http_url_inherits_the_scheme() {
+        assert_eq!(
+            super::derive_sdn_http_url("https://127.0.0.1:19000"),
+            "https://127.0.0.1:19002"
+        );
+        assert_eq!(
+            super::derive_sdn_http_url("http://127.0.0.1:19000"),
+            "http://127.0.0.1:19002"
+        );
+    }
 }
