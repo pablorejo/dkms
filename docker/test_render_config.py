@@ -271,6 +271,31 @@ class QkcKmeCredentials(unittest.TestCase):
         for k in ("kme_cert", "kme_key", "kme_ca"):
             self.assertNotIn(k, lk)
 
+    def test_handshake_knobs_render_on_qkd_links_too(self):
+        # A4 (opción B): el handshake también existe en enlaces qkd (raíz del
+        # sello por-frame), así que pqc_auth / pqc_rekey_secs / pqc_suite
+        # declarados NO pueden perderse dentro de la rama pqc — la misma clase
+        # de bug que ya mordió con link_psk (2026-08-28). Y `off` SIN comillas
+        # es booleano False en YAML 1.1: tiene que normalizarse al modo "off",
+        # no renderizar "False" (que el binario rechaza al arrancar).
+        cfg = render(
+            "qkc",
+            self.QKD_LINK
+            + "    pqc_auth: off\n"
+            + "    frame_auth: off\n"
+            + "    pqc_rekey_secs: 120\n"
+            + "    pqc_suite: ml-kem-1024\n",
+        )
+        lk = cfg["links"][0]
+        self.assertEqual(lk["pqc_auth"], "off")
+        self.assertEqual(lk["frame_auth"], "off")
+        self.assertEqual(lk["pqc_rekey_secs"], 120)
+        self.assertEqual(lk["pqc_suite"], "ml-kem-1024")
+        self.assertEqual(lk["link_type"], "qkd")
+        # `on`/`true` no es ningún modo: mejor morir nombrando los válidos.
+        with self.assertRaises(subprocess.CalledProcessError):
+            render("qkc", self.QKD_LINK + "    pqc_auth: on\n")
+
 
 class SdnControlTls(unittest.TestCase):
     def test_cert_name_names_the_tls_paths(self):

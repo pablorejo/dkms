@@ -83,6 +83,21 @@ def q(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def auth_mode(v, field):
+    """Normaliza un modo de auth (off|prefer|require|sign) venido de YAML.
+
+    YAML 1.1 parsea `off` (y `no`) como booleano False: un operador que
+    escribe `pqc_auth: off` quiere el MODO "off", no el string "False" — que
+    el binario rechazaría al arrancar con un error de parseo que no dice nada
+    de la causa real. `on`/`true` no equivalen a ningún modo: mejor morir aquí
+    nombrando los válidos que adivinar."""
+    if v is False:
+        return "off"
+    if v is True:
+        die(field + ": 'on'/'true' no es un modo; usa off|prefer|require|sign")
+    return str(v)
+
+
 def write(path, text):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
@@ -219,7 +234,31 @@ def render_qkc(n, out):
         # secreto de la época del enlace, no una PSK, así que no hay nada que
         # repartir. Ponerlo aquí sólo para forzar otro valor (p. ej. `off`).
         if lk.get("frame_auth") is not None:
-            lines.append("frame_auth = " + q(str(lk["frame_auth"])))
+            lines.append("frame_auth = " + q(auth_mode(lk["frame_auth"], "frame_auth")))
+        # Autenticación del handshake del enlace (docs/SECURITY.md §Fase 5/10).
+        # pqc_auth = off|prefer|require (HMAC con link_psk) | sign (firma
+        # ML-DSA). SI SE OMITE, el default depende de la identidad de nodo
+        # (A3/A4): con [tls] (control_tls) va `sign`, firmado con el cert de
+        # nodo y verificado contra la net-CA + SAN — sin material por-par, así
+        # que hasta los enlaces que crea la SDN quedan firmados. TAMBIÉN fuera
+        # de la bifurcación (A4 opción B): en un enlace qkd el handshake
+        # establece la raíz del sello por-frame (las claves de datos siguen
+        # siendo del KME), así que su pqc_auth/peer_verify_key deben
+        # renderizarse igual. `peer_verify_key` es el camino legacy; el seed
+        # propio va a nivel de nodo (sign_secret_seed).
+        if lk.get("pqc_auth") is not None:
+            lines.append("pqc_auth = " + q(auth_mode(lk["pqc_auth"], "pqc_auth")))
+        if lk.get("peer_verify_key") is not None:
+            lines.append("peer_verify_key = " + q(str(lk["peer_verify_key"])))
+        # Parámetros del handshake (suite y cadencia de rotación). Fuera de la
+        # bifurcación por lo mismo: en qkd gobiernan la raíz del sello (el
+        # disparo por volumen queda inerte ahí; manda pqc_rekey_secs). Solo se
+        # emiten si el node.yml los declara — los defaults del binario aplican.
+        if lk.get("pqc_suite") is not None:
+            lines.append("pqc_suite = " + q(str(lk["pqc_suite"])))
+        for k in ("pqc_rekey_keys", "pqc_rekey_secs", "pqc_rekey_lookahead"):
+            if lk.get(k) is not None:
+                lines.append(k + " = " + str(int(lk[k])))
         if typ == "qkd":
             kme = str(req(lk, "kme_url", "qkc.link(qkd)"))
             if "//" not in kme:
@@ -235,23 +274,7 @@ def render_qkc(n, out):
                 if lk.get(k) is not None:
                     lines.append(k + " = " + q(str(lk[k])))
         else:  # pqc (QKD simulated by PQC)
-            lines += ['link_type = "pqc"',
-                      "pqc_suite = " + q(lk.get("pqc_suite", "ml-kem-768")),
-                      "pqc_rekey_keys = " + str(int(lk.get("pqc_rekey_keys", 1000))),
-                      "pqc_rekey_secs = " + str(int(lk.get("pqc_rekey_secs", 3600))),
-                      "pqc_rekey_lookahead = " + str(int(lk.get("pqc_rekey_lookahead", 2)))]
-            # Autenticación del handshake PQC (docs/SECURITY.md §Fase 5).
-            # pqc_auth = off|prefer|require (HMAC con link_psk) | sign (firma
-            # ML-DSA). SI SE OMITE, el default depende de la identidad de nodo
-            # (A3): con [tls] (control_tls) va `sign` por defecto, firmado con el
-            # cert de nodo y verificado contra la net-CA + SAN — sin material
-            # por-par, así que hasta los enlaces que crea la SDN quedan firmados.
-            # `peer_verify_key` es el camino legacy (clave pública ML-DSA cruda
-            # del vecino); el seed propio va a nivel de nodo (sign_secret_seed).
-            if lk.get("pqc_auth") is not None:
-                lines.append("pqc_auth = " + q(str(lk["pqc_auth"])))
-            if lk.get("peer_verify_key") is not None:
-                lines.append("peer_verify_key = " + q(str(lk["peer_verify_key"])))
+            lines.append('link_type = "pqc"')
     qkc_cert = n.get("cert_name", "qkc-" + str(int(req(n, "qkc_id", "qkc"))))
     lines += control_tls_lines(n, qkc_cert, "client")
     merge_extra(lines, n.get("extra"))

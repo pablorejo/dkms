@@ -920,19 +920,29 @@ de ese enlace:
   firma ni la raíz necesitan config por-par, hasta los enlaces que crea la
   SDN quedan autenticados solos. `require` no bloquea el arranque: antes de
   la primera época no fluye ningún frame.
-- **Enlace QKD → el KME real** (no la net-ca). El material que reparte por
-  ETSI 014 es secreto compartido solo entre los dos extremos legítimos: esa
-  ES la autenticación del enlace, y el KME la aplica por identidad. Cada KME
-  es **privado, con su propia PKI**: el QKC gana `kme_cert`/`kme_key`/
-  `kme_ca` POR ENLACE (o los tres o ninguno; parcial no arranca) y sin
-  declararlos cae al `[tls]` de red — la simplificación de la prueba, porque
-  quditto es un SIMULADOR y acepta la net-ca; en producción son autoridades
-  separadas. quditto no se endurece a propósito: los tests con él validan
-  funcionalidad y rendimiento, no hacen de garantía. El sello por-frame en
-  QKD (derivado de bits QKD o anclado de otra forma) queda **pendiente de
-  decisión de mecanismo** — hoy su `frame_auth` sigue en `off` salvo
-  `link_psk` explícita (≥ 32 B, validada al arrancar: menos no es
-  quantum-safe y casi seguro es un typo).
+- **Enlace QKD → el KME real** (no la net-ca) **para el MATERIAL**. Lo que
+  reparte por ETSI 014 es secreto compartido solo entre los dos extremos
+  legítimos: esa ES la autenticación del material, y el KME la aplica por
+  identidad. Cada KME es **privado, con su propia PKI**: el QKC gana
+  `kme_cert`/`kme_key`/`kme_ca` POR ENLACE (o los tres o ninguno; parcial no
+  arranca) y sin declararlos cae al `[tls]` de red — la simplificación de la
+  prueba, porque quditto es un SIMULADOR y acepta la net-ca; en producción
+  son autoridades separadas. quditto no se endurece a propósito: los tests
+  con él validan funcionalidad y rendimiento, no hacen de garantía. El
+  **sello por-frame** del enlace QKD (decisión 2026-08-31, opción B) ancla su
+  raíz en el MISMO handshake ML-KEM firmado con el cert de nodo que usan los
+  enlaces PQC — solo que aquí el handshake NO es fuente de claves: alimenta
+  únicamente el `SecretStore` del que sale la raíz HMAC por época (rota por
+  tiempo, `pqc_rekey_secs`; el disparo por volumen queda inerte), y las
+  claves de DATOS siguen siendo del KME, OTP puro. Con `[tls]`, `sign` +
+  `require` por defecto también aquí; `link_psk` explícita (≥ 32 B, validada
+  al arrancar) sigue mandando como raíz fija si se declara, y sin identidad
+  ni config queda el histórico. La ventana entre el arranque y la primera
+  época es de milisegundos y se autocura (un NOTIFY descartado deja
+  huérfanas unas claves que el flujo repone); la integridad/frescura del
+  material queda cubierta por el e2e en el destino igualmente — este sello
+  corta el agotamiento de material por frames forjados o reinyectados EN el
+  salto.
 
 Autorización de superficies, mismo lote:
 
@@ -971,12 +981,15 @@ e2e 1 h/100 k claves).
 Verificación de la fase: 500+ tests en verde con `make check` en el
 contenedor `rust:1.88` (el toolchain de CI), incluidos: handshake QKC
 cert-bound contra cadena buena/SAN malo/CA ajena; sello per-época que rota y
-descarta épocas no instaladas; push de tabla 200 con cert `sdn` y 403 con
-otro cert de red sobre mTLS real; `served_dkms` con PERMISSION_DENIED;
-primera rotación ORR < periodo; reúso de key_id rechazado y permitido tras
-rotar; parciales de `kme_*` que no arrancan. Pendiente de la fase: el sello
-por-frame QKD (decisión de mecanismo) y medir en malla que los defaults
-nuevos no bajan el throughput (brazos PQC y QKD).
+descarta épocas no instaladas; enlace QKD que monta el handshake solo-raíz
+sii hay identidad; push de tabla 200 con cert `sdn` y 403 con otro cert de
+red sobre mTLS real; `served_dkms` con PERMISSION_DENIED; primera rotación
+ORR < periodo; reúso de key_id rechazado y permitido tras rotar; parciales
+de `kme_*` que no arrancan; y en el renderer, los knobs del handshake
+renderizando también en enlaces qkd con el `off` de YAML normalizado (sin
+comillas es booleano False, y renderizar "False" rompía el arranque).
+Pendiente de la fase: medir en malla que los defaults nuevos no bajan el
+throughput (brazos PQC y QKD).
 
 ## 4. Decisions log
 

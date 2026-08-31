@@ -232,7 +232,12 @@ fn handle_pqc(svc: QkcService, frame: wire::Frame, msg: HsMsg, recv: RecvAuth) {
         return;
     };
     let Some(pqc) = &link.pqc else {
-        warn!(sender, "qkc.pqc: frame on non-PQC link, ignoring");
+        // Sin handshake en este enlace (QKD sin identidad ni pqc_auth): no
+        // hay con qué procesarlo.
+        warn!(
+            sender,
+            "qkc.pqc: frame de handshake en un enlace sin handshake, ignoring"
+        );
         return;
     };
     match msg {

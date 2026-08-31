@@ -71,9 +71,11 @@ pub struct LinkRuntime {
     /// Buffers ENC/DEC + workers que mantienen las claves en memoria
     /// para no pasar por HTTP en el hot path.
     pub keys: Arc<KeyStore>,
-    /// Coordinador del handshake ML-KEM (solo enlaces PQC; `None` en QKD).
-    /// Lo consulta `peer_server` al recibir frames de handshake y lo
-    /// arranca `bootstrap_keystores`.
+    /// Coordinador del handshake ML-KEM del enlace. En PQC es además la
+    /// fuente de claves; en QKD (A4, opción B) existe cuando hay identidad de
+    /// nodo o config de auth y alimenta SOLO la raíz del sello per-época.
+    /// `None` = enlace QKD sin nada que autenticar (histórico). Lo consulta
+    /// `peer_server` al recibir frames de handshake.
     pub pqc: Option<Arc<PqcHandshake>>,
     /// MAC de los frames de datos: integridad, autenticación de origen y
     /// frescura. `None` si el enlace no lo tiene activado o no hay `link_psk`.
@@ -205,20 +207,102 @@ impl QkcService {
     /// Construye el runtime de UN enlace: fuente de claves, keystore y, si es
     /// PQC, su handshake. Extraído del constructor para poder crear enlaces
     /// después del arranque, cuando la SDN anuncia un vecino nuevo.
+    /// Handshake ML-KEM del enlace + su `SecretStore`/`RekeyClock` (A1/A2).
+    /// En enlaces PQC el store es además la fuente de claves de DATOS
+    /// (`PqcKeySource` deriva y cuenta); en enlaces QKD (A4, opción B) solo
+    /// alimenta la raíz del sello por-frame — las claves de datos las da el
+    /// KME y el reloj de volumen queda inerte (rota solo por tiempo).
+    fn build_link_handshake(
+        cfg: &QkcConfig,
+        link: &LinkConfig,
+        peer_out: &Arc<PeerOut>,
+        eff_pqc_auth: crate::config::PqcAuth,
+        sign_id: Option<crate::pqc_handshake::SignIdentity>,
+    ) -> (Arc<PqcHandshake>, Arc<SecretStore>, Arc<RekeyClock>) {
+        // Re-keying por épocas (forward secrecy): el SecretStore + RekeyClock
+        // se comparten entre el handshake (escribe los secretos por época) y
+        // quien consuma del store.
+        let lookahead = link.effective_lookahead();
+        let store = SecretStore::new(lookahead, link.pqc_rekey_keys);
+        let clock = RekeyClock::new(link.pqc_rekey_keys);
+        // PSK del enlace (base64) para autenticar el handshake (Fase 5). Un
+        // PSK mal formado se trata como ausente, con aviso: preferimos
+        // degradar a sin-auth que no montar el enlace por un typo en la
+        // config.
+        let decode_b64 = |b64: &str, what: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| {
+                    tracing::warn!(neighbor = link.neighbor_id, field = what, error = %e,
+                        "config base64 inválido; se ignora (enlace sin ese material)");
+                })
+                .ok()
+        };
+        // La raíz de la autenticación de enlace es simétrica y debe ser
+        // quantum-safe: 256 bits (Grover deja 128). Una PSK presente pero más
+        // corta es casi siempre un typo, y dejarla pasar da falsa sensación
+        // de seguridad. Se avisa alto y se ignora (como el base64 inválido);
+        // si el modo exige auth (`require`), el arranque falla luego por
+        // falta de PSK, que es justo lo que se quiere.
+        let psk = link
+            .link_psk
+            .as_deref()
+            .and_then(|b| decode_b64(b, "link_psk"))
+            .and_then(|k| {
+                if strong_link_root(k.len()) {
+                    Some(k)
+                } else {
+                    tracing::warn!(
+                        neighbor = link.neighbor_id,
+                        len = k.len(),
+                        min = MIN_LINK_ROOT_BYTES,
+                        "link_psk de menos de 32 B (no quantum-safe); se ignora"
+                    );
+                    None
+                }
+            });
+        // Modo `sign` (Fase 5 upgrade, ML-DSA): seed de firma de este nodo +
+        // clave pública de verificación del peer.
+        let sign_seed = cfg
+            .sign_secret_seed
+            .as_deref()
+            .and_then(|b| decode_b64(b, "sign_secret_seed"));
+        let peer_verify_key = link
+            .peer_verify_key
+            .as_deref()
+            .and_then(|b| decode_b64(b, "peer_verify_key"));
+        let hs = PqcHandshake::new(
+            link.pqc_suite.clone(),
+            cfg.qkc_id,
+            link.neighbor_id,
+            link.neighbor_peer_addr.clone(),
+            Arc::clone(peer_out) as Arc<dyn crate::pqc_handshake::HandshakeTransport>,
+            Arc::clone(&store),
+            Arc::clone(&clock),
+            lookahead,
+            link.pqc_rekey_secs,
+            link.key_size_bits,
+            psk,
+            eff_pqc_auth,
+            sign_seed,
+            peer_verify_key,
+            sign_id,
+        );
+        (hs, store, clock)
+    }
+
     fn build_link(
         cfg: &QkcConfig,
         link: &LinkConfig,
         peer_out: &Arc<PeerOut>,
     ) -> Result<LinkRuntime, QkcError> {
         {
-            // Identidad de firma del nodo (cert de red, A1): sólo se carga en
-            // enlaces PQC —los QKD se autentican contra su KME (A4)— y con ella
-            // se deciden los defaults de auth por-salto (A3). Si `[tls]` carga,
-            // el enlace va firmado + sellado por defecto; si no, modo legacy.
-            // Un valor explícito en `pqc_auth`/`frame_auth` siempre manda.
-            let sign_id = (link.link_type == LinkType::Pqc)
-                .then(|| build_sign_identity(cfg, link.neighbor_id))
-                .flatten();
+            // Identidad de firma del nodo (cert de red, A1). Con ella se
+            // deciden los defaults de auth por-salto (A3/A4): si `[tls]`
+            // carga, el enlace —PQC o QKD— va con handshake firmado + sello
+            // por-frame por defecto; si no, modo legacy. Un valor explícito
+            // en `pqc_auth`/`frame_auth` siempre manda.
+            let sign_id = build_sign_identity(cfg, link.neighbor_id);
             let has_node_identity = sign_id.is_some();
             let eff_pqc_auth = link.effective_pqc_auth(has_node_identity);
             let eff_frame_auth = link.effective_frame_auth(has_node_identity);
@@ -247,90 +331,39 @@ impl QkcService {
                         link.key_size_bits,
                         link.kme_client_tls(cfg.tls.as_ref()),
                     )?);
-                    (c as Arc<dyn KeySource>, None, None)
+                    // A4 (decisión 2026-08-31, opción B): el sello por-frame
+                    // del enlace QKD ancla su raíz en el MISMO handshake
+                    // ML-KEM firmado con el cert de nodo que usan los enlaces
+                    // PQC (A1/A2) — pero aquí NO es fuente de claves: las
+                    // claves de DATOS siguen viniendo del KME, que sigue
+                    // siendo la raíz de confianza del MATERIAL. El handshake
+                    // solo alimenta el SecretStore del que sale la raíz HMAC
+                    // por época; rota por tiempo (`pqc_rekey_secs` — el
+                    // disparo por volumen no aplica: nadie consume claves del
+                    // store). Se monta cuando hay con qué autenticarlo
+                    // (identidad de cert, o config legacy explícita); sin
+                    // nada, el enlace queda como siempre (link_psk o nada).
+                    if has_node_identity || eff_pqc_auth != crate::config::PqcAuth::Off {
+                        let (hs, store, _clock) =
+                            Self::build_link_handshake(cfg, link, peer_out, eff_pqc_auth, sign_id);
+                        (c as Arc<dyn KeySource>, Some(hs), Some(store))
+                    } else {
+                        (c as Arc<dyn KeySource>, None, None)
+                    }
                 }
                 LinkType::Pqc => {
-                    // Re-keying por épocas (forward secrecy): el SecretStore +
-                    // RekeyClock se comparten entre el handshake (escribe los
-                    // secretos por época) y la PqcKeySource (deriva + cuenta).
-                    let lookahead = link.effective_lookahead();
-                    let is_initiator = cfg.qkc_id < link.neighbor_id;
-                    let store = SecretStore::new(lookahead, link.pqc_rekey_keys);
-                    let clock = RekeyClock::new(link.pqc_rekey_keys);
-                    // PSK del enlace (base64) para autenticar el handshake
-                    // (Fase 5). Un PSK mal formado se trata como ausente, con
-                    // aviso: preferimos degradar a sin-auth que no montar el
-                    // enlace por un typo en la config.
-                    let decode_b64 = |b64: &str, what: &str| {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(b64)
-                            .map_err(|e| {
-                                tracing::warn!(neighbor = link.neighbor_id, field = what, error = %e,
-                                    "config base64 inválido; se ignora (enlace sin ese material)");
-                            })
-                            .ok()
-                    };
-                    // La raíz de la autenticación de enlace es simétrica y
-                    // debe ser quantum-safe: 256 bits (Grover deja 128). Una
-                    // PSK presente pero más corta es casi siempre un typo, y
-                    // dejarla pasar da falsa sensación de seguridad. Se avisa
-                    // alto y se ignora (como el base64 inválido); si el modo
-                    // exige auth (`require`), el arranque falla luego por falta
-                    // de PSK, que es justo lo que se quiere.
-                    let psk = link
-                        .link_psk
-                        .as_deref()
-                        .and_then(|b| decode_b64(b, "link_psk"))
-                        .and_then(|k| {
-                            if strong_link_root(k.len()) {
-                                Some(k)
-                            } else {
-                                tracing::warn!(
-                                    neighbor = link.neighbor_id,
-                                    len = k.len(),
-                                    min = MIN_LINK_ROOT_BYTES,
-                                    "link_psk de menos de 32 B (no quantum-safe); se ignora"
-                                );
-                                None
-                            }
-                        });
-                    // Modo `sign` (Fase 5 upgrade, ML-DSA): seed de firma de este
-                    // nodo + clave pública de verificación del peer.
-                    let sign_seed = cfg
-                        .sign_secret_seed
-                        .as_deref()
-                        .and_then(|b| decode_b64(b, "sign_secret_seed"));
-                    let peer_verify_key = link
-                        .peer_verify_key
-                        .as_deref()
-                        .and_then(|b| decode_b64(b, "peer_verify_key"));
-                    let hs = PqcHandshake::new(
-                        link.pqc_suite.clone(),
-                        cfg.qkc_id,
-                        link.neighbor_id,
-                        link.neighbor_peer_addr.clone(),
-                        Arc::clone(peer_out) as Arc<dyn crate::pqc_handshake::HandshakeTransport>,
-                        Arc::clone(&store),
-                        Arc::clone(&clock),
-                        lookahead,
-                        link.pqc_rekey_secs,
-                        link.key_size_bits,
-                        psk,
-                        eff_pqc_auth,
-                        sign_seed,
-                        peer_verify_key,
-                        sign_id,
-                    );
+                    let (hs, store, clock) =
+                        Self::build_link_handshake(cfg, link, peer_out, eff_pqc_auth, sign_id);
                     // El reloj solo lo alimenta el emisor del lado iniciador; el
                     // respondedor sigue la rotación vía store.highest().
-                    let store_for_fa = Arc::clone(&store);
+                    let is_initiator = cfg.qkc_id < link.neighbor_id;
                     let src = Arc::new(PqcKeySource::new(
                         link.key_size_bits,
-                        store,
-                        lookahead,
-                        is_initiator.then(|| Arc::clone(&clock)),
+                        Arc::clone(&store),
+                        link.effective_lookahead(),
+                        is_initiator.then_some(clock),
                     ));
-                    (src as Arc<dyn KeySource>, Some(hs), Some(store_for_fa))
+                    (src as Arc<dyn KeySource>, Some(hs), Some(store))
                 }
             };
             // La clave del enlace autentica los NOTIFY (ver KeyStore::verify_notify).
@@ -346,14 +379,17 @@ impl QkcService {
             // exactamente lo que el flag existe para impedir.
             if eff_frame_auth.rejects_plaintext() && notify_psk.is_none() && pqc_store.is_none() {
                 return Err(QkcError::BadRequest(format!(
-                    "enlace {}: frame_auth = require exige link_psk o un enlace PQC (secreto de enlace)",
+                    "enlace {}: frame_auth = require exige una raíz — link_psk, o el handshake \
+                     del enlace (identidad [tls] / pqc_auth)",
                     link.neighbor_id
                 )));
             }
             // Raíz del MAC de frames, por orden de preferencia:
-            //   1. `link_psk` explícita (raíz fija, QKD o PQC con psk).
-            //   2. el secreto del enlace PQC (per-epoch, sin PSK que repartir;
-            //      la autenticación la hereda del handshake firmado con cert).
+            //   1. `link_psk` explícita (raíz fija).
+            //   2. el secreto de época del handshake del enlace (per-epoch,
+            //      sin PSK que repartir; la autenticación la hereda del
+            //      handshake firmado con cert — en PQC es además la fuente de
+            //      claves, en QKD es solo-raíz, A4 opción B).
             // Si no hay ninguna, no hay MAC (comportamiento histórico).
             let frame_auth = if notify_psk.is_some() {
                 crate::frame_auth::LinkFrameAuth::new(eff_frame_auth, link.neighbor_id, notify_psk)
@@ -370,7 +406,8 @@ impl QkcService {
             if eff_frame_auth.signs() && frame_auth.is_none() {
                 warn!(
                     peer = link.neighbor_id,
-                    "qkc.frame_auth: modo prefer sin raíz (ni link_psk ni enlace PQC); frames sin MAC"
+                    "qkc.frame_auth: modo prefer sin raíz (ni link_psk ni handshake de enlace); \
+                     frames sin MAC"
                 );
             }
             let keys = KeyStore::new(
@@ -698,6 +735,42 @@ mod tests {
         let svc = QkcService::new(cfg_with(vec![pqc_link(2)])).unwrap();
         assert!(svc.link_to(2).is_some());
         assert!(svc.routing.is_direct_neighbor(2));
+    }
+
+    /// A4 (opción B): un enlace QKD en un nodo con identidad de cert monta el
+    /// handshake SOLO-RAÍZ (alimenta el sello per-época) sin dejar de ser el
+    /// KME la fuente de claves de datos; sin identidad, histórico — ni
+    /// handshake ni MAC.
+    #[tokio::test]
+    async fn a_qkd_link_gets_the_auth_handshake_iff_the_node_has_identity() {
+        let qkd_link = || crate::config::LinkConfig {
+            link_type: LinkType::Qkd,
+            quditto_url: Some("http://127.0.0.1:1".into()),
+            ..pqc_link(2)
+        };
+        // Sin identidad: comportamiento histórico.
+        let svc = QkcService::new(cfg_with(vec![qkd_link()])).unwrap();
+        let rt = svc.link_to(2).unwrap();
+        assert!(rt.pqc.is_none(), "sin identidad no hay handshake");
+        assert!(rt.frame_auth.is_none(), "ni MAC");
+
+        // Con identidad ([tls] del PKI de test): handshake + sello per-época.
+        let dir = std::env::temp_dir().join(format!("qkc_qkd_auth_{}", std::process::id()));
+        let Some(pki) = common::test_support::mldsa_test_pki(&dir, &["qkc-1"]) else {
+            common::test_support::skip_or_fail("openssl sin ML-DSA (<3.5)");
+            return;
+        };
+        common::tls_pqc::ensure_process_default().expect("provider PQC");
+        let mut cfg = cfg_with(vec![qkd_link()]);
+        cfg.tls = Some(common::http::ControlTlsCfg {
+            cert_path: pki.cert("qkc-1"),
+            key_path: pki.key("qkc-1"),
+            control_plane_ca: pki.ca_crt.clone(),
+        });
+        let svc = QkcService::new(cfg).unwrap();
+        let rt = svc.link_to(2).unwrap();
+        assert!(rt.pqc.is_some(), "handshake solo-raíz montado");
+        assert!(rt.frame_auth.is_some(), "sello per-época activo");
     }
 
     #[tokio::test]
