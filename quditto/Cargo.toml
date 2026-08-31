@@ -23,6 +23,10 @@ path = "src/lib.rs"
 # Modelos ETSI 014 / 020 — port 1:1 del Python `ETSIQKD/`.
 etsi = { path = "../etsi" }
 
+# Provider TLS post-cuántico (tls_pqc): quditto lo instala al arrancar como
+# los otros cuatro binarios, y es la base del [tls] de su ETSI-014.
+common = { path = "../common" }
+
 # Async runtime + HTTP server.
 tokio = { workspace = true }
 axum  = { workspace = true }

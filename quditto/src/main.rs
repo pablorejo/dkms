@@ -55,6 +55,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // El provider PQC como default del proceso, como los otros cuatro
+    // binarios: aunque hoy quditto no abra TLS propio, cualquier TLS que
+    // gane la carrera después (o el [tls] opcional de su ETSI-014) debe
+    // salir con el KX híbrido y ML-DSA, nunca con los defaults clásicos.
+    common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
+
     let cli = Cli::parse();
     let cfg = QudittoConfig {
         listen: cli.listen.clone(),
