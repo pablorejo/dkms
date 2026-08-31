@@ -415,6 +415,19 @@ impl E2e {
         if resp.epoch == 0 {
             return Err(E2eError::Peer("época 0 no es válida".into()));
         }
+        // La suite viaja por el cable pero NO se negocia: se exige igual a la
+        // local. Sin este suelo, un peer (autenticado, pero quizá mal
+        // configurado o comprometido) podía bajar el par a ml-kem-512 y nadie
+        // lo veía — en un fichero cuya premisa es que el que responde no
+        // decide nada que importe. La deriva de config entre nodos se vuelve
+        // un error a la vista en vez de un downgrade silencioso.
+        if resp.suite != self.cfg.suite {
+            return Err(E2eError::Peer(format!(
+                "suite e2e '{}' del peer != '{}' local: [transport_e2e].suite debe ser \
+                 idéntica en todo el despliegue",
+                resp.suite, self.cfg.suite
+            )));
+        }
         let kem = pqc::kem_for(&resp.suite).map_err(|e| E2eError::Kem(e.to_string()))?;
         let ct = base64::engine::general_purpose::STANDARD
             .decode(&resp.ct)
@@ -446,6 +459,14 @@ impl E2e {
     /// época nueva y pasa a emitir con ella. `peer` viene del certificado,
     /// nunca del cuerpo.
     pub fn respond(&self, peer: &str, req: &KemRequest) -> Result<KemResponse, E2eError> {
+        // Mismo suelo que en complete_request: la suite no se negocia.
+        if req.suite != self.cfg.suite {
+            return Err(E2eError::Peer(format!(
+                "suite e2e '{}' del peer != '{}' local: [transport_e2e].suite debe ser \
+                 idéntica en todo el despliegue",
+                req.suite, self.cfg.suite
+            )));
+        }
         let kem = pqc::kem_for(&req.suite).map_err(|e| E2eError::Kem(e.to_string()))?;
         let epk = base64::engine::general_purpose::STANDARD
             .decode(&req.epk)
@@ -592,6 +613,28 @@ mod tests {
         let req = a.begin_request("dkms-b").unwrap();
         let resp = b.respond("dkms-a", &req).unwrap();
         a.complete_request("dkms-b", &resp).unwrap()
+    }
+
+    /// La suite no se negocia: se exige igual a la local en los dos lados.
+    /// Config desalineada => error a la vista; respuesta adulterada a una
+    /// suite más débil => el que pidió la rechaza.
+    #[test]
+    fn a_mismatched_suite_is_rejected_on_both_sides() {
+        let (a, b) = pair();
+        let (weak, _) = pair_with(TransportE2eCfg {
+            suite: common::crypto::pqc::suite::ML_KEM_512.to_owned(),
+            ..TransportE2eCfg::default()
+        });
+        let req = weak.begin_request("dkms-b").unwrap();
+        let err = b
+            .respond("dkms-a", &req)
+            .expect_err("suite distinta a la local");
+        assert!(err.to_string().contains("transport_e2e"));
+
+        let req = a.begin_request("dkms-b").unwrap();
+        let mut resp = b.respond("dkms-a", &req).unwrap();
+        resp.suite = common::crypto::pqc::suite::ML_KEM_512.to_owned();
+        assert!(a.complete_request("dkms-b", &resp).is_err());
     }
 
     fn header(key_id: &str) -> BTreeMap<String, String> {
