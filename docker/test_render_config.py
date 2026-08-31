@@ -145,6 +145,74 @@ class QudittoTls(unittest.TestCase):
         self.assertNotIn("QUDITTO_TLS_CERT", env)
 
 
+DKMS_BASE = """\
+node_id: dkms-1
+advertise_ip: 10.0.0.7
+sae_bindings: {sae_1: dkms-1}
+"""
+
+
+class ExplicitHotKeys(unittest.TestCase):
+    def test_dkms_capacity_and_transport_e2e(self):
+        cfg = render(
+            "dkms",
+            DKMS_BASE + "capacity_per_peer: 8192\n"
+            "transport_e2e: {rekey_secs: 120, replay_window: 512}\n",
+        )
+        self.assertEqual(cfg["buffer"]["capacity_per_peer"], 8192)
+        self.assertEqual(cfg["transport_e2e"]["rekey_secs"], 120)
+        self.assertEqual(cfg["transport_e2e"]["replay_window"], 512)
+        self.assertNotIn("suite", cfg["transport_e2e"])
+
+    def test_orr_rotation_period_is_a_scalar_before_tables(self):
+        cfg = render("orr", ORR_BASE + "rotation_period_ms: 120000\npeers:\n  orr_2: 2\n")
+        self.assertEqual(cfg["rotation_period_ms"], 120000)
+        self.assertNotIn("rotation_period_ms", cfg["peers"])
+
+
+class ExtraFreeform(unittest.TestCase):
+    """`extra:` — la válvula para campos de config.rs sin clave en node.yml."""
+
+    def test_scalar_lands_before_the_first_table(self):
+        cfg = render("orr", ORR_BASE + "peers: {orr_2: 2}\nextra:\n  deliver_queue_capacity: 1024\n")
+        self.assertEqual(cfg["deliver_queue_capacity"], 1024)
+        self.assertNotIn("deliver_queue_capacity", cfg["peers"])
+
+    def test_dict_merges_into_an_emitted_table(self):
+        cfg = render(
+            "dkms",
+            DKMS_BASE + "extra:\n  generator: {max_tokens_per_peer_per_tick: 64}\n",
+        )
+        g = cfg["generator"]
+        self.assertEqual(g["max_tokens_per_peer_per_tick"], 64)
+        # La tabla original sobrevive entera (el patrón sed de mesh.sh, bien).
+        self.assertIn("ack_transport", g)
+
+    def test_dict_appends_a_new_table(self):
+        cfg = render("sdn", "extra:\n  rates: {num_fill_weight: 0.5}\n")
+        self.assertEqual(cfg["rates"]["num_fill_weight"], 0.5)
+
+    def test_new_table_after_links_array_stays_top_level(self):
+        cfg = render(
+            "qkc",
+            "qkc_id: 1\nsdn_url: 10.0.0.2\n"
+            "links:\n  - neighbor_id: 2\n"
+            "extra:\n  foo: {bar: 1}\n",
+        )
+        self.assertEqual(cfg["foo"]["bar"], 1)
+        self.assertNotIn("foo", cfg["links"][0])
+
+    def test_collision_with_rendered_key_dies(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            render("orr", ORR_BASE + "extra:\n  orr_id: otro\n")
+        with self.assertRaises(subprocess.CalledProcessError):
+            render("dkms", DKMS_BASE + "extra:\n  generator: {ack_transport: socket}\n")
+
+    def test_deep_nesting_dies(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            render("orr", ORR_BASE + "extra:\n  a: {b: {c: 1}}\n")
+
+
 class SdnControlTls(unittest.TestCase):
     def test_cert_name_names_the_tls_paths(self):
         cfg = render("sdn", "control_tls: true\ncert_name: sdn-madrid\n")

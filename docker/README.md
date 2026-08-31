@@ -41,11 +41,18 @@ Flujo validado end-to-end el 2026-07-02 sobre 4 máquinas (campaña local
 
 Cada imagen contiene el binario Rust de su módulo + un entrypoint común:
 
-1. El contenedor arranca con `ROLE` fijado (qkc|orr|dkms|sdn).
+1. El contenedor arranca con `ROLE` fijado (qkc|orr|dkms|sdn|quditto).
 2. El entrypoint busca `/config/node.yml` (el que montas tú) y lo convierte
    con `render_config.py` en la config nativa del binario — un TOML — escrita
    en `/run/cfg/`. La SDN no lleva topología: la infiere de los anuncios.
 3. Arranca el binario apuntando a esa config.
+
+En cualquier node.yml (qkc/orr/dkms/sdn) hay además una válvula de escape
+`extra:`: un mapa libre que se funde en el TOML renderizado para los campos
+de `src/config.rs` sin clave propia (p. ej. `extra: {generator:
+{max_tokens_per_peer_per_tick: 64}}` o `extra: {rate_allocator: maxmin}`).
+Escalares antes de la primera tabla, dicts de un nivel en su tabla; una
+colisión con una clave que el render ya emite es un error, no un override.
 
 Consecuencias prácticas:
 
@@ -334,6 +341,11 @@ links:
 | `links[].pqc_*` | solo PQC, opcionales: `pqc_suite` (default `ml-kem-768`), `pqc_rekey_keys` (rota el secreto cada N claves, default 1000), `pqc_rekey_secs` (…o cada T segundos, default 3600), `pqc_rekey_lookahead` (épocas pre-derivadas, default 2). |
 | `links[].link_psk` | **secreto pre-compartido del enlace**, base64 de 32 bytes, IDÉNTICO en los dos extremos. Es la raíz de la autenticación del enlace: con él se firma el handshake, el NOTIFY y —si `frame_auth` lo pide— cada frame de datos. Solo config local: la SDN no transporta secretos, ni debe. Sin él no hay autenticación de enlace ninguna. |
 | `links[].frame_auth` | `off` (default) \| `prefer` \| `require`: MAC por frame de datos. Ver la sección de abajo. |
+| `links[].pqc_auth` | solo PQC: `off` (default) \| `prefer` \| `require` (HMAC con `link_psk`) \| `sign` (firma ML-DSA del handshake; el seed propio va en `sign_secret_seed` a nivel de nodo y la pública del vecino en `links[].peer_verify_key`). Como todo lo de dos extremos: idéntico en ambos. |
+| `sign_secret_seed` | seed ML-DSA (base64) de la identidad de firma del QKC, para enlaces con `pqc_auth: sign`. Solo config local. |
+| `cert_name` | nombre del cert de nodo en `certs_dir` (default `qkc-<id>`): el que presenta al anunciarse a una SDN mTLS y al dialar un KME https. |
+| `listen_ip` / `ports` | dónde escucha (20000 peer, 20001 local, 20002 admin). Override solo si chocan. |
+| `extra` | mapa libre → TOML (ver arriba). |
 
 **Sobre el auto-registro.** Una arista necesita a sus dos extremos dados de
 alta, así que el QKC que arranque primero la verá `pending` hasta que su vecino
@@ -499,7 +511,10 @@ peer_grpc_addrs:
 | `default_max_hops` | default 0 (passthrough): el material ya va sellado por el DKMS. `1`, `≥2` o `-1` añaden cebolla ORR↔ORR encima (privacidad de camino) y meten el bootstrap ORR↔ORR en el camino crítico. |
 | `grpc_tls` | default `true`: mTLS en su gRPC con `certs/<orr_id>.crt/.key` + `net-ca.crt`. `false` sólo si DKMS y ORR comparten máquina o red interna (y entonces `orr_tls: false` en el DKMS). |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
-| `control_addr` | **no lo pongas** salvo que sepas por qué: abre el gRPC de operador (20007, `Drain` sin auth) en esa IP en vez de `127.0.0.1`. |
+| `cert_name` | nombre del cert de nodo en `certs_dir` (default el propio `orr_id`). |
+| `bootstrap_trust` | `tofu` (default) \| `strict`: con `strict` el ORR exige que el anuncio de pubkey del peer venga firmado con su cert de nodo (cadena a `net-ca` + SAN `dkms://<orr_id>`) o casado con `peer_verify_keys`; con `tofu` acepta el primero que llega. El flip a `strict` por defecto está gateado al testbed. |
+| `rotation_period_ms` | rotación del `master_secret` ORR↔ORR (forward secrecy), default 3600000 (1 h). |
+| `extra` | mapa libre → TOML (ver arriba). |
 
 **Paso 4 — arrancar y verificar:**
 
@@ -592,7 +607,12 @@ peers:
 | `peers.<id>` | **semilla, opcional**: con qué DKMS trabajar mientras la SDN no conteste, y suelo que la SDN no puede borrar. `endpoint` (IP, puerto peer 20006 por defecto) y `orr_id` (el ORR de ese peer, por el que viaja el material). Cuando la SDN responde manda ella el `endpoint` y el `orr_id`; `max_hops`, `security_level` y `sni` se quedan siempre en local. |
 | `security_level` | default para servir claves: `strict_qkd` (solo material grado QKD; falla si no hay), `qkd_prefer` (default: QKD si hay, si no PQC), `no_worry` (lo que haya). El SAE puede pedir un nivel distinto por request; esto es el default. |
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
-| `transport_e2e` | **no hace falta tocarlo**. El material de transporte sale sellado extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`): ML-KEM-768 acordado por el mismo mTLS del ETSI-020 (20006), AES-256-GCM por clave, rotación cada 3600 s. Lo único que exige es lo que ya exigía el ETSI-020: que los DKMS se alcancen entre sí en 20006 con certs de `net-ca`. En `generator.state`, `e2e_epoch=none` sostenido es que ese acuerdo no llega. |
+| `transport_e2e` | **no hace falta tocarlo**. El material de transporte sale sellado extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`): ML-KEM-768 acordado por el mismo mTLS del ETSI-020 (20006), AES-256-GCM por clave, rotación cada 3600 s. Lo único que exige es lo que ya exigía el ETSI-020: que los DKMS se alcancen entre sí en 20006 con certs de `net-ca`. En `generator.state`, `e2e_epoch=none` sostenido es que ese acuerdo no llega. Ajustable si hace falta (`transport_e2e: {rekey_secs: ..., replay_window: ..., epoch_history_keep: ..., suite: ...}` — la `suite` debe ser idéntica en todo el despliegue). |
+| `capacity_per_peer` | tamaño del buffer de claves de transporte por peer (default 4096) — el `B_k` que ve el solver de la SDN y el knob que las campañas suben. |
+| `ack_transport` | `socket` (default, TCP plano heredado) \| `etsi020` (ACK saliente por el POST mTLS del 20006, identidad = cert). El flip de default está gateado al testbed. |
+| `ack_socket_listen` | default `true`. `false` apaga el listener del socket de ACK (20009) — solo cuando TODOS los peers acusan por `etsi020`; sin listener el `ack_endpoint` deja de anunciarse. |
+| `control_addr` | **no lo pongas** salvo que sepas por qué: abre el gRPC de operador `DkmsControl` (20007, `Drain` borra todos los buffers, sin auth) en esa IP en vez de `127.0.0.1`. |
+| `extra` | mapa libre → TOML (ver arriba). |
 | `sae_bindings` | **obligatorio**: los SAE que este nodo sirve (`sae_id: <node_id>`). Es la lista contra la que se autoriza cada petición ETSI-014 (fail-closed) y la que se anuncia a la SDN. Sin ella toda petición SAE recibe 404 `UnknownSae`; el render y el arranque lo avisan. |
 | `sae_authorization` | default `true`. `false` desactiva esa autorización (cualquier cert de `sae-ca` puede pedir claves en nombre de cualquier SAE) — solo si la pertenencia SAE→DKMS es puramente dinámica vía SDN. |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |

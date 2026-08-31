@@ -89,6 +89,59 @@ def write(path, text):
         f.write(text)
 
 
+def toml_value(v, where):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        return q(v)
+    die("[extra] " + where + ": solo escalares (bool/número/string), no " + type(v).__name__)
+
+
+def merge_extra(lines, extra):
+    """Funde el mapa libre `extra:` del node.yml en el TOML renderizado.
+
+    Es la válvula de escape para cualquier campo de `src/config.rs` sin clave
+    propia en node.yml (rotation_period_ms ya la tiene; generator.*,
+    request.ack_wait_timeout_ms, rate_allocator/num_*, timeouts southbound...)
+    sin tener que enumerar cada uno aquí. Reglas, las mismas que muerden a
+    mano: un ESCALAR se inserta antes de la primera tabla (una clave suelta
+    tras una cabecera pertenece a esa tabla); un dict de UN nivel se funde en
+    la tabla si el render ya la emitió (justo tras su cabecera, el patrón sed
+    de mesh.sh hecho en serio) o se añade entera al final (seguro incluso tras
+    [[links]]: una cabecera nueva cierra el elemento). Colisión con una clave
+    que el render ya emitió = error a la vista, nunca un override silencioso.
+    """
+    for key, val in (extra or {}).items():
+        key = str(key)
+        if isinstance(val, dict):
+            header = "[" + key + "]"
+            entries = []
+            for k2, v2 in val.items():
+                if isinstance(v2, dict):
+                    die("[extra] " + key + "." + str(k2) + ": máximo un nivel de anidado")
+                entries.append(str(k2) + " = " + toml_value(v2, key + "." + str(k2)))
+            if header in lines:
+                at = lines.index(header)
+                end = next((i for i in range(at + 1, len(lines))
+                            if lines[i].startswith("[")), len(lines))
+                for e in entries:
+                    k2 = e.split(" = ")[0]
+                    if any(l.startswith(k2 + " ") for l in lines[at + 1:end]):
+                        die("[extra] " + key + "." + k2 + " colisiona con una clave que el "
+                            "render ya emite: usa la clave nativa del node.yml")
+                lines[at + 1:at + 1] = entries
+            else:
+                lines += ["", header] + entries
+        else:
+            if any(l.startswith(key + " ") for l in lines if not l.startswith("[")):
+                die("[extra] " + key + " colisiona con una clave que el render ya emite: "
+                    "usa la clave nativa del node.yml")
+            first_table = next((i for i, l in enumerate(lines) if l.startswith("[")), len(lines))
+            lines.insert(first_table, key + " = " + toml_value(val, key))
+
+
 # ─────────────────────────────── QKC ────────────────────────────────────────
 def render_qkc(n, out):
     p = dict(PORTS["qkc"]); p.update(n.get("ports") or {})
@@ -185,6 +238,7 @@ def render_qkc(n, out):
                 lines.append("peer_verify_key = " + q(str(lk["peer_verify_key"])))
     qkc_cert = n.get("cert_name", "qkc-" + str(int(req(n, "qkc_id", "qkc"))))
     lines += control_tls_lines(n, qkc_cert, "client")
+    merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "qkc.toml"), "\n".join(lines) + "\n")
 
 
@@ -215,6 +269,11 @@ def render_orr(n, out):
         lines.append("sign_secret_seed = " + q(str(n["sign_secret_seed"])))
     if n.get("bootstrap_trust") is not None:
         lines.append("bootstrap_trust = " + q(str(n["bootstrap_trust"])))
+    # Rotación del master_secret ORR↔ORR (forward secrecy), en ms. Escalar:
+    # antes de cualquier tabla. Sin clave era inalcanzable desde node.yml y
+    # mesh.sh lo parcheaba con sed.
+    if n.get("rotation_period_ms") is not None:
+        lines.append("rotation_period_ms = " + str(int(n["rotation_period_ms"])))
     # Self-registration. sdn_url is the SDN's gRPC; the registration endpoint
     # lives on its HTTP admin, so derive that port rather than asking for a
     # second URL in node.yml.
@@ -256,6 +315,7 @@ def render_orr(n, out):
     pg = n.get("peer_grpc_addrs") or {}    # orr_id -> grpc url
     if pg:
         lines += ["", "[peer_grpc_addrs]"] + [str(k) + " = " + q(v) for k, v in pg.items()]
+    merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
 
@@ -324,6 +384,20 @@ def render_dkms(n, out):
     fr = n.get("fill_rate")
     if fr is not None:
         lines.append("default_fill_rate_keys_per_s = " + str(float(fr)))
+    # Tuning caliente con clave propia: el tamaño del buffer por peer (B_k
+    # del solver, el knob que las campañas suben de 4096) y la capa e2e
+    # DKMS<->DKMS (rekey_secs para acelerar la rotación en pruebas). El resto
+    # de campos sin clave van por `extra:`.
+    if n.get("capacity_per_peer") is not None:
+        lines += ["", "[buffer]",
+                  "capacity_per_peer = " + str(int(n["capacity_per_peer"]))]
+    te = n.get("transport_e2e") or {}
+    if te:
+        lines += ["", "[transport_e2e]"]
+        for k in ("suite", "rekey_secs", "epoch_history_keep", "replay_window"):
+            if te.get(k) is not None:
+                v = te[k]
+                lines.append(k + " = " + (q(str(v)) if k == "suite" else str(int(v))))
     # Autorización de SAEs: fail-closed contra `sae_bindings` (los SAE que este
     # nodo declara servir). Con la lista vacía el DKMS no sirve a nadie, así
     # que se avisa aquí, en el render, antes del primer 404.
@@ -344,6 +418,7 @@ def render_dkms(n, out):
         orr_id = pc.get("orr_id", "orr_" + str(pid).split("-")[-1])
         lines += ["", "[peers." + str(pid) + "]", "endpoint = " + q(ep),
                   'transport = "orr"', "orr_id = " + q(orr_id)]
+    merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
 
@@ -393,6 +468,7 @@ def render_sdn(n, out):
         lines.append("http_ro_addr = " + q(bind + ":" + str(int(n["http_ro_port"]))))
     # cert_name como en qkc/orr: por defecto "sdn" (gen-certs.sh sdn <ip>).
     lines += control_tls_lines(n, n.get("cert_name", "sdn"), "server")
+    merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
 
