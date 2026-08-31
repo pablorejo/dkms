@@ -11,6 +11,7 @@
 //! Mismo wire binario (`wire::Frame`) que QKC↔QKC — ningún parser
 //! distinto, solo `kind` distinto.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::{
@@ -103,7 +104,12 @@ async fn handle_conn(svc: QkcService, stream: TcpStream, inflight: Arc<Semaphore
             tokio::spawn(async move {
                 let _permit = permit;
                 if let Err(e) = relay::handle_local_send(svc2, frame).await {
-                    warn!(error = %e, "qkc.local.send_err");
+                    // Throttled: con el ENC seco esto era un warn por frame.
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    let n = N.fetch_add(1, Ordering::Relaxed);
+                    if common::log_throttle::nth_is_loud(n) {
+                        warn!(error = %e, total = n + 1, "qkc.local.send_err");
+                    }
                 }
             });
         } else {

@@ -457,14 +457,21 @@ impl QkcService {
             .fetch_add(n_closed as u64, Ordering::Relaxed);
         // Si el frame no llegó a NINGÚN consumidor, lo gritamos: es un
         // drop silencioso real (no había listener vivo o todos llenos).
+        // Throttled: con la cola del ORR llena sostenida era un warn por
+        // frame; los contadores de arriba llevan la cuenta exacta.
         if n_ok == 0 && n_targets > 0 {
-            warn!(
-                qkc = self.cfg.qkc_id,
-                targets = n_targets,
-                full = n_full,
-                closed = n_closed,
-                "qkc.deliver_local.no_consumer"
-            );
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    qkc = self.cfg.qkc_id,
+                    targets = n_targets,
+                    full = n_full,
+                    closed = n_closed,
+                    total = n + 1,
+                    "qkc.deliver_local.no_consumer"
+                );
+            }
         }
     }
 

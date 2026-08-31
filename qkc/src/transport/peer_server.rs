@@ -8,6 +8,7 @@
 //!
 //! Cada frame se despacha en su propia task tokio para no serializar.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::{net::TcpStream, sync::Semaphore};
@@ -92,7 +93,15 @@ async fn handle_conn(
                         Err(_) => return,
                     };
                     if let Err(e) = relay::handle_incoming(svc2, frame).await {
-                        warn!(error = %e, "qkc.relay.handle_err");
+                        // Throttled: aquí desemboca TODO error sostenido del
+                        // relay (BadMac, replay, plaintext rechazado, enlace
+                        // seco) — un warn por frame re-anulaba el throttling
+                        // de los sitios de origen (la clase 752 MB/10 min).
+                        static N: AtomicU64 = AtomicU64::new(0);
+                        let n = N.fetch_add(1, Ordering::Relaxed);
+                        if common::log_throttle::nth_is_loud(n) {
+                            warn!(error = %e, total = n + 1, "qkc.relay.handle_err");
+                        }
                     }
                 });
             }
