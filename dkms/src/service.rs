@@ -1140,23 +1140,41 @@ impl DkmsService {
             );
         }
 
-        // ACK siempre (TCP plano, no ORR), batched por
-        // `BatchedAckClient` para amortizar el coste de open/close
-        // bajo carga sostenida.
-        if let Some(ep) = ack_endpoint {
-            // Un cambio de `ack_endpoint` a mitad de despliegue (peer
-            // recreado con otra IP) explicaría ACKs que dejan de llegar;
-            // se loguea una vez por valor, no por clave.
-            if self.flow.note_endpoint(&source_dkms, &ep) {
-                info!(
+        // ACK siempre que haya ALGUNA forma de acusar. El transporte lo
+        // decide `send_and_count` (etsi020 primero); el `ack_endpoint` del
+        // header es SOLO del socket heredado, así que su ausencia —un emisor
+        // con `ack_socket_listen = false` ya no lo anuncia— no puede
+        // callarnos: con ruta etsi020 se acusa igual. Gatear el enqueue al
+        // header dejó mudo el brazo etsi020 entero (medido en la malla local
+        // 2026-08-31: recv=36k, ack_sent=0, todo expirado al otro lado).
+        let ep_for_socket = ack_endpoint.unwrap_or_default();
+        match self.ack_client.clone() {
+            Some(client) if !ep_for_socket.is_empty() || client.has_etsi020_route(&source_dkms) => {
+                // Un cambio de `ack_endpoint` a mitad de despliegue (peer
+                // recreado con otra IP) explicaría ACKs que dejan de llegar;
+                // se loguea una vez por valor, no por clave.
+                if !ep_for_socket.is_empty()
+                    && self.flow.note_endpoint(&source_dkms, &ep_for_socket)
+                {
+                    info!(
+                        source = %source_dkms,
+                        ack_endpoint = %ep_for_socket,
+                        "dkms: acusaré recibo a este peer en esta dirección",
+                    );
+                }
+                client
+                    .enqueue(&source_dkms, ep_for_socket, key_id_str.clone())
+                    .await;
+            }
+            Some(_) => {
+                self.flow.ack_no_endpoint(&source_dkms, 1);
+                debug!(
                     source = %source_dkms,
-                    ack_endpoint = %ep,
-                    "dkms: acusaré recibo a este peer en esta dirección",
+                    key_id = %key_id_str,
+                    "orr buffer delivery: sin ack_endpoint en el header y sin ruta etsi020, el peer no verá ACK",
                 );
             }
-            if let Some(client) = self.ack_client.clone() {
-                client.enqueue(&source_dkms, ep, key_id_str.clone()).await;
-            } else {
+            None => {
                 self.flow.ack_no_endpoint(&source_dkms, 1);
                 debug!(
                     source = %source_dkms,
@@ -1164,13 +1182,6 @@ impl DkmsService {
                     "orr buffer delivery: no ack_client configured, skipping ACK",
                 );
             }
-        } else {
-            self.flow.ack_no_endpoint(&source_dkms, 1);
-            debug!(
-                source = %source_dkms,
-                key_id = %key_id_str,
-                "orr buffer delivery: no ack_endpoint in header, peer won't see ACK",
-            );
         }
 
         debug!(

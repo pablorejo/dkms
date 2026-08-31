@@ -270,6 +270,18 @@ impl BatchedAckClient {
         }
     }
 
+    /// ¿Hay camino ETSI-020 hacia este peer? (transporte etsi020 configurado
+    /// Y endpoint HTTP conocido). Es lo que permite acusar recibo aunque el
+    /// emisor no anuncie `ack_endpoint` — con `ack_socket_listen = false` ya
+    /// no lo anuncia, y ese header es SOLO del socket heredado.
+    pub fn has_etsi020_route(&self, peer_id: &str) -> bool {
+        self.etsi020.as_ref().is_some_and(|t| {
+            t.peers
+                .get(peer_id)
+                .is_some_and(|cfg| !cfg.endpoint.is_empty())
+        })
+    }
+
     /// Manda un batch y contabiliza el resultado. `why` distingue el flush
     /// por cola llena del periódico, para leer en el log si el ritmo de
     /// ACK lo marca la carga o el temporizador.
@@ -312,6 +324,26 @@ impl BatchedAckClient {
                     }
                 }
             }
+        }
+        if addr.is_empty() {
+            // Encolado sin endpoint de socket (el emisor no lo anuncia) y el
+            // camino etsi020 de arriba no aplicó: no hay forma de acusar.
+            self.stats.ack_send_failed(peer_id, n);
+            let total = self
+                .stats
+                .peer(peer_id)
+                .ack_send_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(total.saturating_sub(n)) {
+                warn!(
+                    peer = peer_id,
+                    n,
+                    why,
+                    failed_total = total,
+                    "ack: sin ack_endpoint del emisor y sin ruta etsi020; el peer verá expirar"
+                );
+            }
+            return;
         }
         match self.inner.send_batch(addr, &batch).await {
             Ok(()) => {
