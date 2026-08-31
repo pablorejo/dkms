@@ -106,10 +106,11 @@ humantime = "2.1"
 petgraph = "0.6"
 
 # Linear programming (MCMCF-λ solver — Maximum Concurrent MCF with
-# demand scaling). Both backends are pure Rust so Docker/offline builds
-# stay dependency-free: microlp (default_solver, exact simplex) and
-# clarabel (interior-point, runtime opt-in via SDN_SOLVER=clarabel —
-# microlp stalls at N≥40 / ≥1560 commodities).
+# demand scaling). Three backends behind SDN_SOLVER: highs (DEFAULT since
+# 2026-08-25 — C++ via highs-sys, needs cmake + clang/libclang at build,
+# already in the Dockerfiles and CI), microlp (pure Rust, exact simplex,
+# false phase-2 Infeasible under load — see CLAUDE.md) and clarabel (pure
+# Rust interior-point, no phase 2).
 good_lp = { version = "1", default-features = false, features = ["microlp", "clarabel", "highs"] }
 # Direct dep only for naming clarabel::solver::SolverStatus in the SDN's
 # post-solve status check (good_lp's backend maps unbounded exits to Ok).
