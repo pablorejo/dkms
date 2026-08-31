@@ -767,11 +767,14 @@ impl Generator {
         if plan.is_empty() {
             return;
         }
-        let items: Vec<String> = plan
+        // Arc<str>: un alloc por ENTRADA del plan; las repeticiones por clave
+        // (hasta max_tokens x n_peers, 10 veces/s) son bumps de refcount, no
+        // Strings nuevos.
+        let items: Vec<Arc<str>> = plan
             .iter()
-            .flat_map(|(peer, n)| std::iter::repeat_n(peer.clone(), *n as usize))
+            .flat_map(|(peer, n)| std::iter::repeat_n(Arc::from(peer.as_str()), *n as usize))
             .collect();
-        let results: Vec<(String, bool, Option<String>)> = futures::stream::iter(items)
+        let results: Vec<(Arc<str>, bool, Option<String>)> = futures::stream::iter(items)
             .map(|peer| {
                 let me = self.clone();
                 async move {
@@ -788,7 +791,7 @@ impl Generator {
         // Los fallos se agregan por peer y sale UNA línea por peer y tick. Con
         // una por emisión, un peer cuyo ORR aún no tiene master_secret generaba
         // miles de warn/s: 752 MB de logs en 10 minutos, medido en 2026-05-25.
-        let mut failures: HashMap<String, (usize, usize, Option<String>)> = HashMap::new();
+        let mut failures: HashMap<Arc<str>, (usize, usize, Option<String>)> = HashMap::new();
         for (peer, ok, err) in results {
             let e = failures.entry(peer).or_insert((0, 0, None));
             if ok {
