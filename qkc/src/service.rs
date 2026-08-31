@@ -11,7 +11,6 @@ use std::{
     time::Duration,
 };
 
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -88,7 +87,10 @@ pub struct QkcService {
     pub links: Arc<ArcSwap<HashMap<u32, Arc<LinkRuntime>>>>,
     pub peer_out: Arc<PeerOut>,
     /// Senders hacia conexiones locales (ORR).
-    pub local_out: Arc<Mutex<Vec<mpsc::Sender<wire::Frame>>>>,
+    /// Consumidores locales (el ORR). `ArcSwap` como `links` y la forwarding
+    /// table: `deliver_local` corre por frame y con el mutex pagaba un lock +
+    /// un clone del Vec cada vez; registrar/prunar es frío y va por RCU.
+    pub local_out: Arc<arc_swap::ArcSwap<Vec<mpsc::Sender<wire::Frame>>>>,
     /// Contadores de diagnóstico. Ver [`ServiceStats`].
     pub stats: Arc<ServiceStats>,
 }
@@ -130,7 +132,7 @@ impl QkcService {
             routing: Arc::new(routing),
             links: Arc::new(ArcSwap::from_pointee(links)),
             peer_out,
-            local_out: Arc::new(Mutex::new(Vec::new())),
+            local_out: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             stats: Arc::new(ServiceStats::default()),
         })
     }
@@ -428,12 +430,12 @@ impl QkcService {
     pub fn deliver_local(&self, frame: wire::Frame) {
         use tokio::sync::mpsc::error::TrySendError;
         self.stats.deliver_calls.fetch_add(1, Ordering::Relaxed);
-        let senders = self.local_out.lock().clone();
+        let senders = self.local_out.load();
         let n_targets = senders.len();
         let mut n_ok = 0usize;
         let mut n_full = 0usize;
         let mut n_closed = 0usize;
-        for tx in senders {
+        for tx in senders.iter() {
             match tx.try_send(frame.clone()) {
                 Ok(()) => {
                     n_ok += 1;
@@ -476,11 +478,20 @@ impl QkcService {
     }
 
     pub fn register_local(&self, tx: mpsc::Sender<wire::Frame>) {
-        self.local_out.lock().push(tx);
+        self.local_out.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.push(tx.clone());
+            next
+        });
     }
 
     pub fn prune_local(&self) {
-        self.local_out.lock().retain(|tx| !tx.is_closed());
+        self.local_out.rcu(|cur| {
+            cur.iter()
+                .filter(|tx| !tx.is_closed())
+                .cloned()
+                .collect::<Vec<_>>()
+        });
     }
 }
 
