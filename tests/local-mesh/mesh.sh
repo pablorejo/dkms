@@ -302,10 +302,13 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
 
 # Levanta los topes de medida sobre el TOML ya renderizado.
 #
-# `max_tokens_per_peer_per_tick` se INSERTA tras la cabecera [generator], no se
-# anexa al final: el fichero termina en [sae_bindings], y una línea suelta al
-# final caería dentro de esa sección. [sae] no lo escribe el render, así que
-# ahí sí se puede añadir la sección entera.
+# Las claves de secciones que el render YA emite ([generator], [southbound],
+# [sae]) se INSERTAN tras su cabecera, no se anexan al final: en TOML una
+# línea suelta al final caería dentro de la última sección del fichero, y una
+# cabecera repetida es un error de parseo ("Cannot declare twice") que mata al
+# DKMS al cargar — pasó con [sae], que el render emite siempre desde que
+# enforce_authorization es explícito. Solo una tabla que el render NO escribe
+# ([transport_e2e]) puede añadirse entera al final.
 patch_dkms_toml() {
     local toml=$1
     if [ -n "$TOKENS_PER_TICK" ]; then
@@ -323,7 +326,7 @@ patch_dkms_toml() {
         printf '\n[transport_e2e]\nrekey_secs = %s\n' "$DKMS_MESH_E2E_REKEY_SECS" >> "$toml"
     fi
     if [ -n "$SAE_MIN_TOKENS" ]; then
-        printf '\n[sae]\nmin_capacity_tokens = %s\n' "$SAE_MIN_TOKENS" >> "$toml"
+        sed -i "/^\[sae\]/a min_capacity_tokens = $SAE_MIN_TOKENS" "$toml"
     fi
 }
 
