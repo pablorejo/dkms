@@ -258,9 +258,14 @@ pub fn spawn_rotation_task(
         let keep = epoch_history_keep.max(2);
         let mut interval = tokio::time::interval(Duration::from_millis(rotation_period_ms.max(1)));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        // El primer tick es inmediato: la época 0 acaba de sembrarse, la
-        // primera rotación espera un periodo entero.
-        interval.tick().await;
+        // El primer tick de `interval` es inmediato y NO se descarta (B2). La
+        // época 0 se sembró con el `bootstrap_secret`, que un tercero pudo ver
+        // pasar en el establecimiento; si esperásemos un periodo entero, el par
+        // cifraría hasta una hora (el default) bajo ese secreto, sin forward
+        // secrecy. Rotando ya, el par pasa a una época efímera en cuanto
+        // arranca. El coste es un handshake ML-KEM extra justo tras el
+        // bootstrap; el bucle ya trata `NoBootstrap` (espera al periodo) por si
+        // la task arrancara antes de tiempo.
         let mut backoff = Duration::from_millis(250);
         let max_backoff = Duration::from_secs(30);
         loop {
@@ -915,6 +920,39 @@ mod tests {
         for e in 0..=latest {
             assert!(!peers_b.has_ephemeral_sk("orr_a", e), "esk consumida");
         }
+        let _ = shutdown_b.send(());
+    }
+
+    /// B2: la primera rotación es inmediata, no espera un periodo entero. Con
+    /// un periodo largo (5 s), la época 0 (bootstrap_secret) debe estar ya
+    /// sustituida por una época efímera mucho antes — así el par no cifra bajo
+    /// el secreto de arranque durante el periodo completo.
+    #[tokio::test]
+    async fn the_first_rotation_does_not_wait_a_whole_period() {
+        let (url_b, peers_b, shutdown_b) = spawn_test_responder("orr_b", "ml-kem-768").await;
+        let bootstrap = [0x5A; 32];
+        peers_b.reset_for_bootstrap("orr_a", bootstrap);
+        let peers_a = initiator_registry("orr_b", bootstrap);
+        // Periodo de 5 s: si la primera rotación esperara el periodo, en 1,2 s
+        // no habría rotado y send_epoch seguiría en 0.
+        spawn_initiator_rotation(peers_a.clone(), &url_b, 5_000, 3);
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        let latest = peers_a
+            .current_send_epoch("orr_b")
+            .expect("rotó sin esperar el periodo");
+        assert!(latest >= 1, "época efímera ya instalada (no 0): {latest}");
+        // Ambos extremos comparten la época nueva y su master_secret.
+        assert_eq!(peers_a.send_epoch_for("orr_b"), Some(latest));
+        assert_eq!(peers_b.send_epoch_for("orr_a"), Some(latest));
+        assert_eq!(
+            peers_a
+                .master_for_epoch("orr_b", latest)
+                .expect("viva en A"),
+            peers_b
+                .master_for_epoch("orr_a", latest)
+                .expect("viva en B"),
+        );
         let _ = shutdown_b.send(());
     }
 
