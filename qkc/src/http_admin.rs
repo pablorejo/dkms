@@ -187,6 +187,7 @@ async fn get_stats(State(svc): State<QkcService>) -> impl IntoResponse {
         "incoming_delivered": s.incoming_delivered.load(Ordering::Relaxed),
         "incoming_forwarded": s.incoming_forwarded.load(Ordering::Relaxed),
         "incoming_errs": s.incoming_errs.load(Ordering::Relaxed),
+        "intake_dropped_full": s.intake_dropped_full.load(Ordering::Relaxed),
         "local_out_registered": svc.local_out.load().len(),
     });
     let mut links = serde_json::Map::new();

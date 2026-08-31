@@ -56,6 +56,10 @@ pub struct ServiceStats {
     pub incoming_forwarded: AtomicU64,
     /// Tareas `handle_incoming` que devolvieron Err.
     pub incoming_errs: AtomicU64,
+    /// Frames de DATOS descartados en la puerta del peer_server porque la
+    /// cola de intake estaba llena (contrapresión con la memoria acotada:
+    /// esta capa no retransmite, y la alternativa al drop contado es el OOM).
+    pub intake_dropped_full: AtomicU64,
 }
 
 /// Estado por enlace al vecino directo.
