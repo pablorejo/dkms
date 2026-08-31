@@ -316,9 +316,22 @@ impl LinkFrameAuth {
                 wire::split_auth_trailer(&frame.payload).map_err(|_| FrameAuthError::Truncated)?;
             let mut st = self.recv.lock();
             let Some(key) = self.peer_key(&mut st, session) else {
-                // PerEpoch sin el secreto de esa época todavía: descartar como
-                // un MAC que no cuadra (el emisor lo regenerará; el lookahead
-                // del handshake hace que esta ventana sea rara y breve).
+                // PerEpoch sin el secreto de esa época: descartar como un MAC
+                // que no cuadra — pero PIDIENDO el resync, porque este descarte
+                // es información: el peer cifra en una ventana que no tenemos.
+                // Sin esta llamada, el par podía quedarse mudo PARA SIEMPRE
+                // tras reinicios cruzados (medido en el testbed Proxmox,
+                // t41 2026-08-31): el emisor sellaba con su `highest` (~400),
+                // el receptor renacido (épocas 0–2) tiraba aquí cada NOTIFY, y
+                // el mecanismo de resync de épocas OTP nunca se enteraba — el
+                // frame moría ANTES de llegarle. `request_resync` es la misma
+                // pieza que usa el camino de claves: en el iniciador dispara un
+                // relink por encima de AMBAS ventanas; en el respondedor emite
+                // RESYNC_REQ (0x28). Barato e idempotente (fetch_max), apto
+                // para llamarse por frame.
+                if let RootSource::PerEpoch { store, .. } = &self.src {
+                    store.request_resync(session.min(u64::from(u32::MAX)) as u32);
+                }
                 self.stats.bad_mac.fetch_add(1, Ordering::Relaxed);
                 return Err(FrameAuthError::BadMac);
             };
@@ -490,6 +503,32 @@ mod tests {
     /// Raíz per-época: sella con el secreto de la época del enlace (el que el
     /// handshake ya negocia), sin `link_psk`. Round-trip, rotación y el frame
     /// cuya época el receptor aún no tiene.
+    /// El descarte por época desconocida PIDE el resync: sin esto, tras
+    /// reinicios cruzados el emisor sella con su `highest` y el receptor
+    /// renacido tira cada frame sin que el mecanismo de resync se entere —
+    /// el par queda mudo para siempre (testbed Proxmox, t41 2026-08-31:
+    /// 49,8 % de pérdida a↔3 sostenida, `qkc.notify: rechazado` en bucle).
+    #[tokio::test]
+    async fn an_unknown_epoch_discard_requests_a_resync() {
+        use crate::pqc_source::SecretStore;
+        use std::time::Duration;
+        let a = SecretStore::new(2, 0); // emisor, ventana alta (reinició el otro)
+        let b = SecretStore::new(2, 0); // receptor renacido: 0..2
+        a.insert(400, [0x44; 32]);
+        b.insert(1, [0x55; 32]);
+        let tx = LinkFrameAuth::per_epoch(FrameAuth::Require, 2, a);
+        let rx = LinkFrameAuth::per_epoch(FrameAuth::Require, 2, Arc::clone(&b));
+
+        let mut f = frame(FRAME_RECV);
+        tx.seal(&mut f);
+        assert_eq!(rx.open(&mut f), Err(FrameAuthError::BadMac), "se descarta");
+        // ...pero dejando pedida la resincronización con la época del peer.
+        let asked = tokio::time::timeout(Duration::from_secs(1), b.resync_requested())
+            .await
+            .expect("el descarte debe pedir resync");
+        assert_eq!(asked, 400, "con la época más alta vista del peer");
+    }
+
     #[test]
     fn per_epoch_seals_with_the_link_secret_and_rotates() {
         use crate::pqc_source::SecretStore;
