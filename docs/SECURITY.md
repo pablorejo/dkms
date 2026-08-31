@@ -38,7 +38,8 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | DKMS↔SAE (ETSI-014) | `listen.sae_addr` :8443 | no (SAE local) — pero es el plano con mandato normativo | mTLS con 3 agujeros (§Fase 1) | mTLS real + autorización por SAE | 1, 2 |
 | DKMS↔DKMS (ETSI-020) | `listen.peer_addr` :8444 | **sí** | mTLS real, pero identidad no comprobada y CA colapsada | mTLS + binding SAN==origen | 2, 4 |
 | DKMS↔DKMS ACK socket | `peer_addr`+1000 (auto) | **sí** | **ninguna** (TCP plano, identidad = campo JSON) | eliminado — ACKs por ETSI-020 | 4 |
-| todos↔SDN (HTTP admin) | SDN `http_addr` :8081 | **sí** | **ninguna** (decisión explícita, `sdn/src/http_api.rs:22-23`) | mTLS + identity binding | 3 |
+| todos↔SDN (HTTP admin) | SDN `http_addr` :19002 | **sí** | en claro por defecto; **mTLS + identity binding con `control_tls`** (`[tls]` del SDN) | mTLS por defecto cuando el testbed lo valide | 3 |
+| SDN→QKC (push forwarding) | QKC `admin_http` :20002 | **sí** | en claro por defecto; **mTLS con `[tls]` en ambos** (2026-08-31: QKC sirve con cert cliente obligatorio net-ca; SDN empuja https con su cert). `POST /forwarding-table` = decidir por dónde viaja cada frame OTP | mTLS por defecto cuando el testbed lo valide | 3 |
 | todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
 | QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
 | ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
@@ -322,9 +323,11 @@ envía material de clave. Además `PUT /sae/{id}` rebindea SAEs y
   sí mismo y solo rebindea SUS SAEs.
 - `sdn/src/grpc_server.rs:197-205`: `ServerTlsConfig` de tonic (el workspace
   ya compila tonic con `features = ["tls", "transport"]`).
-- El reqwest del SDN que empuja forwarding tables a los QKCs
-  (`sdn/src/service.rs:349`): **hoy no tiene backend TLS**
-  (`default-features = false`) — añadir `rustls-tls` a `sdn/Cargo.toml`.
+- El reqwest del SDN que empuja forwarding tables a los QKCs: HECHO
+  2026-08-31 — con `[tls]` en el SDN el push va `https` con su cert de
+  cliente (`common::http::mtls_client`, `https_only`), y el QKC sirve su
+  admin con mTLS y cert de cliente obligatorio bajo la misma condición
+  (`qkc/src/mtls_admin.rs`).
 
 **Cambios — clientes (announcers y gRPC).**
 - Announcers a HTTPS con el patrón que ya funciona:

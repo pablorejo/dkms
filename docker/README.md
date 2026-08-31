@@ -119,14 +119,22 @@ PQC QKC↔QKC. El resto **depende de que estos puertos vivan en red confiable**:
   con todos los peers así `ack_socket_listen: false` apaga el listener. Es
   el último plano cross-institución sin autenticar; el default sigue en
   `socket` hasta validar el cambio en el testbed, y después se retira.
-- **`local`/`admin` del QKC**: intra-institución. El `grpc` del ORR (20003) va
+- **`local` del QKC**: intra-institución (mismo host que su ORR).
+- **`admin` del QKC (20002)**: por él entra el push de forwarding-tables —
+  quien lo controle decide por dónde viaja cada frame OTP. Con `[tls]` en el
+  QKC (`control_tls: true`) sirve mTLS con cert de cliente OBLIGATORIO
+  (net-ca), y una SDN con `[tls]` empuja `https` con su cert: activa los dos a
+  la vez (un solo lado configurado falla ruidoso en ambos). En claro, solo red
+  interna de confianza. El `grpc` del ORR (20003) va
   con mTLS por defecto; sólo si lo apagas (`grpc_tls: false` en el ORR y
   `orr_tls: false` en el DKMS) DKMS↔ORR lleva material en claro, y entonces
   **deben compartir host o red L2 confiable**.
 - **`metrics` (todos)**: sin auth y responden a cualquier path — red interna.
 - **SDN `http`/`grpc` (19000/19002)**: en multi-host, actívales mTLS
   (`control_tls: true` en su `node.yml` + certs de `net-ca`) — si no, cualquiera
-  con acceso de red puede registrar nodos o rebindear SAEs.
+  con acceso de red puede registrar nodos o rebindear SAEs. Con `[tls]` la SDN
+  además empuja las forwarding-tables por https (ver `admin` del QKC), y los
+  módulos deben anunciarse con `https://` en su `sdn_url`.
 
 ## Paso 0 (mantenedor): construir y publicar las imágenes
 

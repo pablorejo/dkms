@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
     let admin = tokio::spawn({
         let svc = svc.clone();
         let addr = cfg.admin_http.clone();
-        async move { http_admin::serve(svc, &addr).await }
+        // Con [tls] el admin (push de forwarding) va con mTLS obligatorio.
+        let tls = cfg.tls.clone();
+        async move { http_admin::serve(svc, &addr, tls).await }
     });
 
     // Anuncio periódico a la SDN para que nos incluya en su topología. Va

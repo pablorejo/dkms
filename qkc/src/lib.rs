@@ -33,6 +33,7 @@ pub mod frame_auth;
 pub mod http_admin;
 pub mod keystore;
 pub mod kme;
+pub mod mtls_admin;
 pub mod pqc_handshake;
 pub mod pqc_source;
 pub mod relay;

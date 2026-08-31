@@ -81,8 +81,19 @@ pub fn announcer_client(
     let Some(tls) = tls else {
         anyhow::bail!("sdn_http_url is https but no [tls] client material configured");
     };
+    mtls_client(tls, timeout)
+}
+
+/// Cliente reqwest mTLS: presenta `cert/key` y verifica al servidor contra
+/// `ca_path`. `https_only`: este cliente nunca degrada a claro. Lo usan el
+/// announcer (rama https) y el push de forwarding-tables del SDN.
+pub fn mtls_client(tls: ClientTls<'_>, timeout: Duration) -> anyhow::Result<Client> {
     let identity = load_identity(tls.cert_path, tls.key_path)?;
-    let mut builder = base.use_rustls_tls().identity(identity).https_only(true);
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .use_rustls_tls()
+        .identity(identity)
+        .https_only(true);
     for ca in load_ca_bundle(tls.ca_path)? {
         builder = builder.add_root_certificate(ca);
     }

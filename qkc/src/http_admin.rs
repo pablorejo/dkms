@@ -32,12 +32,34 @@ pub fn router(svc: QkcService) -> Router {
         .with_state(svc)
 }
 
-pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
+/// Sirve el admin. Con `tls` (la identidad `[tls]` del nodo) el listener va
+/// con mTLS y cert de cliente OBLIGATORIO contra la CA de red: por aquí entra
+/// `POST /forwarding-table`, que decide por dónde viaja cada frame OTP — en
+/// claro era un secuestro de rutas para cualquiera con acceso al puerto. El
+/// esquema es de despliegue, como `grpc_tls`: la SDN empuja `https` sii ella
+/// misma tiene `[tls]`, así que un solo lado configurado falla ruidoso en
+/// ambos, no en silencio. Sin `tls` queda el claro histórico (misma máquina
+/// o red interna de confianza).
+pub async fn serve(
+    svc: QkcService,
+    addr: &str,
+    tls: Option<common::http::ControlTlsCfg>,
+) -> anyhow::Result<()> {
     let parsed: std::net::SocketAddr = addr.parse()?;
     let listener = common::net::bind_reuse_addr(parsed).await?;
-    info!(%addr, "qkc.http_admin.listening");
-    axum::serve(listener, router(svc)).await?;
-    Ok(())
+    match tls {
+        Some(t) => {
+            let cfg =
+                common::tls::server_config(&t.cert_path, &t.key_path, Some(&t.control_plane_ca))
+                    .map_err(|e| anyhow::anyhow!("http_admin [tls]: {e}"))?;
+            crate::mtls_admin::serve_mtls(listener, cfg, router(svc)).await
+        }
+        None => {
+            info!(%addr, "qkc.http_admin.listening");
+            axum::serve(listener, router(svc)).await?;
+            Ok(())
+        }
+    }
 }
 
 async fn healthz(State(svc): State<QkcService>) -> impl IntoResponse {
@@ -210,6 +232,34 @@ fn parse_map(raw: HashMap<String, NextHopValue>) -> Result<HashMap<u32, Vec<Next
 
 #[cfg(test)]
 mod tests {
+    /// Un [tls] que apunta a ficheros inexistentes es un error al arrancar el
+    /// admin, nunca un fallback silencioso a claro.
+    #[tokio::test]
+    async fn serve_with_broken_tls_errors_instead_of_falling_back() {
+        let svc = crate::service::QkcService::new(crate::config::QkcConfig {
+            qkc_id: 1,
+            peer_listen: "127.0.0.1:0".into(),
+            local_listen: "127.0.0.1:0".into(),
+            admin_http: "127.0.0.1:0".into(),
+            sdn_url: None,
+            advertise_ip: None,
+            sdn_announce_secs: 30,
+            tls: None,
+            sign_secret_seed: None,
+            links: vec![],
+        })
+        .unwrap();
+        let tls = common::http::ControlTlsCfg {
+            cert_path: "/nonexistent/qkc.crt".into(),
+            key_path: "/nonexistent/qkc.key".into(),
+            control_plane_ca: "/nonexistent/net-ca.crt".into(),
+        };
+        let err = super::serve(svc, "127.0.0.1:0", Some(tls))
+            .await
+            .expect_err("tls roto debe ser error");
+        assert!(format!("{err:#}").contains("http_admin [tls]"));
+    }
+
     use super::*;
 
     /// The legacy `{"replace": {"22": 0}}` shape used by the

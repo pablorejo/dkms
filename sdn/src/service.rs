@@ -362,10 +362,29 @@ impl SdnService {
             // aquí, con la causa a la vista, y no dentro de la task: con
             // `panic = "abort"` un `expect` ahí abortaría el SDN entero sin
             // decir por qué.
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_millis(1500))
-                .build()
-                .map_err(|e| anyhow::anyhow!("reqwest client for forwarding push: {e:#}"))?;
+            //
+            // Con [tls] el push va por https con el cert del SDN como cliente
+            // (mismo net-ca que firma el server del QKC) — el esquema es de
+            // despliegue, como grpc_tls: el QKC sirve mTLS sii tiene [tls], y
+            // un solo lado configurado falla ruidoso en ambos. En claro queda
+            // el histórico. `push_scheme` decide; el cliente mTLS no degrada
+            // (https_only).
+            let http = match &self.cfg.tls {
+                Some(t) => common::http::mtls_client(
+                    common::http::ClientTls {
+                        ca_path: &t.client_ca,
+                        cert_path: &t.cert_path,
+                        key_path: &t.key_path,
+                    },
+                    Duration::from_millis(1500),
+                )
+                .map_err(|e| anyhow::anyhow!("mtls client for forwarding push: {e:#}"))?,
+                None => reqwest::Client::builder()
+                    .timeout(Duration::from_millis(1500))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("reqwest client for forwarding push: {e:#}"))?,
+            };
+            let push_scheme = push_scheme(self.cfg.tls.as_ref());
             tokio::spawn(async move {
                 use crate::mcf::WcmpNextHop;
                 use common::proto::sdn::v1::{
@@ -429,8 +448,10 @@ impl SdnService {
                         // over a PQC hop and break the QKD-grade invariant.
                         let qkd_table: std::collections::HashMap<String, Vec<WcmpNextHop>> =
                             mcf.wcmp_qkd.get(qkc_id).cloned().unwrap_or_default();
-                        let url =
-                            format!("http://{}:{}/forwarding-table", qkc.host.ip, qkc.host.port);
+                        let url = format!(
+                            "{push_scheme}://{}:{}/forwarding-table",
+                            qkc.host.ip, qkc.host.port
+                        );
                         let body = if dual_grade {
                             serde_json::json!({"replace": table, "replace_qkd": qkd_table})
                         } else {
@@ -513,6 +534,17 @@ impl SdnService {
 
 // ---------------- free-function helpers shared with the debouncer closure ----
 
+/// Esquema del push de forwarding-tables: `https` sii el SDN tiene `[tls]`.
+/// Es una decisión de despliegue (como `grpc_tls`): el QKC sirve su admin con
+/// mTLS exactamente bajo la misma condición, así que o casan o fallan alto.
+fn push_scheme(tls: Option<&crate::config::SdnTlsCfg>) -> &'static str {
+    if tls.is_some() {
+        "https"
+    } else {
+        "http"
+    }
+}
+
 /// Full recompute pipeline — MCMCF-λ LP (phase 3).
 ///
 /// Free function because the debouncer closure captures these
@@ -590,6 +622,17 @@ fn recompute_mcf_inner(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn push_scheme_follows_the_tls_block() {
+        assert_eq!(super::push_scheme(None), "http");
+        let t = crate::config::SdnTlsCfg {
+            cert_path: "/x/sdn.crt".into(),
+            key_path: "/x/sdn.key".into(),
+            client_ca: "/x/net-ca.crt".into(),
+        };
+        assert_eq!(super::push_scheme(Some(&t)), "https");
+    }
+
     use super::*;
     use crate::topology::{Dkms, EdgeMeta, HostEndpoint, Orr, Qkc, Topology};
 
