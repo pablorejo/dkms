@@ -3,6 +3,5 @@ grpc_addr   = "0.0.0.0:19000"
 http_addr   = "0.0.0.0:19002"
 metrics_addr = "0.0.0.0:19010"
 
-default_policy   = "min_cost_flow"
-mcf_period_ms    = 1000
+mcf_period_ms    = 5000
 push_debounce_ms = 100

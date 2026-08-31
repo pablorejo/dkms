@@ -156,6 +156,17 @@ class SdnControlTls(unittest.TestCase):
         cfg = render("sdn", "control_tls: true\n")
         self.assertEqual(cfg["tls"]["cert_path"], "/config/certs/sdn.crt")
 
+    def test_defaults_are_not_hardcoded_over_the_binary(self):
+        # El render ya no pisa mcf_period_ms/push_debounce_ms (canónicos en
+        # el binario: 5000/100) ni emite el default_policy muerto.
+        cfg = render("sdn", "listen_ip: 0.0.0.0\n")
+        self.assertNotIn("mcf_period_ms", cfg)
+        self.assertNotIn("push_debounce_ms", cfg)
+        self.assertNotIn("default_policy", cfg)
+        cfg = render("sdn", "mcf_period_ms: 2500\npush_debounce_ms: 50\n")
+        self.assertEqual(cfg["mcf_period_ms"], 2500)
+        self.assertEqual(cfg["push_debounce_ms"], 50)
+
     def test_without_control_tls_no_tls_table(self):
         self.assertNotIn("tls", render("sdn", "mcf_period_ms: 5000\n"))
 

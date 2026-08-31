@@ -732,7 +732,6 @@ pub(crate) mod tests {
                 grpc_addr: "0.0.0.0:0".into(),
                 http_addr: "0.0.0.0:0".into(),
                 metrics_addr: "0.0.0.0:0".into(),
-                default_policy: "shortest_hops".into(),
                 mcf_period_ms: 60_000,
                 push_debounce_ms: 100,
                 presence_ttl_secs: 90,

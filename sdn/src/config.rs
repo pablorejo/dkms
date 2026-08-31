@@ -13,11 +13,9 @@ pub struct SdnConfig {
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 
-    /// Default path policy if none is specified.
-    #[serde(default = "default_policy")]
-    pub default_policy: String,
-
-    /// How often to recompute MCF in milliseconds.
+    /// How often to recompute MCF in milliseconds. 5000 es el punto de
+    /// operación de todos los despliegues y campañas medidas (docker/README,
+    /// CESGA); antes el código decía 1000 y el render lo pisaba en silencio.
     #[serde(default = "default_mcf_period")]
     pub mcf_period_ms: u64,
 
@@ -94,11 +92,8 @@ pub struct SdnTlsCfg {
 fn default_metrics() -> String {
     "0.0.0.0:9102".into()
 }
-fn default_policy() -> String {
-    "min_cost_flow".into()
-}
 fn default_mcf_period() -> u64 {
-    1000
+    5000
 }
 fn default_debounce() -> u64 {
     100

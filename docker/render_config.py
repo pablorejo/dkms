@@ -378,13 +378,17 @@ def render_sdn(n, out):
         "grpc_addr = " + q(bind + ":" + str(p["grpc"])),
         "http_addr = " + q(bind + ":" + str(p["http"])),
         "metrics_addr = " + q(bind + ":" + str(p["metrics"])),
-        "default_policy = \"shortest_hops\"",
-        "mcf_period_ms = " + str(int(n.get("mcf_period_ms", 5000))),
-        "push_debounce_ms = 100",
         # How long a module may go quiet before being dropped. Must exceed
         # the modules' sdn_announce_secs; 0 disables expiry.
         "presence_ttl_secs = " + str(int(n.get("presence_ttl_secs", 90))),
     ]
+    # Solo si el operador los pone: los defaults canónicos viven en el binario
+    # (mcf_period_ms 5000, push_debounce_ms 100) — el render los pisaba y
+    # divergían tres fuentes (código 1000 / render 5000 / README 5000).
+    if n.get("mcf_period_ms") is not None:
+        lines.append("mcf_period_ms = " + str(int(n["mcf_period_ms"])))
+    if n.get("push_debounce_ms") is not None:
+        lines.append("push_debounce_ms = " + str(int(n["push_debounce_ms"])))
     if n.get("http_ro_port"):
         lines.append("http_ro_addr = " + q(bind + ":" + str(int(n["http_ro_port"]))))
     # cert_name como en qkc/orr: por defecto "sdn" (gen-certs.sh sdn <ip>).
