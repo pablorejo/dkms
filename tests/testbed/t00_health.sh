@@ -94,7 +94,20 @@ for n in "${NODES[@]}"; do
         # devolver ACKs: se queda sin peer_ack_endpoint y su pareja acaba
         # expirando todo lo que emite. Es un fallo mudo — la topología de la
         # SDN sigue pintando perfecta — así que se afirma explícitamente.
-        if grep -qa 'peer_ack_endpoint="<sin recibir>"' <<<"$gstate"; then
+        #
+        # Con `ack_transport: etsi020` el header ack_endpoint YA NO VIAJA (el
+        # ACK vuelve por la ruta ETSI-020 mTLS, sin socket), así que «<sin
+        # recibir>» es el estado CORRECTO; lo que hay que afirmar en ese modo
+        # es que los ACKs salen y no fallan: ack_sent > 0 y ack_send_failed=0.
+        if on "$n" "grep -q 'ack_transport: etsi020' site/node.dkms.yml" 2>/dev/null; then
+            sent=$(grep -oa 'ack_sent=[0-9]*' <<<"$gstate" | cut -d= -f2 | sort -n | tail -1)
+            sfail=$(grep -oa 'ack_send_failed=[0-9]*' <<<"$gstate" | cut -d= -f2 | sort -n | tail -1)
+            if [[ "${sent:-0}" -gt 0 && "${sfail:-0}" -eq 0 ]]; then
+                pass "$n: ACKs por etsi020 (ack_sent=$sent, 0 fallos; sin endpoint en header, correcto)"
+            else
+                fail "$n: etsi020 con ack_sent=${sent:-0} ack_send_failed=${sfail:-0}"
+            fi
+        elif grep -qa 'peer_ack_endpoint="<sin recibir>"' <<<"$gstate"; then
             fail "$n: algún peer con peer_ack_endpoint=<sin recibir> — nunca ha recibido un DKMS_BUFFER de él"
         else
             pass "$n: peer_ack_endpoint conocido para todos sus peers"

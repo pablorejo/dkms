@@ -124,17 +124,19 @@ if (( DO_EDGES )); then
     raw_code() {
         local host="$1"; shift
         local out
-        out=$(on "$host" "$* -o /dev/null -w '%{http_code}' 2>/dev/null" || true)
+        out=$(sae_run "$host" "$* -o /dev/null -w '%{http_code}' 2>/dev/null" || true)
         printf '%s' "${out:-000}"
     }
 
-    C="curl -s --max-time 15 --cacert $CERTS_REMOTE/net-ca.crt"
+    CD="$(sae_certdir)"
+    C="curl -s --max-time 15 --cacert $CD/net-ca.crt"
+    UM="$(sae_url "$HM")"; US="$(sae_url "$HS")"
 
     # 1. key_ID inventada → error ETSI, nunca 5xx
-    code=$(raw_code "$HS" "$C --cert $CERTS_REMOTE/$SS.crt --key $CERTS_REMOTE/$SS.key \
+    code=$(raw_code "$HS" "$C --cert $CD/$SS.crt --key $CD/$SS.key \
         -H 'Content-Type: application/json' \
         -d '{\"key_IDs\":[{\"key_ID\":\"00000000-0000-0000-0000-000000000000\"}]}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$SM/dec_keys")
+        $US/api/v1/keys/$SM/dec_keys")
     if [[ "$code" =~ ^4 ]]; then pass "key_ID inexistente → $code (4xx)"
     else fail "key_ID inexistente → $code (se esperaba 4xx; un 5xx es un bug)"; fi
 
@@ -151,40 +153,40 @@ if (( DO_EDGES )); then
     fi
 
     # 3. slave_sae inexistente
-    code=$(raw_code "$HM" "$C --cert $CERTS_REMOTE/$SM.crt --key $CERTS_REMOTE/$SM.key \
+    code=$(raw_code "$HM" "$C --cert $CD/$SM.crt --key $CD/$SM.key \
         -H 'Content-Type: application/json' -d '{\"number\":1,\"size\":256}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/sae_noexiste/enc_keys")
+        $UM/api/v1/keys/sae_noexiste/enc_keys")
     if [[ "$code" =~ ^4 ]]; then pass "slave_sae inexistente → $code (4xx)"
     else fail "slave_sae inexistente → $code (se esperaba 4xx)"; fi
 
     # 4. sin cert de cliente → el TLS se cae (curl devuelve 000)
     code=$(raw_code "$HM" "$C -H 'Content-Type: application/json' \
         -d '{\"number\":1,\"size\":256}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$SS/enc_keys")
+        $UM/api/v1/keys/$SS/enc_keys")
     if [[ "$code" == "000" || "$code" =~ ^4 ]]; then pass "sin cert de cliente → rechazado ($code)"
     else fail "sin cert de cliente → $code: el mTLS NO está exigiendo cert"; fi
 
     # 5. cert de otra CA
-    code=$(raw_code "$HM" "$C --cert $CERTS_REMOTE/sae_rogue.crt --key $CERTS_REMOTE/sae_rogue.key \
+    code=$(raw_code "$HM" "$C --cert $CD/sae_rogue.crt --key $CD/sae_rogue.key \
         -H 'Content-Type: application/json' -d '{\"number\":1,\"size\":256}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$SS/enc_keys")
+        $UM/api/v1/keys/$SS/enc_keys")
     if [[ "$code" == "000" || "$code" =~ ^4 ]]; then pass "cert de CA ajena → rechazado ($code)"
     else fail "cert de CA ajena → $code: el DKMS acepta certs que no firma su CA"; fi
 
     # 6. number por encima del máximo anunciado
     if (( maxreq > 0 )); then
         over=$(( maxreq + 1 ))
-        code=$(raw_code "$HM" "$C --cert $CERTS_REMOTE/$SM.crt --key $CERTS_REMOTE/$SM.key \
+        code=$(raw_code "$HM" "$C --cert $CD/$SM.crt --key $CD/$SM.key \
             -H 'Content-Type: application/json' -d '{\"number\":$over,\"size\":256}' \
-            https://127.0.0.1:$DKMS_SAE/api/v1/keys/$SS/enc_keys")
+            $UM/api/v1/keys/$SS/enc_keys")
         if [[ "$code" =~ ^4 ]]; then pass "number=$over > max_key_per_request → $code (4xx)"
         else fail "number=$over → $code: o lo trunca en silencio o no valida"; fi
     fi
 
     # 7. tamaño de clave no soportado
-    code=$(raw_code "$HM" "$C --cert $CERTS_REMOTE/$SM.crt --key $CERTS_REMOTE/$SM.key \
+    code=$(raw_code "$HM" "$C --cert $CD/$SM.crt --key $CD/$SM.key \
         -H 'Content-Type: application/json' -d '{\"number\":1,\"size\":7}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$SS/enc_keys")
+        $UM/api/v1/keys/$SS/enc_keys")
     if [[ "$code" =~ ^4 ]]; then pass "size=7 bits → $code (4xx)"
     else fail "size=7 bits → $code (se esperaba 4xx)"; fi
 fi

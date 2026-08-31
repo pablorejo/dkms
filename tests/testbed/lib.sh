@@ -117,37 +117,77 @@ dlogs_since() {
 # ─── ETSI-014 (se ejecuta EN la VM, con sus certs) ────────────────────
 # enc_keys <host> <sae_maestro> <sae_esclavo> [number] [size]
 #   → JSON del KeyContainer por stdout
+# ─── cliente SAE: local o remoto ──────────────────────────────────────
+# Los certs de SAE son ML-DSA y el OpenSSL de las VMs (Debian 12, 3.0.x) no
+# sabe ni CARGAR la clave («decode error»): curl dentro de la VM no puede
+# actuar de SAE — medido 2026-08-31, 6/6 flujos en FAIL con el despliegue
+# perfectamente sano (verificado a mano desde el portátil, bytes idénticos).
+# Si el openssl de AQUÍ puede (≥ 3.5), el cliente SAE corre en el portátil
+# contra la IP del nodo con los certs de $CERT_WORKDIR: misma semántica
+# ETSI-014/mTLS, distinta máquina de origen. `SAE_CLIENT=remote` fuerza el
+# modo histórico (p. ej. cuando las VMs ganen un openssl moderno).
+SAE_CERTS_LOCAL="${CERT_WORKDIR:-$HOME/.dkms-testbed/certs}"
+if [[ -z "${SAE_CLIENT:-}" ]]; then
+    if openssl pkey -in "$SAE_CERTS_LOCAL/sae_1.key" -noout >/dev/null 2>&1; then
+        SAE_CLIENT=local
+    else
+        SAE_CLIENT=remote
+    fi
+fi
+
+# sae_url <host> → base https del plano SAE de ese nodo según el modo.
+sae_url() {
+    local host="$1"
+    if [[ "$SAE_CLIENT" == local ]]; then
+        echo "https://${NODE_IP[$host]:-$SDN_IP}:$DKMS_SAE"
+    else
+        echo "https://127.0.0.1:$DKMS_SAE"
+    fi
+}
+# sae_certdir → dónde viven los certs para el modo activo.
+sae_certdir() {
+    [[ "$SAE_CLIENT" == local ]] && echo "$SAE_CERTS_LOCAL" || echo "$CERTS_REMOTE"
+}
+# sae_run <host> <cmd-string> → ejecuta el curl donde toque.
+sae_run() {
+    local host="$1"; shift
+    if [[ "$SAE_CLIENT" == local ]]; then bash -c "$*"; else on "$host" "$@"; fi
+}
+
 enc_keys() {
     local host="$1" master="$2" slave="$3" number="${4:-1}" size="${5:-256}"
-    on "$host" "curl -sSf --max-time 20 \
-        --cacert $CERTS_REMOTE/net-ca.crt \
-        --cert   $CERTS_REMOTE/$master.crt \
-        --key    $CERTS_REMOTE/$master.key \
+    local cd base; cd="$(sae_certdir)"; base="$(sae_url "$host")"
+    sae_run "$host" "curl -sSf --max-time 20 \
+        --cacert $cd/net-ca.crt \
+        --cert   $cd/$master.crt \
+        --key    $cd/$master.key \
         -H 'Content-Type: application/json' \
         -d '{\"number\":$number,\"size\":$size}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$slave/enc_keys"
+        $base/api/v1/keys/$slave/enc_keys"
 }
 
 # dec_keys <host> <sae_esclavo> <sae_maestro> <key_id>
 dec_keys() {
     local host="$1" slave="$2" master="$3" key_id="$4"
-    on "$host" "curl -sSf --max-time 20 \
-        --cacert $CERTS_REMOTE/net-ca.crt \
-        --cert   $CERTS_REMOTE/$slave.crt \
-        --key    $CERTS_REMOTE/$slave.key \
+    local cd base; cd="$(sae_certdir)"; base="$(sae_url "$host")"
+    sae_run "$host" "curl -sSf --max-time 20 \
+        --cacert $cd/net-ca.crt \
+        --cert   $cd/$slave.crt \
+        --key    $cd/$slave.key \
         -H 'Content-Type: application/json' \
         -d '{\"key_IDs\":[{\"key_ID\":\"$key_id\"}]}' \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$master/dec_keys"
+        $base/api/v1/keys/$master/dec_keys"
 }
 
 # etsi_status <host> <sae_propio> <sae_destino>
 etsi_status() {
     local host="$1" me="$2" other="$3"
-    on "$host" "curl -sSf --max-time 10 \
-        --cacert $CERTS_REMOTE/net-ca.crt \
-        --cert   $CERTS_REMOTE/$me.crt \
-        --key    $CERTS_REMOTE/$me.key \
-        https://127.0.0.1:$DKMS_SAE/api/v1/keys/$other/status"
+    local cd base; cd="$(sae_certdir)"; base="$(sae_url "$host")"
+    sae_run "$host" "curl -sSf --max-time 10 \
+        --cacert $cd/net-ca.crt \
+        --cert   $cd/$me.crt \
+        --key    $cd/$me.key \
+        $base/api/v1/keys/$other/status"
 }
 
 # ─── espera activa ────────────────────────────────────────────────────
