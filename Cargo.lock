@@ -627,6 +627,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "humantime",
+ "libc",
  "ml-dsa",
  "ml-kem",
  "parking_lot",
