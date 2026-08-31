@@ -24,7 +24,10 @@ default_max_hops = 0
 # escribirlo: `grpc_tls = false` aquí y `orr_tls = false` en el DKMS.
 # grpc_tls = true
 
-default_pqc_suite       = "kyber1024+dilithium5"
+# Suite ML-KEM del bootstrap ORR↔ORR: ml-kem-512 / ml-kem-768 / ml-kem-1024.
+# (El nombre viejo estilo liboqs "kyber1024+dilithium5" ya no existe y el
+# resolvedor lo rechaza.)
+default_pqc_suite       = "ml-kem-768"
 deliver_queue_capacity  = 4096
 
 # Mapa lógico orr_id -> qkc_id. La SDN puede refrescarlo en runtime.
