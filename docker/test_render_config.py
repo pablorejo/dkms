@@ -239,6 +239,39 @@ class ExtraFreeform(unittest.TestCase):
             render("orr", ORR_BASE + "extra:\n  a: {b: {c: 1}}\n")
 
 
+class QkcKmeCredentials(unittest.TestCase):
+    """kme_cert/kme_key/kme_ca (A6): credencial POR ENLACE hacia ese KME (su
+    PKI privada), rutas verbatim; sin declarar no se emite nada y el binario
+    cae al [tls] de red (la prueba con quditto)."""
+
+    QKD_LINK = (
+        "qkc_id: 1\n"
+        "links:\n"
+        "  - neighbor_id: 2\n"
+        "    type: qkd\n"
+        "    neighbor_addr: 10.0.0.3\n"
+        "    kme_url: kme-a.example:20010\n"
+    )
+
+    def test_per_link_kme_credentials_render_verbatim(self):
+        cfg = render(
+            "qkc",
+            self.QKD_LINK
+            + "    kme_cert: /mnt/kme-a/client.crt\n"
+            + "    kme_key: /mnt/kme-a/client.key\n"
+            + "    kme_ca: /mnt/kme-a/ca.crt\n",
+        )
+        lk = cfg["links"][0]
+        self.assertEqual(lk["kme_cert"], "/mnt/kme-a/client.crt")
+        self.assertEqual(lk["kme_key"], "/mnt/kme-a/client.key")
+        self.assertEqual(lk["kme_ca"], "/mnt/kme-a/ca.crt")
+
+    def test_without_declaration_nothing_is_emitted(self):
+        lk = render("qkc", self.QKD_LINK)["links"][0]
+        for k in ("kme_cert", "kme_key", "kme_ca"):
+            self.assertNotIn(k, lk)
+
+
 class SdnControlTls(unittest.TestCase):
     def test_cert_name_names_the_tls_paths(self):
         cfg = render("sdn", "control_tls: true\ncert_name: sdn-madrid\n")

@@ -225,6 +225,15 @@ def render_qkc(n, out):
             if "//" not in kme:
                 kme = "https://" + kme
             lines += ['link_type = "qkd"', "quditto_url = " + q(kme)]
+            # Credencial hacia ESTE KME (A6): cada KME es una autoridad propia
+            # (su PKI privada), así que el QKC lleva 1 cert de red + 1
+            # credencial POR KME. O los tres campos o ninguno (lo valida el
+            # binario); sin ellos cae al [tls] de red — la simplificación de
+            # la prueba con quditto. Rutas verbatim: son montajes del
+            # operador, no certs de la net-ca en certs_dir.
+            for k in ("kme_cert", "kme_key", "kme_ca"):
+                if lk.get(k) is not None:
+                    lines.append(k + " = " + q(str(lk[k])))
         else:  # pqc (QKD simulated by PQC)
             lines += ['link_type = "pqc"',
                       "pqc_suite = " + q(lk.get("pqc_suite", "ml-kem-768")),

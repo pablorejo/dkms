@@ -236,13 +236,16 @@ impl QkcService {
                             link.neighbor_id
                         ))
                     })?;
-                    // El QKC presenta su propia identidad de nodo al KME: es
-                    // el mismo material que usa para anunciarse a la SDN.
+                    // Identidad hacia ESTE KME (A6): la credencial de su PKI
+                    // privada si el enlace la declara (kme_cert/kme_key/
+                    // kme_ca — cada KME es una autoridad propia), y si no, la
+                    // identidad de red del nodo, que es la simplificación de
+                    // la prueba con quditto (acepta la net-ca).
                     let c = Arc::new(KmeClient::new(
                         url,
                         cfg.qkc_id.to_string(),
                         link.key_size_bits,
-                        cfg.tls.as_ref().map(|t| t.as_client_tls()),
+                        link.kme_client_tls(cfg.tls.as_ref()),
                     )?);
                     (c as Arc<dyn KeySource>, None, None)
                 }
@@ -642,6 +645,9 @@ mod tests {
             neighbor_peer_addr: format!("127.0.0.1:{}", 20000 + neighbor),
             link_type: LinkType::Pqc,
             quditto_url: None,
+            kme_cert: None,
+            kme_key: None,
+            kme_ca: None,
             pqc_suite: crate::config::default_pqc_suite(),
             key_size_bits: 256,
             pqc_rekey_keys: 1000,

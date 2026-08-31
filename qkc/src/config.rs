@@ -136,6 +136,28 @@ pub struct LinkConfig {
     #[serde(default)]
     pub quditto_url: Option<String>,
 
+    // ---- identidad hacia el KME (solo enlaces QKD — A6, docs/SECURITY.md).
+    //
+    // Cada KME es PRIVADO y tiene su propia PKI (del fabricante o de la
+    // institución que lo opera): el QKC se autentica ante ESE KME con una
+    // credencial de SU autoridad, no con el cert de red. Un QKC lleva por
+    // tanto 1 cert de red + 1 credencial por KME conectado. Los tres campos
+    // van juntos —o se declaran los tres, o ninguno—; sin declarar se cae a
+    // la identidad de red (`[tls]`), que es la simplificación de la prueba
+    // con quditto (acepta la net-ca). En producción son autoridades
+    // separadas.
+    /// Cert de cliente para ESTE KME (emitido por su PKI privada).
+    #[serde(default)]
+    pub kme_cert: Option<std::path::PathBuf>,
+
+    /// Clave privada del `kme_cert`.
+    #[serde(default)]
+    pub kme_key: Option<std::path::PathBuf>,
+
+    /// CA de ESE KME: verifica su cert de servidor en el mTLS ETSI 014.
+    #[serde(default)]
+    pub kme_ca: Option<std::path::PathBuf>,
+
     /// Parameter set ML-KEM para el handshake de los enlaces PQC. Ignorado
     /// en enlaces QKD. Default: `ml-kem-768`. Ver
     /// [`common::crypto::pqc::suite`].
@@ -348,6 +370,25 @@ impl LinkConfig {
             None => FrameAuth::Off,
         }
     }
+
+    /// Identidad de cliente hacia el KME de ESTE enlace: la credencial de la
+    /// PKI privada del KME si está declarada (`kme_cert`/`kme_key`/`kme_ca`),
+    /// si no la identidad de red del nodo (`[tls]` — la prueba con quditto).
+    /// `None` = KME en claro (el histórico intra-institución). Las mezclas
+    /// parciales las rechaza [`QkcConfig::validate`], no este método.
+    pub fn kme_client_tls<'a>(
+        &'a self,
+        node_tls: Option<&'a common::http::ControlTlsCfg>,
+    ) -> Option<common::http::ClientTls<'a>> {
+        match (&self.kme_cert, &self.kme_key, &self.kme_ca) {
+            (Some(cert), Some(key), Some(ca)) => Some(common::http::ClientTls {
+                ca_path: ca,
+                cert_path: cert,
+                key_path: key,
+            }),
+            _ => node_tls.map(|t| t.as_client_tls()),
+        }
+    }
 }
 
 impl QkcConfig {
@@ -391,6 +432,25 @@ impl QkcConfig {
                             link.neighbor_id
                         )));
                     }
+                    // Credencial de KME: o los tres campos o ninguno. Una
+                    // mezcla parcial es casi seguro un typo, y caer en
+                    // silencio al cert de red daría mTLS con la autoridad
+                    // equivocada creyendo que se usa la del KME.
+                    let kme_set = [
+                        link.kme_cert.is_some(),
+                        link.kme_key.is_some(),
+                        link.kme_ca.is_some(),
+                    ]
+                    .iter()
+                    .filter(|b| **b)
+                    .count();
+                    if kme_set != 0 && kme_set != 3 {
+                        return Err(QkcError::BadRequest(format!(
+                            "QKD link to {}: kme_cert/kme_key/kme_ca van juntos (o los tres o \
+                             ninguno); hay {kme_set} de 3",
+                            link.neighbor_id
+                        )));
+                    }
                 }
                 LinkType::Pqc => {
                     // Sin dirección, el único que puede decir dónde está el
@@ -407,6 +467,12 @@ impl QkcConfig {
                     if link.quditto_url.is_some() {
                         return Err(QkcError::BadRequest(format!(
                             "PQC link to {} must not set quditto_url",
+                            link.neighbor_id
+                        )));
+                    }
+                    if link.kme_cert.is_some() || link.kme_key.is_some() || link.kme_ca.is_some() {
+                        return Err(QkcError::BadRequest(format!(
+                            "PQC link to {} must not set kme_cert/kme_key/kme_ca (no KME here)",
                             link.neighbor_id
                         )));
                     }
@@ -631,6 +697,64 @@ mod tests {
             "off explícito manda"
         );
         assert_eq!(link.effective_frame_auth(true), FrameAuth::Prefer);
+    }
+
+    /// A6: la credencial hacia el KME es POR ENLACE y de la PKI privada de
+    /// ESE KME (cada KME es una autoridad propia). Declarada completa se usa;
+    /// sin declarar se cae a la identidad de red del nodo (la prueba con
+    /// quditto); sin ninguna de las dos, en claro (histórico).
+    #[test]
+    fn kme_credentials_are_per_link_with_net_identity_fallback() {
+        let qkd = |extra: &str| {
+            parse(&format!(
+                "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+                 link_type = \"qkd\"\nquditto_url = \"https://kme:20010\"\n{extra}"
+            ))
+        };
+        let node_tls = common::http::ControlTlsCfg {
+            cert_path: "/net/qkc-1.crt".into(),
+            key_path: "/net/qkc-1.key".into(),
+            control_plane_ca: "/net/net-ca.crt".into(),
+        };
+
+        let cfg = qkd(
+            "kme_cert = \"/kme-a/client.crt\"\nkme_key = \"/kme-a/client.key\"\n\
+                       kme_ca = \"/kme-a/ca.crt\"\n",
+        );
+        cfg.validate().expect("los tres campos juntos valen");
+        let t = cfg.links[0].kme_client_tls(Some(&node_tls)).unwrap();
+        assert_eq!(t.cert_path, std::path::Path::new("/kme-a/client.crt"));
+        assert_eq!(t.ca_path, std::path::Path::new("/kme-a/ca.crt"));
+
+        // Sin credencial de KME: la identidad de red (quditto acepta net-ca).
+        let cfg = qkd("");
+        let t = cfg.links[0].kme_client_tls(Some(&node_tls)).unwrap();
+        assert_eq!(t.cert_path, std::path::Path::new("/net/qkc-1.crt"));
+        assert!(cfg.links[0].kme_client_tls(None).is_none(), "en claro");
+    }
+
+    /// Una credencial de KME a medias es casi seguro un typo: mejor no
+    /// arrancar que caer en silencio a la autoridad equivocada. Y en un
+    /// enlace PQC no hay KME al que presentarse.
+    #[test]
+    fn partial_or_misplaced_kme_credentials_are_rejected() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"qkd\"\nquditto_url = \"https://kme:20010\"\n\
+             kme_cert = \"/kme-a/client.crt\"\n"
+        ));
+        let err = cfg.validate().expect_err("1 de 3 no vale");
+        assert!(
+            format!("{err}").contains("kme_cert/kme_key/kme_ca"),
+            "{err}"
+        );
+
+        let cfg = parse(&format!(
+            "{BASE}sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\nkme_ca = \"/kme-a/ca.crt\"\n"
+        ));
+        let err = cfg.validate().expect_err("kme_* en un enlace PQC");
+        assert!(format!("{err}").contains("no KME here"), "{err}");
     }
 
     /// En un enlace QKD el default es `off` aunque el nodo tenga identidad: su
