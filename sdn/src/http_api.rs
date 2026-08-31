@@ -311,7 +311,12 @@ async fn announce_qkc(
     identity: Option<Extension<PeerCertIdentity>>,
     Json(reg): Json<QkcAnnounce>,
 ) -> axum::response::Response {
-    if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "qkc") {
+    // El id de topología del QKC es numérico ("3"), pero su cert de nodo es
+    // `qkc-<id>` — la convención de gen-certs (dkms-N, orr_N, qkc-N, sdn). El
+    // binding compara contra el nombre del CERT: con `reg.id` a secas, todo
+    // anuncio https de un QKC se rechazaba por «identity mismatch» (cazado
+    // por la malla local con el plano de control en mTLS, 2026-08-31).
+    if let Err(resp) = require_identity(identity.as_deref(), &format!("qkc-{}", reg.id), "qkc") {
         return resp;
     }
     let mut out = svc.topology.announce_qkc(&reg);
@@ -813,6 +818,20 @@ mod tests {
         assert_eq!(node_id_from_san("urn:dkms:node:dkms-1"), "dkms-1");
         assert_eq!(node_id_from_san("dkms://org/dkms-1"), "dkms-1");
         assert_eq!(node_id_from_san("dkms-1"), "dkms-1");
+    }
+
+    /// El id de grafo del QKC es numérico pero su cert es `qkc-<id>`: el
+    /// binding del anuncio compara contra el nombre del CERT (el handler
+    /// formatea `qkc-{id}`), no contra el id pelado — con el pelado, todo
+    /// anuncio https de QKC se rechazaba (malla mTLS, 2026-08-31).
+    #[test]
+    fn a_qkc_cert_authorizes_via_its_role_prefixed_name() {
+        let qkc = ident("dkms://qkc-3");
+        assert!(identity_authorizes(Some(&qkc), "qkc-3"));
+        assert!(
+            !identity_authorizes(Some(&qkc), "3"),
+            "el id de grafo a secas no es el nombre del cert"
+        );
     }
 
     #[test]
