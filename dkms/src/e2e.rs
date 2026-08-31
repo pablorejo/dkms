@@ -248,10 +248,17 @@ impl E2e {
         &self.my_id
     }
 
+    /// Estado del peer, creándolo si no existe. Fast path sin alloc: esto
+    /// corre por CLAVE bajo el mutex global de peers (`seal`/`open` con
+    /// `max_emits_in_flight = 128` serializan aquí), y el
+    /// `entry(peer.to_owned())` de antes pagaba un `String` por clave también
+    /// en el hit — el 99,99 % de las veces. El patrón es el de
+    /// `state/pool.rs`.
     fn state<'a>(&self, map: &'a mut HashMap<String, PeerState>, peer: &str) -> &'a mut PeerState {
-        let window = self.cfg.replay_window;
-        map.entry(peer.to_owned())
-            .or_insert_with(|| PeerState::new(window))
+        if !map.contains_key(peer) {
+            map.insert(peer.to_owned(), PeerState::new(self.cfg.replay_window));
+        }
+        map.get_mut(peer).expect("recién comprobado/insertado")
     }
 
     // ─── derivación y AAD ───────────────────────────────────────────────
@@ -383,9 +390,18 @@ impl E2e {
 
         // Frescura: sólo con el tag ya verificado. Antes, cualquiera podría
         // tirar la ventana con una sesión inventada.
+        //
+        // Dos secciones críticas a propósito (secreto arriba, ventana aquí):
+        // plegarlas metería el HKDF+AEAD bajo el mutex global y serializaría
+        // la cripto de TODOS los peers. `get_mut`, no `state()`: el peer
+        // existe seguro —su secreto acaba de verificar el tag— y así este
+        // camino por clave no aloca nada.
         {
             let mut g = self.peers.lock();
-            let st = self.state(&mut g, source);
+            let st = g.get_mut(source).ok_or_else(|| E2eError::UnknownEpoch {
+                peer: source.to_owned(),
+                epoch,
+            })?;
             st.replay.check_and_set(session, counter)?;
         }
         Ok(pt)
