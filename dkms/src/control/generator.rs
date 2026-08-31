@@ -823,8 +823,10 @@ impl Generator {
         if self.ack_endpoint.is_none() {
             self.stats.ack_no_endpoint(peer_dkms_id, 1);
         }
-        let mut bytes = vec![0u8; self.cfg.key_size_bytes];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        // Zeroizing: la copia local del material se borra en el drop()
+        // explícito de abajo; la que persiste (ack_pending) ya iba envuelta.
+        let mut bytes = zeroize::Zeroizing::new(vec![0u8; self.cfg.key_size_bytes]);
+        rand::thread_rng().fill_bytes(bytes.as_mut_slice());
         let key_id_str = Uuid::new_v4().to_string();
         let key_id = KeyId::new(&key_id_str);
         let deadline = Instant::now() + Duration::from_millis(self.cfg.ack_timeout_ms);
@@ -846,7 +848,7 @@ impl Generator {
         } else {
             KeyGrade::Pqc
         };
-        let entry_bytes = bytes.clone();
+        let entry_bytes = (*bytes).clone();
         self.ack_pending.insert(
             peer_dkms_id,
             key_id.clone(),

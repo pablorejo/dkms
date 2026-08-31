@@ -14,7 +14,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct Key {
     pub key_id: Uuid,
-    pub material: Vec<u8>,
+    /// El pad OTP: `Zeroizing` para que cada copia (buffer fresh, mapa
+    /// delivered, batches en vuelo) se borre de memoria al morir.
+    pub material: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Key {
@@ -22,16 +24,17 @@ impl Key {
     /// stream del RNG → una sola pasada).
     #[inline]
     pub fn mint(rng: &mut ChaCha20Rng, n_bytes: usize) -> Self {
-        // 16 B (UUID) + n_bytes (material) en una sola fill.
-        let mut buf = vec![0u8; 16 + n_bytes];
-        rng.fill_bytes(&mut buf);
+        // 16 B (UUID) + n_bytes (material) en una sola fill. El buffer
+        // intermedio también se borra: contiene una copia del pad.
+        let mut buf = zeroize::Zeroizing::new(vec![0u8; 16 + n_bytes]);
+        rng.fill_bytes(buf.as_mut_slice());
 
         let mut uuid_bytes = [0u8; 16];
         uuid_bytes.copy_from_slice(&buf[..16]);
         uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40; // versión v4
         uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80; // variante RFC 4122
 
-        let material = buf[16..].to_vec();
+        let material = zeroize::Zeroizing::new(buf[16..].to_vec());
         Self {
             key_id: Uuid::from_bytes(uuid_bytes),
             material,

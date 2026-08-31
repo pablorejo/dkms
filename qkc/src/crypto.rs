@@ -125,7 +125,7 @@ mod tests {
     fn fake_key(idx: u8) -> OtpKey {
         OtpKey {
             key_id: Uuid::from_u128(idx as u128),
-            material: vec![idx; 32],
+            material: zeroize::Zeroizing::new(vec![idx; 32]),
         }
     }
 

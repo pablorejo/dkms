@@ -52,7 +52,7 @@ pub struct LinkBuffer {
     pub rate_kps: f64,
 
     fresh: ArrayQueue<Key>,
-    delivered: DashMap<Uuid, Vec<u8>>,
+    delivered: DashMap<Uuid, zeroize::Zeroizing<Vec<u8>>>,
 
     // Stats: lock-free counters. Lectura coherente entre sí no
     // garantizada — solo aproximaciones para `/status`.
@@ -123,7 +123,7 @@ impl LinkBuffer {
     /// Recupera una clave previamente entregada por su `key_id`.
     /// La elimina del mapa para que un mismo `key_id` no se pueda
     /// usar dos veces (semántica OTP).
-    pub fn take_for_dec(&self, key_id: &Uuid) -> Option<Vec<u8>> {
+    pub fn take_for_dec(&self, key_id: &Uuid) -> Option<zeroize::Zeroizing<Vec<u8>>> {
         let result = self.delivered.remove(key_id).map(|(_, v)| v);
         if result.is_some() {
             self.n_delivered_dec.fetch_add(1, Ordering::Relaxed);

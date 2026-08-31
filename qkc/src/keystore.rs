@@ -32,6 +32,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use wire::{encode_notify_payload, Frame, FRAME_KEY_IDS_NOTIFY};
+use zeroize::Zeroizing;
 
 use crate::{
     kme::{KeySource, OtpKey},
@@ -63,7 +64,7 @@ pub struct KeyStore {
     /// Buffer FIFO de claves listas para cifrar (mías a cuenta del peer).
     enc: ArrayQueue<OtpKey>,
     /// Mapa de claves esperadas para descifrar (las del peer hacia mí).
-    dec: DashMap<Uuid, Vec<u8>>,
+    dec: DashMap<Uuid, Zeroizing<Vec<u8>>>,
 
     /// Fuente de claves del enlace (quditto-QKD o PQC). El KeyStore es
     /// agnóstico al tipo: solo llama a `enc_keys`/`dec_keys`.
@@ -322,7 +323,7 @@ impl KeyStore {
     /// `None` si no la tiene → caller llama a [`wait_dec`] para esperar
     /// al worker.
     #[inline]
-    pub fn lookup_dec(&self, id: &Uuid) -> Option<Vec<u8>> {
+    pub fn lookup_dec(&self, id: &Uuid) -> Option<Zeroizing<Vec<u8>>> {
         self.n_dec_lookups.fetch_add(1, Ordering::Relaxed);
         match self.dec.remove(id) {
             Some((_, v)) => Some(v),
@@ -337,7 +338,11 @@ impl KeyStore {
     /// clave todavía no está en el `DashMap`. El antiguo fallback HTTP
     /// `dec_keys` era inviable porque el quditto ya entregó la clave
     /// al worker (responde 404). Devolvemos `Err` si el deadline expira.
-    pub async fn wait_dec(&self, id: &Uuid, timeout: Duration) -> Result<Vec<u8>, KeyWaitTimeout> {
+    pub async fn wait_dec(
+        &self,
+        id: &Uuid,
+        timeout: Duration,
+    ) -> Result<Zeroizing<Vec<u8>>, KeyWaitTimeout> {
         self.n_wait_dec_called.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + timeout;
         loop {
@@ -628,7 +633,7 @@ mod tests {
             Ok((0..number as usize + BUFFER_TARGET * 2)
                 .map(|_| OtpKey {
                     key_id: Uuid::new_v4(),
-                    material: vec![0u8; 32],
+                    material: Zeroizing::new(vec![0u8; 32]),
                 })
                 .collect())
         }

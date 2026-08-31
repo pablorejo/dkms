@@ -63,9 +63,9 @@ const SECRET_WAIT: Duration = Duration::from_secs(10);
 /// bytes idénticos para el mismo `(secret, key_id, len)`. La época queda
 /// aislada doblemente: selecciona el secreto Y va en los primeros 4 B del
 /// `key_id` (que entra en el `info`).
-pub fn derive_material(secret: &[u8; 32], key_id: &[u8; 16], len: usize) -> Vec<u8> {
+pub fn derive_material(secret: &[u8; 32], key_id: &[u8; 16], len: usize) -> Zeroizing<Vec<u8>> {
     let hk = Hkdf::<Sha256>::new(Some(QKC_PQC_SALT), secret);
-    let mut okm = vec![0u8; len];
+    let mut okm = Zeroizing::new(vec![0u8; len]);
     let mut info = [0u8; 16 + 4 + 4]; // key_id ‖ u32_be(len) ‖ u32_be(chunk_idx)
     info[..16].copy_from_slice(key_id);
     info[16..20].copy_from_slice(&(len as u32).to_be_bytes());

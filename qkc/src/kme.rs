@@ -32,17 +32,22 @@ use uuid::Uuid;
 use crate::error::{QkcError, Result};
 
 /// Una clave OTP completa (id + N bytes según `key_size_bits`).
+///
+/// `material` es el pad de un solo uso: va en `Zeroizing` para que TODA copia
+/// (la cola ENC, el DashMap DEC, los batches en vuelo) se borre de memoria al
+/// morir — el resto del árbol de material (épocas PQC, buffers del DKMS,
+/// secretos del ORR) ya lo hacía y este era el hueco.
 #[derive(Debug, Clone)]
 pub struct OtpKey {
     pub key_id: Uuid,
-    pub material: Vec<u8>,
+    pub material: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl From<Etsi014Key> for OtpKey {
     fn from(k: Etsi014Key) -> Self {
         Self {
             key_id: k.key_id,
-            material: k.key.into_inner(),
+            material: zeroize::Zeroizing::new(k.key.into_inner()),
         }
     }
 }
@@ -181,7 +186,7 @@ impl KeySource for KmeClient {
             .into_iter()
             .map(|(id, mat)| OtpKey {
                 key_id: id,
-                material: mat,
+                material: zeroize::Zeroizing::new(mat),
             })
             .collect())
     }
@@ -222,7 +227,7 @@ impl KeySource for KmeClient {
             .into_iter()
             .map(|(id, mat)| OtpKey {
                 key_id: id,
-                material: mat,
+                material: zeroize::Zeroizing::new(mat),
             })
             .collect())
     }
