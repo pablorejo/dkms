@@ -311,6 +311,18 @@ def render_orr(n, out):
     # se ignoraba en silencio). Lo fija test_render_config.py.
     grpc_tls = n.get("grpc_tls", True)
     lines.append("grpc_tls = " + ("true" if grpc_tls else "false"))
+    # served_dkms (B1): identidades (SAN del cert mTLS) con permiso para la
+    # superficie de aplicación del ORR (SendMessage/StreamDeliveries) — su
+    # DKMS, no cualquier cert de la net-ca. Si el node.yml no lo declara se
+    # deriva del `node_id` del DKMS de ESTA MISMA node.yml (la misma alimenta
+    # todos los roles de la institución), así que el despliegue estándar queda
+    # acotado sin tocar nada. Sin ninguno de los dos, no se emite y el ORR
+    # avisa al primer uso. Escalar (array): antes de cualquier tabla.
+    served = n.get("served_dkms")
+    if served is None and n.get("node_id") is not None:
+        served = [str(n["node_id"])]
+    if served:
+        lines.append("served_dkms = [" + ", ".join(q(str(s)) for s in served) + "]")
     peers = n.get("peers") or {}           # orr_id -> qkc_id
     if peers:
         lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]

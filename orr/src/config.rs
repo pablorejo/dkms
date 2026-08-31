@@ -86,6 +86,20 @@ pub struct OrrConfig {
     #[serde(default = "default_true")]
     pub grpc_tls: bool,
 
+    /// Identidades (el `node_id` del SAN `dkms://<id>` del cert mTLS) con
+    /// permiso para usar la **superficie de aplicación** de este ORR
+    /// (`SendMessage`, `StreamDeliveries`) — normalmente su único DKMS
+    /// co-anclado, p. ej. `["dkms-3"]`. Un ORR relaya y entrega PARA SU DKMS:
+    /// sin esta lista, cualquier cert de la net-ca (otro módulo de la red, o
+    /// uno comprometido) puede empujarle frames —gastando material QKD ajeno
+    /// por el camino— o suscribirse a sus entregas. Vacía = comportamiento
+    /// histórico (cualquier cert de red) con un aviso al primer uso; el
+    /// renderer del node.yml la rellena solo con el DKMS de la propia
+    /// institución. El plano ORR↔ORR (bootstrap/rotación) no usa esta lista:
+    /// va atado al `from` del cuerpo contra la identidad del cert.
+    #[serde(default)]
+    pub served_dkms: Vec<String>,
+
     #[serde(default = "default_metrics")]
     pub metrics_addr: String,
 

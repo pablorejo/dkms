@@ -92,6 +92,32 @@ class OrrGrpcTlsPlacement(unittest.TestCase):
         self.assertEqual(cfg["orr_id"], "orr_1")
 
 
+class OrrServedDkms(unittest.TestCase):
+    """served_dkms (B1): la superficie de aplicación del ORR queda acotada a
+    su DKMS. Derivado del node_id del DKMS de la MISMA node.yml si no se
+    declara; explícito manda; escalar (array), antes de cualquier tabla."""
+
+    def test_derived_from_the_nodes_own_dkms(self):
+        # Una node.yml de institución lleva el dkms (node_id) y el orr juntos.
+        cfg = render("orr", ORR_BASE + "node_id: dkms-3\npeers:\n  orr_2: 2\n")
+        self.assertEqual(cfg["served_dkms"], ["dkms-3"])
+        # Y nunca dentro de [peers] (la clase de bug que fija este arnés).
+        self.assertNotIn("served_dkms", cfg["peers"])
+
+    def test_explicit_list_wins_over_derivation(self):
+        cfg = render(
+            "orr",
+            ORR_BASE + "node_id: dkms-3\nserved_dkms: [dkms-7, dkms-8]\n",
+        )
+        self.assertEqual(cfg["served_dkms"], ["dkms-7", "dkms-8"])
+
+    def test_without_dkms_nothing_is_emitted(self):
+        # ORR suelto (sin dkms en la node.yml): no se inventa nada; el ORR
+        # avisa al primer uso de la superficie abierta.
+        cfg = render("orr", ORR_BASE)
+        self.assertNotIn("served_dkms", cfg)
+
+
 class SdnHttpUrlScheme(unittest.TestCase):
     """sdn_http_url hereda el esquema del sdn_url: una SDN con control_tls se
     escribe https:// en cada node.yml y el anuncio sale mTLS. Antes se emitía

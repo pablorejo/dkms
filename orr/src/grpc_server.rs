@@ -77,6 +77,56 @@ fn require_from_matches_peer(
     }
 }
 
+/// Autorización de la superficie de APLICACIÓN (`SendMessage`,
+/// `StreamDeliveries`) (B1): este ORR relaya y entrega para su DKMS, no para
+/// cualquier miembro de la red — con el mTLS a secas, otro cert de la net-ca
+/// (un módulo de otra institución, o uno comprometido) podía empujarle frames
+/// —gastando material QKD ajeno en cada salto— o suscribirse a sus entregas.
+/// Con `served_dkms` configurado, la identidad del cert del que llama tiene
+/// que estar en la lista. Vacía ⇒ comportamiento histórico (cualquier cert de
+/// red) con aviso una vez; sin cert (`grpc_tls = false`, red interna de
+/// confianza) ídem. El plano ORR↔ORR no pasa por aquí: va atado al `from` del
+/// cuerpo ([`require_from_matches_peer`]).
+fn require_caller_served(
+    served: &[String],
+    peer_certs: Option<std::sync::Arc<Vec<tonic::transport::CertificateDer<'static>>>>,
+) -> std::result::Result<(), Status> {
+    if served.is_empty() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            warn!(
+                "orr.grpc: `served_dkms` vacío: la superficie de aplicación (SendMessage/\
+                 StreamDeliveries) queda abierta a cualquier cert de la net-ca; declara los \
+                 DKMS servidos para acotarla"
+            );
+        });
+        return Ok(());
+    }
+    let Some(certs) = peer_certs else {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            warn!(
+                "orr.grpc: llamada sin certificado de cliente (grpc_tls = false): `served_dkms` \
+                 no se puede aplicar"
+            );
+        });
+        return Ok(());
+    };
+    match common::cert_identity::node_id_from_certs(&certs) {
+        Some(id) if served.iter().any(|s| s.eq_ignore_ascii_case(&id)) => Ok(()),
+        other => {
+            warn!(
+                cert_identity = ?other,
+                ?served,
+                "orr.grpc: el cert del que llama no está en `served_dkms`; rechazado"
+            );
+            Err(Status::permission_denied(format!(
+                "el certificado ({other:?}) no está autorizado en este ORR (served_dkms)"
+            )))
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl OrrControl for OrrGrpc {
     type ListCircuitsStream = ReceiverStream<std::result::Result<ProtoCircuit, Status>>;
@@ -88,6 +138,7 @@ impl OrrControl for OrrGrpc {
         &self,
         req: Request<SendMessageRequest>,
     ) -> std::result::Result<Response<SendMessageResponse>, Status> {
+        require_caller_served(&self.svc.cfg.served_dkms, req.peer_certs())?;
         let m = req.into_inner();
         let dest = m
             .destination
@@ -140,6 +191,7 @@ impl OrrControl for OrrGrpc {
         &self,
         req: Request<StreamDeliveriesRequest>,
     ) -> std::result::Result<Response<Self::StreamDeliveriesStream>, Status> {
+        require_caller_served(&self.svc.cfg.served_dkms, req.peer_certs())?;
         let sub_id = req.into_inner().subscriber_id;
         tracing::Span::current().record("subscriber", tracing::field::display(&sub_id));
         info!(subscriber = %sub_id, "orr.stream_deliveries subscribed");
@@ -390,4 +442,46 @@ pub async fn serve(svc: OrrService, addr: &str, mtls: bool) -> anyhow::Result<()
         .serve_with_incoming(incoming)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_caller_served;
+    use std::sync::Arc;
+    use tonic::transport::CertificateDer;
+
+    fn certs_for(
+        pki: &common::test_support::TestPki,
+        id: &str,
+    ) -> Arc<Vec<CertificateDer<'static>>> {
+        Arc::new(vec![CertificateDer::from(pki.cert_der(id))])
+    }
+
+    /// B1: la superficie de aplicación sólo la usa quien está en
+    /// `served_dkms`. Vacía o sin cert (opt-outs explícitos) se mantiene el
+    /// histórico; un cert de red que no está en la lista se rechaza con
+    /// PERMISSION_DENIED, y la comparación de ids no distingue mayúsculas.
+    #[test]
+    fn served_dkms_gates_the_application_surface() {
+        let dir = std::env::temp_dir().join(format!("orr_served_dkms_{}", std::process::id()));
+        let Some(pki) = common::test_support::mldsa_test_pki(&dir, &["dkms-1", "orr_2"]) else {
+            common::test_support::skip_or_fail("openssl sin ML-DSA (<3.5)");
+            return;
+        };
+        let served = vec!["dkms-1".to_string()];
+
+        // Opt-outs: lista vacía, o gRPC en claro (sin cert).
+        assert!(require_caller_served(&[], certs_for(&pki, "orr_2").into()).is_ok());
+        assert!(require_caller_served(&served, None).is_ok());
+
+        // El DKMS servido pasa; la comparación ignora mayúsculas.
+        assert!(require_caller_served(&served, Some(certs_for(&pki, "dkms-1"))).is_ok());
+        assert!(require_caller_served(&["DKMS-1".into()], Some(certs_for(&pki, "dkms-1"))).is_ok());
+
+        // Otro miembro legítimo de la red NO: relayar gasta material ajeno.
+        let err = require_caller_served(&served, Some(certs_for(&pki, "orr_2")))
+            .expect_err("cert fuera de served_dkms");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("orr_2"), "{}", err.message());
+    }
 }
