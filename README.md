@@ -60,8 +60,9 @@ cp .env.example .env
 ./scripts/run-dkms.sh
 ./scripts/run-quditto.sh
 
-# Or everything at once with docker-compose
-docker compose -f docker/docker-compose.yml up
+# Or the full multi-host deployment (one image per module, node.yml per
+# institution): see docker/README.md and docker/compose/.
+make images
 ```
 
 ## Web

@@ -4,14 +4,14 @@
 #   1. config/default.toml  (este fichero)
 #   2. config/local.toml    (gitignored, dev only)
 #   3. variables de entorno con prefijo `ORR_`, separador `__`
-#      (ej. `ORR_QKC_LOCAL_ADDR=127.0.0.1:7100`).
+#      (ej. `ORR_QKC_LOCAL_ADDR=127.0.0.1:20001`).
 
-orr_id          = "ORR_1"
+orr_id          = "orr_1"
 qkc_id          = 1
-qkc_local_addr  = "127.0.0.1:7100"
-grpc_addr       = "0.0.0.0:50052"
-sdn_url         = "http://127.0.0.1:50053"
-metrics_addr    = "0.0.0.0:9101"
+qkc_local_addr  = "127.0.0.1:20001"
+grpc_addr       = "0.0.0.0:20003"
+sdn_url         = "http://127.0.0.1:19000"
+metrics_addr    = "0.0.0.0:20004"
 
 # 0 = passthrough (sin cebolla). 1 = PQC E2E. -1 = onion full. >=2 = onion truncada.
 default_max_hops = 0
@@ -32,19 +32,19 @@ deliver_queue_capacity  = 4096
 
 # Mapa lógico orr_id -> qkc_id. La SDN puede refrescarlo en runtime.
 [peers]
-# ORR_2 = 2
-# ORR_3 = 3
+# orr_2 = 2
+# orr_3 = 3
 
 # Claves públicas ML-KEM de los peers (base64). Necesarias para los
 # modos onion (max_hops != 0). Cada ORR las genera al boot y debe
 # distribuirlas por SDN o config. Mientras la SDN no esté lista,
 # colocarlas a mano aquí.
 [peer_pubkeys]
-# ORR_2 = "AAA...base64..."
-# ORR_3 = "BBB...base64..."
+# orr_2 = "AAA...base64..."
+# orr_3 = "BBB...base64..."
 
-# Identidad de nodo (CA de red): docker/gen-certs.sh ORR_1 <ip> ./certs
+# Identidad de nodo (CA de red): docker/gen-certs.sh orr_1 <ip> ./certs
 # [tls]
-# cert_path        = "certs/ORR_1.crt"
-# key_path         = "certs/ORR_1.key"
+# cert_path        = "certs/orr_1.crt"
+# key_path         = "certs/orr_1.key"
 # control_plane_ca = "certs/net-ca.crt"

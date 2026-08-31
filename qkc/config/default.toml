@@ -1,20 +1,33 @@
-# QKC default configuration.
-# Per-deployment overrides go in config/local.toml or env vars (`QKC_*`).
+# Config de desarrollo del QKC (scripts/run-qkc.sh la pasa con --config).
+#
+# A diferencia de los otros módulos, el QKC NO usa CONFIG_DIR/env: carga
+# exactamente el fichero de `qkc --config <path>`. El conjunto completo de
+# campos vive en qkc/src/config.rs; en despliegue este TOML lo genera
+# docker/render_config.py a partir de un node.yml (docker/README.md).
 
-node_id   = "node-1"
-grpc_addr = "0.0.0.0:50051"
-tcp_bind  = "0.0.0.0:7001"
+qkc_id       = 1
+peer_listen  = "0.0.0.0:20000"     # frames de otros QKCs
+local_listen = "127.0.0.1:20001"   # frames del ORR co-localizado
+admin_http   = "0.0.0.0:20002"     # push de forwarding-table, /healthz, /stats
 
-sdn_url     = "http://127.0.0.1:50053"
-quditto_url = "http://127.0.0.1:50055"
+# Anuncio a la SDN (opcional: sin él, alta manual en la SDN).
+# sdn_url      = "http://127.0.0.1:19002"
+# advertise_ip = "127.0.0.1"
 
-buffer_max_keys      = 8192
-key_size_bits        = 256
-default_refill_rate  = 1000
-metrics_addr         = "0.0.0.0:9100"
-
-# Peer TCP endpoints (NodeId -> host:port). Populated by SDN at runtime;
-# anything pre-seeded here is used until SDN catches up.
-[peer_tcp]
-# node-2 = "10.0.0.2:7001"
-# node-3 = "10.0.0.3:7001"
+# Un [[links]] por enlace con un vecino directo. Ejemplo PQC:
+# [[links]]
+# neighbor_id        = 2
+# neighbor_peer_addr = "127.0.0.1:20100"
+# key_size_bits      = 256
+# link_type          = "pqc"
+# pqc_suite          = "ml-kem-768"
+# link_psk           = "<base64>"     # raíz de pqc_auth/frame_auth (ambos lados)
+# frame_auth         = "require"
+#
+# Y uno QKD contra un KME/quditto (el render de despliegue emite https):
+# [[links]]
+# neighbor_id        = 3
+# neighbor_peer_addr = "127.0.0.1:20200"
+# key_size_bits      = 256
+# link_type          = "qkd"
+# quditto_url        = "http://127.0.0.1:20010"
