@@ -112,6 +112,20 @@ FRAME_AUTH="${DKMS_MESH_FRAME_AUTH:-off}"
 # comparación. Necesita un cert de nodo por ORR (orr_N, CA de red), que se
 # genera aquí o viene en DKMS_MESH_CERTS_SRC.
 GRPC_TLS="${DKMS_MESH_GRPC_TLS:-1}"
+# DKMS_MESH_CONTROL_TLS=0 deja el plano de control en claro (el brazo
+# histórico). Con 1 (default) la SDN lleva [tls] y sirve su HTTP admin Y su
+# gRPC con mTLS, todos los anuncios van https con el cert de nodo, y el push
+# de forwarding viaja https — y en el QKC solo lo autoriza el cert `sdn`
+# (B1b). La razón de ser del brazo: el QKC lleva su [tls], que desde la
+# Fase 10 enciende POR DEFECTO el handshake firmado con cert (`sign`) y el
+# sello por-frame (`require`) en los DOS tipos de enlace (A3/A4), sin
+# declarar nada por par. Necesita certs `qkc-N` y `sdn` además de los de
+# siempre — los juegos pre-generados de CESGA tienen que crecer con ellos.
+# Nota: con CONTROL_TLS=1 el `sdn_url` gRPC del ORR queda https, y su
+# GetOrrPath (solo se usa con max_hops>=2 sin orr_path) no monta TLS de
+# cliente: para probar cebolla multi-salto, pasa orr_path o CONTROL_TLS=0.
+CONTROL_TLS="${DKMS_MESH_CONTROL_TLS:-1}"
+SDN_SCHEME=$([ "$CONTROL_TLS" = 1 ] && echo https || echo http)
 # Algoritmo de los certificados: ML-DSA-65 (PQC) por defecto, como gen-certs.
 # Donde el openssl no sabe generarlos (CESGA, 1.1.1g) se siembran solos de
 # certs-pregen/<alg> si existe, sin tener que pedirlo.
@@ -245,7 +259,15 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
     local n=$1; shift
     {
         echo "qkc_id: $n"
-        echo 'sdn_url: "127.0.0.1"'
+        if [ "$CONTROL_TLS" = 1 ]; then
+            # https hereda en el anuncio y el push vuelve mTLS; [tls] además
+            # enciende los defaults de la Fase 10 (sign + require, A3/A4).
+            echo 'sdn_url: "https://127.0.0.1"'
+            echo 'control_tls: true'
+            echo "certs_dir: \"$DIR/certs\""
+        else
+            echo 'sdn_url: "127.0.0.1"'
+        fi
         echo 'advertise_ip: "127.0.0.1"'
         echo "sdn_announce_secs: 5"
         echo "ports: {peer: $(peer_port "$n"), local: $(local_port "$n"), admin: $(admin_port "$n")}"
@@ -346,6 +368,9 @@ generate() {        # generate <N>
     fi
     build_topology "$total"
     printf 'listen_ip: "0.0.0.0"\npresence_ttl_secs: 90\n' > "$DIR/yml/node.sdn.yml"
+    if [ "$CONTROL_TLS" = 1 ]; then
+        printf 'control_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node.sdn.yml"
+    fi
     python3 "$RENDER" sdn "$DIR/yml/node.sdn.yml" "$DIR/cfg/sdn" >/dev/null
 
     for n in $(seq 1 "$total"); do
@@ -375,7 +400,7 @@ generate() {        # generate <N>
 orr_id: "orr_$n"
 qkc_id: $n
 qkc_addr: "127.0.0.1:$(local_port "$n")"
-sdn_url: "http://127.0.0.1:$SDN_GRPC"
+sdn_url: "$SDN_SCHEME://127.0.0.1:$SDN_GRPC"
 advertise_ip: "127.0.0.1"
 sdn_announce_secs: 5
 ports: {grpc: $(orr_port "$n"), metrics: $(port "$n" 20004)}
@@ -421,7 +446,7 @@ EOF
 node_id: "dkms-$n"
 advertise_ip: "127.0.0.1"
 orr_addr: "127.0.0.1:$(orr_port "$n")"
-sdn_endpoint: "http://127.0.0.1:$SDN_GRPC"
+sdn_endpoint: "$SDN_SCHEME://127.0.0.1:$SDN_GRPC"
 orr_id: "orr_$n"
 orr_tls: $([ "$GRPC_TLS" = 1 ] && echo true || echo false)
 sdn_announce_secs: 5
@@ -454,8 +479,16 @@ EOF
             bash "$GENCERTS" "dkms-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
             bash "$GENCERTS" --sae "sae_$n" "$DIR/certs" >/dev/null 2>&1
             [ "$GRPC_TLS" = 1 ] && bash "$GENCERTS" "orr_$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
+            # Fase 10: el [tls] del QKC es lo que enciende sign+require por
+            # defecto; su SAN dkms://qkc-N es lo que verifica el handshake.
+            [ "$CONTROL_TLS" = 1 ] && bash "$GENCERTS" "qkc-$n" "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
         fi
     done
+    # El cert `sdn` autoriza el push de forwarding en el admin mTLS del QKC
+    # (B1b) y sirve el HTTP/gRPC de la SDN.
+    if [ -z "${DKMS_MESH_CERTS_SRC:-}" ] && [ "$CONTROL_TLS" = 1 ]; then
+        bash "$GENCERTS" sdn "${DKMS_MESH_CERT_IP:-127.0.0.1}" "$DIR/certs" >/dev/null 2>&1
+    fi
     # Certs pre-generados: se copian enteros (CAs + hojas). Se valida que estén
     # los de TODOS los nodos, porque una malla a la que le falte un cert
     # arranca igual y falla mucho después, en el primer handshake.
@@ -468,7 +501,13 @@ EOF
             if [ "$GRPC_TLS" = 1 ]; then
                 [ -s "$DIR/certs/orr_$n2.crt" ] || faltan=$((faltan+1))
             fi
+            if [ "$CONTROL_TLS" = 1 ]; then
+                [ -s "$DIR/certs/qkc-$n2.crt" ] || faltan=$((faltan+1))
+            fi
         done
+        if [ "$CONTROL_TLS" = 1 ]; then
+            [ -s "$DIR/certs/sdn.crt" ] || faltan=$((faltan+1))
+        fi
         if [ "$faltan" -gt 0 ] || [ ! -s "$DIR/certs/net-ca.crt" ] || [ ! -s "$DIR/certs/sae-ca.crt" ]; then
             echo "mesh: FATAL: DKMS_MESH_CERTS_SRC=$DKMS_MESH_CERTS_SRC no cubre N=$total ($faltan ficheros de DKMS/ORR/SAE ausentes)" >&2
             exit 1
@@ -479,7 +518,8 @@ EOF
         # sobre un juego cuya net-ca era otra, y el DKMS no validó al ORR — sin
         # un solo error que lo dijera, sólo "transport error" y 0/90 llenos.
         local pair leaf ca
-        for pair in dkms-1:net-ca sae_1:sae-ca $([ "$GRPC_TLS" = 1 ] && echo orr_1:net-ca); do
+        for pair in dkms-1:net-ca sae_1:sae-ca $([ "$GRPC_TLS" = 1 ] && echo orr_1:net-ca) \
+                $([ "$CONTROL_TLS" = 1 ] && echo qkc-1:net-ca sdn:net-ca); do
             leaf=${pair%%:*}; ca=${pair##*:}
             if [ "$(cert_keyid "$DIR/certs/$leaf.crt" Authority)" != "$(cert_keyid "$DIR/certs/$ca.crt" Subject)" ]; then
                 echo "mesh: FATAL: $leaf.crt no está firmado por el $ca.crt de $DKMS_MESH_CERTS_SRC (es otra copia de la CA): regenera el juego entero" >&2
@@ -561,7 +601,19 @@ wait_for() {        # wait_for <segundos> <expresión que debe dar "true">
     return 1
 }
 
-topology_json() { curl -s --max-time 5 "http://127.0.0.1:$SDN_HTTP/topology"; }
+# curl al HTTP admin de la SDN respetando CONTROL_TLS: con el plano de
+# control en mTLS hay que presentar un cert de la net-ca (vale el de la
+# propia SDN, que la malla ya tiene en $DIR/certs).
+sdn_curl() { # sdn_curl <path> [curl args...]
+    local path=$1; shift
+    if [ "$CONTROL_TLS" = 1 ]; then
+        curl -s --cacert "$DIR/certs/net-ca.crt" --cert "$DIR/certs/sdn.crt" \
+             --key "$DIR/certs/sdn.key" "$@" "https://127.0.0.1:$SDN_HTTP$path"
+    else
+        curl -s "$@" "http://127.0.0.1:$SDN_HTTP$path"
+    fi
+}
+topology_json() { sdn_curl /topology --max-time 5; }
 
 cmd_up() {
     local total=${1:-3}
@@ -610,8 +662,8 @@ cmd_up() {
         fi
         "$DIR/boot.sh" >/dev/null 2>&1 &
     fi
-    curl -s --retry 40 --retry-delay 1 --retry-connrefused \
-        "http://127.0.0.1:$SDN_HTTP/healthz" >/dev/null || die "la SDN no arrancó"
+    sdn_curl /healthz --retry 40 --retry-delay 1 --retry-connrefused \
+        >/dev/null || die "la SDN no arrancó"
     local want=$(( total * 3 ))
     if wait_for $(( 120 + 6 * total )) "topology_json | python3 -c \"import sys,json;t=json.load(sys.stdin);print(str(t['qkcs']+t['orrs']+t['dkms']==$want).lower())\""; then
         echo "mesh: $want módulos registrados"
@@ -636,7 +688,7 @@ cmd_down() {
 cmd_topology() { topology_json | python3 -m json.tool; }
 
 cmd_edges() {
-    curl -s --max-time 5 "http://127.0.0.1:$SDN_HTTP/links" | python3 -c '
+    sdn_curl /links --max-time 5 | python3 -c '
 import sys, json, collections
 E = [(l["a"], l["b"]) for l in json.load(sys.stdin)]
 print(f"  {len(E)} aristas:", sorted((int(a), int(b)) for a, b in E))
