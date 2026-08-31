@@ -111,6 +111,8 @@ fn client_tls_for(
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     logging::init("dkms");
+    // Claves fuera de swap y de core dumps (best-effort, ver common::hardening).
+    common::hardening::harden_process();
     let cli = Cli::parse();
     if let Some(d) = cli.config_dir.as_deref() {
         std::env::set_var("CONFIG_DIR", d);

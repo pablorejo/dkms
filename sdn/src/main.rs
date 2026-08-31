@@ -23,6 +23,8 @@ struct Cli {
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     logging::init("sdn");
+    // Claves fuera de swap y de core dumps (best-effort, ver common::hardening).
+    common::hardening::harden_process();
     let _cli = Cli::parse();
 
     // Proveedor criptográfico de rustls: obligatorio antes de cualquier

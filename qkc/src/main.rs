@@ -40,6 +40,8 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    // Claves fuera de swap y de core dumps (best-effort, ver common::hardening).
+    common::hardening::harden_process();
 
     // Proveedor rustls: necesario si el anuncio al SDN va por mTLS (https).
     common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;

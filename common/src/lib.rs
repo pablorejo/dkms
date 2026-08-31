@@ -15,6 +15,7 @@ pub mod cert_identity;
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod hardening;
 pub mod http;
 pub mod ids;
 pub mod ipc;

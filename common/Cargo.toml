@@ -57,5 +57,10 @@ parking_lot        = { workspace = true }
 arc-swap           = { workspace = true }
 uuid               = { workspace = true }
 
+# Endurecimiento del proceso (mlockall + PR_SET_DUMPABLE): claves fuera de swap
+# y de core dumps. Ver common::hardening.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 tonic-build = { workspace = true }

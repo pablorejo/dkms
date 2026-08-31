@@ -18,6 +18,8 @@ struct Cli {
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     logging::init("orr");
+    // Claves fuera de swap y de core dumps (best-effort, ver common::hardening).
+    common::hardening::harden_process();
     // Proveedor rustls: necesario si el anuncio al SDN va por mTLS (https).
     common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
     let _cli = Cli::parse();
