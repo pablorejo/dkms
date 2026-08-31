@@ -204,21 +204,33 @@ pub struct LinkConfig {
 
     /// Política de autenticación del handshake PQC de este enlace. Ver `PqcAuth`
     /// (`off` | `prefer` | `require` = HMAC-PSK; `sign` = firma ML-DSA).
+    ///
+    /// **Ausente ⇒ default según haya identidad de nodo**: en un enlace PQC de
+    /// un nodo con `[tls]`, el handshake va **firmado con el cert** por defecto
+    /// (`sign`, patrón `grpc_tls`: seguro por defecto). Un valor explícito manda
+    /// —incluido `off` para desactivarlo—. Lee el efectivo con
+    /// [`LinkConfig::effective_pqc_auth`], no este campo.
     #[serde(default)]
-    pub pqc_auth: PqcAuth,
+    pub pqc_auth: Option<PqcAuth>,
 
     /// Clave pública ML-DSA del **peer** (base64) para verificar su firma del
     /// handshake cuando `pqc_auth = sign`. Solo config local. Ver §Fase 5.
+    /// Camino **legacy**: con identidad de cert la verificación es contra la
+    /// net-CA + SAN, sin esta clave por-par.
     #[serde(default)]
     pub peer_verify_key: Option<String>,
 
     /// Política de autenticación de los **frames de datos** de este enlace.
-    /// Ver [`FrameAuth`]. Usa la misma raíz que el handshake (`link_psk`), pero
-    /// es un flag aparte porque protege otra cosa: el handshake da autenticación
-    /// de *entidad*, y esto da integridad, autenticación de *origen de datos* y
-    /// frescura de cada frame.
+    /// Ver [`FrameAuth`]. El handshake da autenticación de *entidad*; esto da
+    /// integridad, autenticación de *origen de datos* y frescura de cada frame.
+    ///
+    /// **Ausente ⇒ default según haya identidad de nodo**, igual que
+    /// [`pqc_auth`](Self::pqc_auth): en un enlace PQC con `[tls]`, `require` por
+    /// defecto. La raíz del sello es el secreto de la ÉPOCA del enlace (no una
+    /// PSK), así que no hay nada que repartir. Lee el efectivo con
+    /// [`LinkConfig::effective_frame_auth`].
     #[serde(default)]
-    pub frame_auth: FrameAuth,
+    pub frame_auth: Option<FrameAuth>,
 }
 
 /// Política de autenticación de los frames de datos (`FRAME_RECV`/`FRAME_RELAY`).
@@ -304,6 +316,36 @@ impl LinkConfig {
             0
         } else {
             self.pqc_rekey_lookahead
+        }
+    }
+
+    /// `pqc_auth` efectivo. Con identidad de nodo (`[tls]` cargado) y en un
+    /// enlace **PQC**, el handshake va firmado con el cert por defecto (`sign`):
+    /// la verificación es contra la net-CA + SAN, sin material por-par, así que
+    /// hasta los enlaces que crea la SDN quedan autenticados sin tocar nada. Un
+    /// valor explícito en el TOML manda siempre —incluido `off`—. En enlaces
+    /// QKD el default es `off`: su raíz de confianza es el KME, no el cert de
+    /// red (ver `docs/SECURITY.md`).
+    pub fn effective_pqc_auth(&self, has_node_identity: bool) -> PqcAuth {
+        match self.pqc_auth {
+            Some(v) => v,
+            None if has_node_identity && self.link_type == LinkType::Pqc => PqcAuth::Sign,
+            None => PqcAuth::Off,
+        }
+    }
+
+    /// `frame_auth` efectivo, con el mismo criterio que
+    /// [`effective_pqc_auth`](Self::effective_pqc_auth): en un enlace PQC con
+    /// identidad de nodo, el sello por-frame va en `require` por defecto. Su
+    /// raíz es el secreto de la ÉPOCA del enlace, disponible en ambos extremos
+    /// en cuanto el handshake —ya autenticado por el cert— establece la primera
+    /// época; antes no fluye ningún frame, así que `require` no bloquea el
+    /// arranque. Un valor explícito manda.
+    pub fn effective_frame_auth(&self, has_node_identity: bool) -> FrameAuth {
+        match self.frame_auth {
+            Some(v) => v,
+            None if has_node_identity && self.link_type == LinkType::Pqc => FrameAuth::Require,
+            None => FrameAuth::Off,
         }
     }
 }
@@ -548,5 +590,65 @@ mod tests {
              link_type = \"pqc\"\npqc_suite = \"kyber-classic\"\nkey_size_bits = 256\n"
         ));
         assert!(cfg.validate().is_err());
+    }
+
+    /// A3: en un enlace PQC sin `pqc_auth`/`frame_auth` explícitos, la
+    /// identidad de nodo (`[tls]`) los enciende por defecto — handshake firmado
+    /// con el cert (`sign`) y sello por-frame `require` (su raíz es el secreto
+    /// de la época, no una PSK). Sin identidad, todo sigue en `off`.
+    #[test]
+    fn pqc_link_auth_defaults_on_with_node_identity() {
+        let cfg = parse(&format!(
+            "{BASE}sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\n"
+        ));
+        let link = &cfg.links[0];
+        assert!(link.pqc_auth.is_none(), "sin poner en el TOML");
+        assert!(link.frame_auth.is_none());
+        // Con identidad de nodo: seguro por defecto.
+        assert_eq!(link.effective_pqc_auth(true), PqcAuth::Sign);
+        assert_eq!(link.effective_frame_auth(true), FrameAuth::Require);
+        // Sin identidad: no hay con qué, se queda en off (camino legacy).
+        assert_eq!(link.effective_pqc_auth(false), PqcAuth::Off);
+        assert_eq!(link.effective_frame_auth(false), FrameAuth::Off);
+    }
+
+    /// Un valor explícito en el TOML manda siempre, también para desactivar:
+    /// `off` gana aunque haya identidad de nodo.
+    #[test]
+    fn explicit_link_auth_overrides_the_default() {
+        let cfg = parse(&format!(
+            "{BASE}sdn_url = \"http://10.0.0.100:19002\"\n\
+             [[links]]\nneighbor_id = 2\nlink_type = \"pqc\"\n\
+             pqc_auth = \"off\"\nframe_auth = \"prefer\"\n"
+        ));
+        let link = &cfg.links[0];
+        assert_eq!(link.pqc_auth, Some(PqcAuth::Off));
+        assert_eq!(link.frame_auth, Some(FrameAuth::Prefer));
+        assert_eq!(
+            link.effective_pqc_auth(true),
+            PqcAuth::Off,
+            "off explícito manda"
+        );
+        assert_eq!(link.effective_frame_auth(true), FrameAuth::Prefer);
+    }
+
+    /// En un enlace QKD el default es `off` aunque el nodo tenga identidad: su
+    /// raíz de confianza es el KME (A4), no el cert de red.
+    #[test]
+    fn qkd_link_auth_stays_off_by_default_even_with_identity() {
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"qkd\"\nquditto_url = \"http://kme:20010\"\n"
+        ));
+        let link = &cfg.links[0];
+        assert_eq!(link.effective_pqc_auth(true), PqcAuth::Off);
+        assert_eq!(link.effective_frame_auth(true), FrameAuth::Off);
+        // ...pero un valor explícito se respeta (QKD con PSK, p. ej.).
+        let cfg = parse(&format!(
+            "{BASE}[[links]]\nneighbor_id = 2\nneighbor_peer_addr = \"127.0.0.1:7002\"\n\
+             link_type = \"qkd\"\nquditto_url = \"http://kme:20010\"\nframe_auth = \"require\"\n"
+        ));
+        assert_eq!(cfg.links[0].effective_frame_auth(true), FrameAuth::Require);
     }
 }

@@ -113,6 +113,11 @@ pub struct SdnAnnouncer {
     /// `neighbor_addr` —lo normal en PQC, donde la dirección la pone la SDN— se
     /// montaba por la vía de la SDN y perdía su material de firma.
     local_cfgs: std::collections::HashMap<u32, LinkConfig>,
+    /// ¿Tiene el nodo identidad de cert (`[tls]`)? Decide si un enlace PQC que
+    /// crea la SDN queda **firmado por defecto** (A3): con cert la verificación
+    /// es contra la net-CA + SAN, sin material por-par, así que un enlace suyo
+    /// se autentica sin tocar nada; sin cert, `sign` no tiene con qué firmar.
+    node_identity: bool,
 }
 
 impl SdnAnnouncer {
@@ -228,10 +233,11 @@ impl SdnAnnouncer {
                 distance_km: None,
                 capacity_keys_per_s: None,
                 link_psk: None,
-                pqc_auth: crate::config::PqcAuth::Off,
+                pqc_auth: None,
                 peer_verify_key: None,
-                frame_auth: crate::config::FrameAuth::Off,
+                frame_auth: None,
             }),
+            node_identity: cfg.tls.is_some(),
         })
     }
 
@@ -320,13 +326,28 @@ impl SdnAnnouncer {
                 peer_verify_key: None,
                 ..self.link_defaults.clone()
             };
-            if cfg.pqc_auth != crate::config::PqcAuth::Off {
+            // Un enlace que crea la SDN no lleva material por-par (link_psk /
+            // peer_verify_key son None arriba, a propósito). El handshake sólo
+            // se autentica sin él por la vía del cert de nodo (`sign` + `[tls]`,
+            // A1/A3): la verificación va contra la net-CA + SAN. Avisar sólo si
+            // el modo efectivo necesita algo que este enlace no puede tener.
+            let eff = cfg.effective_pqc_auth(self.node_identity);
+            let needs_local_material = match eff {
+                crate::config::PqcAuth::Off => false,
+                // Firma ML-DSA: con identidad de cert basta el cert de nodo;
+                // sin ella no hay con qué firmar.
+                crate::config::PqcAuth::Sign => !self.node_identity,
+                // HMAC-PSK: la raíz es el link_psk, config por-par que la SDN
+                // no reparte.
+                crate::config::PqcAuth::Prefer | crate::config::PqcAuth::Require => true,
+            };
+            if needs_local_material {
                 warn!(
                     peer = id,
-                    modo = ?cfg.pqc_auth,
-                    "enlace creado por la SDN sin material de firma: declara el enlace en el \
-                     node.yml de este QKC (con peer_verify_key/link_psk) o el handshake se \
-                     descartará"
+                    modo = ?eff,
+                    "enlace creado por la SDN sin material de autenticación por-par: declara el \
+                     enlace en el node.yml de este QKC (con peer_verify_key/link_psk) o añade \
+                     [tls] para el handshake firmado por cert, o el handshake se descartará"
                 );
             }
             match self.svc.add_link(cfg) {

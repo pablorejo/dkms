@@ -211,6 +211,17 @@ impl QkcService {
         peer_out: &Arc<PeerOut>,
     ) -> Result<LinkRuntime, QkcError> {
         {
+            // Identidad de firma del nodo (cert de red, A1): sólo se carga en
+            // enlaces PQC —los QKD se autentican contra su KME (A4)— y con ella
+            // se deciden los defaults de auth por-salto (A3). Si `[tls]` carga,
+            // el enlace va firmado + sellado por defecto; si no, modo legacy.
+            // Un valor explícito en `pqc_auth`/`frame_auth` siempre manda.
+            let sign_id = (link.link_type == LinkType::Pqc)
+                .then(|| build_sign_identity(cfg, link.neighbor_id))
+                .flatten();
+            let has_node_identity = sign_id.is_some();
+            let eff_pqc_auth = link.effective_pqc_auth(has_node_identity);
+            let eff_frame_auth = link.effective_frame_auth(has_node_identity);
             // La fuente de claves depende del tipo de enlace; el resto del
             // KeyStore es idéntico (mismo hot path, mismo NOTIFY).
             let (kme, pqc, pqc_store): (
@@ -302,10 +313,10 @@ impl QkcService {
                         link.pqc_rekey_secs,
                         link.key_size_bits,
                         psk,
-                        link.pqc_auth,
+                        eff_pqc_auth,
                         sign_seed,
                         peer_verify_key,
-                        build_sign_identity(cfg, link.neighbor_id),
+                        sign_id,
                     );
                     // El reloj solo lo alimenta el emisor del lado iniciador; el
                     // respondedor sigue la rotación vía store.highest().
@@ -330,7 +341,7 @@ impl QkcService {
             // NOTIFY. En `require` sin PSK se falla el arranque: seguir
             // adelante sería correr sin autenticar creyendo que sí, que es
             // exactamente lo que el flag existe para impedir.
-            if link.frame_auth.rejects_plaintext() && notify_psk.is_none() && pqc_store.is_none() {
+            if eff_frame_auth.rejects_plaintext() && notify_psk.is_none() && pqc_store.is_none() {
                 return Err(QkcError::BadRequest(format!(
                     "enlace {}: frame_auth = require exige link_psk o un enlace PQC (secreto de enlace)",
                     link.neighbor_id
@@ -342,18 +353,18 @@ impl QkcService {
             //      la autenticación la hereda del handshake firmado con cert).
             // Si no hay ninguna, no hay MAC (comportamiento histórico).
             let frame_auth = if notify_psk.is_some() {
-                crate::frame_auth::LinkFrameAuth::new(link.frame_auth, link.neighbor_id, notify_psk)
+                crate::frame_auth::LinkFrameAuth::new(eff_frame_auth, link.neighbor_id, notify_psk)
             } else {
                 pqc_store.map(|store| {
                     crate::frame_auth::LinkFrameAuth::per_epoch(
-                        link.frame_auth,
+                        eff_frame_auth,
                         link.neighbor_id,
                         store,
                     )
                 })
             }
             .map(Arc::new);
-            if link.frame_auth.signs() && frame_auth.is_none() {
+            if eff_frame_auth.signs() && frame_auth.is_none() {
                 warn!(
                     peer = link.neighbor_id,
                     "qkc.frame_auth: modo prefer sin raíz (ni link_psk ni enlace PQC); frames sin MAC"
@@ -641,9 +652,9 @@ mod tests {
             distance_km: None,
             capacity_keys_per_s: None,
             link_psk: None,
-            pqc_auth: crate::config::PqcAuth::Off,
+            pqc_auth: None,
             peer_verify_key: None,
-            frame_auth: crate::config::FrameAuth::Off,
+            frame_auth: None,
         }
     }
 

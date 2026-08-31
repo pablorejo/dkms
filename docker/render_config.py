@@ -212,8 +212,12 @@ def render_qkc(n, out):
         if lk.get("link_psk") is not None:
             lines.append("link_psk = " + q(str(lk["link_psk"])))
         # frame_auth = off|prefer|require: MAC de los frames de DATOS
-        # (integridad + autenticación de origen + anti-replay). Comparte raíz
-        # con el handshake, pero es un flag aparte porque protege otra cosa.
+        # (integridad + autenticación de origen + anti-replay). Es un flag
+        # aparte del handshake porque protege otra cosa. SI SE OMITE, el default
+        # depende de la identidad de nodo (A3): en un enlace pqc de un nodo con
+        # [tls] (control_tls) va `require` por defecto — la raíz del sello es el
+        # secreto de la época del enlace, no una PSK, así que no hay nada que
+        # repartir. Ponerlo aquí sólo para forzar otro valor (p. ej. `off`).
         if lk.get("frame_auth") is not None:
             lines.append("frame_auth = " + q(str(lk["frame_auth"])))
         if typ == "qkd":
@@ -229,9 +233,12 @@ def render_qkc(n, out):
                       "pqc_rekey_lookahead = " + str(int(lk.get("pqc_rekey_lookahead", 2)))]
             # Autenticación del handshake PQC (docs/SECURITY.md §Fase 5).
             # pqc_auth = off|prefer|require (HMAC con link_psk) | sign (firma
-            # ML-DSA). Default off. Para `sign`: peer_verify_key es la clave
-            # pública ML-DSA del vecino (base64); el seed propio va a nivel de
-            # nodo (sign_secret_seed, abajo).
+            # ML-DSA). SI SE OMITE, el default depende de la identidad de nodo
+            # (A3): con [tls] (control_tls) va `sign` por defecto, firmado con el
+            # cert de nodo y verificado contra la net-CA + SAN — sin material
+            # por-par, así que hasta los enlaces que crea la SDN quedan firmados.
+            # `peer_verify_key` es el camino legacy (clave pública ML-DSA cruda
+            # del vecino); el seed propio va a nivel de nodo (sign_secret_seed).
             if lk.get("pqc_auth") is not None:
                 lines.append("pqc_auth = " + q(str(lk["pqc_auth"])))
             if lk.get("peer_verify_key") is not None:
