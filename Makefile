@@ -46,9 +46,10 @@ help:
 
 # ──────────────────────────────────────────────────────────────────────
 # Quality gate. `check` is what CI runs (.github/workflows/ci.yml); run it
-# locally before pushing. DKMS_NO_TEST_SKIPS=1 turns every environment-
-# dependent test skip (openssl < 3.5, non-default LP solver) into a failure,
-# so a green run means everything actually ran.
+# locally before pushing. `check` exports DKMS_NO_TEST_SKIPS=1 itself, which
+# turns every environment-dependent test skip (openssl < 3.5, non-default LP
+# solver) into a failure, so a green run means everything actually ran. A bare
+# `make test` stays permissive (skips allowed) for boxes without openssl 3.5.
 # ──────────────────────────────────────────────────────────────────────
 fmt: ## cargo fmt --all -- --check
 	@cargo fmt --all -- --check
@@ -59,7 +60,8 @@ clippy: ## cargo clippy --workspace --all-targets -- -D warnings
 test: ## cargo test --workspace
 	@cargo test --workspace
 
-check: fmt clippy test ## fmt + clippy + test, in that order
+check: export DKMS_NO_TEST_SKIPS = 1
+check: fmt clippy test ## fmt + clippy + test, in that order (no test skips)
 
 # ──────────────────────────────────────────────────────────────────────
 # Build (local, no push).
