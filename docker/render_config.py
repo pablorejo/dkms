@@ -401,7 +401,7 @@ def render_dkms(n, out):
     te = n.get("transport_e2e") or {}
     if te:
         lines += ["", "[transport_e2e]"]
-        for k in ("suite", "rekey_secs", "epoch_history_keep", "replay_window"):
+        for k in ("suite", "rekey_secs", "rekey_keys", "epoch_history_keep", "replay_window"):
             if te.get(k) is not None:
                 v = te[k]
                 lines.append(k + " = " + (q(str(v)) if k == "suite" else str(int(v))))

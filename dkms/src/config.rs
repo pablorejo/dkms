@@ -188,6 +188,15 @@ pub struct TransportE2eCfg {
     /// Cada cuánto rota la época con cada peer (lo dispara el lex-menor).
     #[serde(default = "default_e2e_rekey_secs")]
     pub rekey_secs: u64,
+    /// Rota la época tras `rekey_keys` claves selladas bajo ella, además de por
+    /// tiempo (lo que llegue antes). Acota el blast-radius por época en pares de
+    /// mucho tráfico, donde `rekey_secs` (una hora) dejaría una sola época
+    /// protegiendo millones de claves. `0` = solo por tiempo. A diferencia del
+    /// tiempo, lo dispara cualquiera de los dos extremos: el que acumula el
+    /// volumen es quien pide (acuerdos concurrentes dan dos épocas, nunca una
+    /// con dos secretos).
+    #[serde(default = "default_e2e_rekey_keys")]
+    pub rekey_keys: u64,
     /// Épocas que se guardan por peer para abrir lo que aún esté en vuelo.
     #[serde(default = "default_e2e_history")]
     pub epoch_history_keep: usize,
@@ -201,6 +210,7 @@ impl Default for TransportE2eCfg {
         Self {
             suite: default_e2e_suite(),
             rekey_secs: default_e2e_rekey_secs(),
+            rekey_keys: default_e2e_rekey_keys(),
             epoch_history_keep: default_e2e_history(),
             replay_window: default_e2e_window(),
         }
@@ -212,6 +222,12 @@ fn default_e2e_suite() -> String {
 }
 fn default_e2e_rekey_secs() -> u64 {
     3600
+}
+fn default_e2e_rekey_keys() -> u64 {
+    // ~5,5 min a la máxima tasa por par (el techo del token bucket, 320 kps es
+    // teórico; en práctica ≪), y muy por debajo de cualquier límite de AES-GCM.
+    // Acota el blast-radius sin rotar en exceso.
+    100_000
 }
 fn default_e2e_history() -> usize {
     4

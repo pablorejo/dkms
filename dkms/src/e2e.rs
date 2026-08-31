@@ -108,6 +108,48 @@ const AAD_DOMAIN: &[u8] = b"dkms.e2e.v1";
 const AGREEMENT_MIN_INTERVAL: Duration = Duration::from_secs(2);
 /// Una esk pendiente más vieja que esto es de un acuerdo que murió a medias.
 const PENDING_ESK_TTL: Duration = Duration::from_secs(30);
+/// Ventana del guardarraíl anti-reúso de `key_id` por época (ver
+/// [`RecentKeyIds`]). Los `key_id` son UUIDv4 —únicos por construcción—, así
+/// que el invariante «un key_id no se repite por época» se cumple solo; esto
+/// caza una REGRESIÓN (un generador atascado o con el contador reseteado, que
+/// repetiría ids cercanos). Una ventana acotada los pilla sin el coste en
+/// memoria de guardar la época entera (millones de ids en un par de mucho
+/// tráfico). No es por época completa a propósito: la rotación por volumen
+/// (`rekey_keys`) acota cuántas claves ve una época.
+const GUARDRAIL_WINDOW: usize = 8192;
+
+/// Conjunto FIFO acotado de los `key_id` vistos recientemente bajo la época en
+/// curso, para el guardarraíl anti-reúso de nonce de [`E2e::seal`]. `insert`
+/// devuelve `false` si el id ya estaba (reúso). Se vacía en cada rotación
+/// ([`PeerState::store`]): un `key_id` reusado bajo OTRA época es inofensivo
+/// (secreto distinto ⇒ nonce distinto).
+#[derive(Default)]
+struct RecentKeyIds {
+    seen: std::collections::HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl RecentKeyIds {
+    /// `true` si `id` es nuevo; `false` si es un reúso dentro de la ventana.
+    fn insert(&mut self, id: &str) -> bool {
+        if self.seen.contains(id) {
+            return false;
+        }
+        if self.order.len() >= GUARDRAIL_WINDOW {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        self.order.push_back(id.to_owned());
+        self.seen.insert(id.to_owned());
+        true
+    }
+
+    fn clear(&mut self) {
+        self.seen.clear();
+        self.order.clear();
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum E2eError {
@@ -123,6 +165,11 @@ pub enum E2eError {
     /// Material alterado en tránsito, cabecera alterada, o secreto divergente.
     #[error("tag e2e inválido (material o cabecera alterados, o secreto divergente)")]
     BadTag,
+    /// Guardarraíl: un `key_id` repetido bajo la MISMA época reusaría el mismo
+    /// `(clave, nonce)` de AES-GCM (el nonce se deriva del `key_id`), que rompe
+    /// confidencialidad e integridad a la vez. Fail-closed: no se sella.
+    #[error("key_id {key_id} repetido bajo la época en curso con {peer} (reúso de nonce)")]
+    KeyIdReuse { peer: String, key_id: String },
     #[error("replay: {0}")]
     Replay(#[from] ReplayError),
     #[error("kem: {0}")]
@@ -155,8 +202,14 @@ struct PeerState {
     epochs: VecDeque<(u32, Zeroizing<[u8; 32]>)>,
     /// Época con la que sellamos lo que emitimos a este peer.
     send_epoch: Option<u32>,
-    /// Contador de lo que le hemos emitido, por par.
+    /// Contador de lo que le hemos emitido, por par. Monotónico, NO se resetea
+    /// en la rotación: es la frescura de la ventana anti-replay del peer.
     counter: u64,
+    /// Claves selladas bajo la época de envío ACTUAL. Se resetea en cada
+    /// rotación; dispara el rekey por volumen (`rekey_keys`).
+    epoch_sends: u64,
+    /// Guardarraíl anti-reúso de `key_id` bajo la época en curso.
+    recent_key_ids: RecentKeyIds,
     /// Ventana de lo que nos llega de él.
     replay: ReplayWindow,
     /// Secreta efímera del acuerdo que tenemos en vuelo, si lo pedimos
@@ -173,6 +226,8 @@ impl PeerState {
             epochs: VecDeque::new(),
             send_epoch: None,
             counter: 0,
+            epoch_sends: 0,
+            recent_key_ids: RecentKeyIds::default(),
             replay: ReplayWindow::new(window),
             pending_esk: None,
             inflight: false,
@@ -204,6 +259,10 @@ impl PeerState {
         }
         self.send_epoch = Some(epoch);
         self.established_at = Some(Instant::now());
+        // Nueva época de envío: reinicia el contador de volumen y la ventana del
+        // guardarraíl (un key_id reusado bajo otra época es inofensivo).
+        self.epoch_sends = 0;
+        self.recent_key_ids.clear();
         Ok(())
     }
 
@@ -320,7 +379,16 @@ impl E2e {
             let secret = st.secret(epoch).ok_or_else(|| E2eError::NoEpoch {
                 peer: peer.to_owned(),
             })?;
+            // Guardarraíl anti-reúso de nonce: fail-closed ANTES de tocar estado.
+            // Con el mismo (época, key_id) el nonce derivado se repetiría.
+            if !st.recent_key_ids.insert(key_id) {
+                return Err(E2eError::KeyIdReuse {
+                    peer: peer.to_owned(),
+                    key_id: key_id.to_owned(),
+                });
+            }
             st.counter += 1;
+            st.epoch_sends += 1;
             (epoch, secret, st.counter)
         };
         header.insert(HDR_E2E_EPOCH.into(), epoch.to_string());
@@ -575,6 +643,7 @@ impl E2e {
     /// tiene el problema del enlace ocioso que se vio en el rekey del QKC.
     pub fn spawn_rekey_loop(self: Arc<Self>) {
         let rekey = Duration::from_secs(self.cfg.rekey_secs.max(1));
+        let rekey_keys = self.cfg.rekey_keys;
         let period = Duration::from_secs((self.cfg.rekey_secs / 4).clamp(5, 300));
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(period);
@@ -585,14 +654,25 @@ impl E2e {
                     let g = self.peers.lock();
                     g.iter()
                         .filter(|(peer, st)| {
-                            self.my_id.as_str() < peer.as_str()
-                                && st.established_at.is_some_and(|t| t.elapsed() >= rekey)
+                            if st.send_epoch.is_none() {
+                                return false;
+                            }
+                            // Por tiempo: solo el lex-menor, para no rotar dos
+                            // veces por época en un par ocioso.
+                            let time_due = self.my_id.as_str() < peer.as_str()
+                                && st.established_at.is_some_and(|t| t.elapsed() >= rekey);
+                            // Por volumen: cualquiera de los dos, porque el que
+                            // acumula el tráfico es quien debe acotar su época.
+                            // Acuerdos concurrentes dan dos épocas, no una con
+                            // dos secretos, así que un doble disparo es seguro.
+                            let volume_due = rekey_keys > 0 && st.epoch_sends >= rekey_keys;
+                            time_due || volume_due
                         })
                         .map(|(p, _)| p.clone())
                         .collect()
                 };
                 for p in due {
-                    debug!(peer = %p, "dkms.e2e rotación por tiempo");
+                    debug!(peer = %p, "dkms.e2e rotación (tiempo o volumen)");
                     self.request_agreement(&p);
                 }
             }
@@ -699,6 +779,49 @@ mod tests {
         let mut h = header("k1");
         let e = a.seal("dkms-b", "k1", &mut h, &[0u8; 32]).unwrap_err();
         assert!(matches!(e, E2eError::NoEpoch { .. }));
+    }
+
+    /// B3 guardarraíl: sellar el MISMO key_id dos veces bajo la misma época
+    /// reusaría el nonce (nonce = HKDF(key_id)); fail-closed. Un key_id distinto
+    /// sí pasa.
+    #[test]
+    fn key_id_reuse_under_the_same_epoch_is_rejected() {
+        let (a, b) = pair();
+        agree(&a, &b);
+        let mut h = header("k1");
+        a.seal("dkms-b", "k1", &mut h, &[1u8; 32]).unwrap();
+        let mut h2 = header("k1");
+        let e = a
+            .seal("dkms-b", "k1", &mut h2, &[2u8; 32])
+            .expect_err("key_id repetido bajo la misma época");
+        assert!(matches!(e, E2eError::KeyIdReuse { .. }), "{e:?}");
+        // Otro key_id sigue valiendo.
+        let mut h3 = header("k2");
+        a.seal("dkms-b", "k2", &mut h3, &[3u8; 32]).unwrap();
+    }
+
+    /// ...pero un key_id repetido bajo OTRA época es inofensivo (secreto
+    /// distinto ⇒ nonce distinto): la rotación limpia la ventana del guardarraíl.
+    #[test]
+    fn a_key_id_may_repeat_across_epochs() {
+        let (a, b) = pair();
+        let e1 = agree(&a, &b);
+        let mut h = header("k1");
+        a.seal("dkms-b", "k1", &mut h, &[1u8; 32]).unwrap();
+        // Nueva época: la ventana se limpia.
+        let e2 = agree(&a, &b);
+        assert_ne!(e1, e2, "rotó a una época nueva");
+        let mut h2 = header("k1");
+        a.seal("dkms-b", "k1", &mut h2, &[2u8; 32])
+            .expect("el mismo key_id vale bajo la época nueva");
+    }
+
+    /// El default de `rekey_keys` está puesto (rotación por volumen activa) y es
+    /// mayor que 0 (`0` la desactivaría).
+    #[test]
+    fn volume_rekey_is_on_by_default() {
+        let cfg = TransportE2eCfg::default();
+        assert!(cfg.rekey_keys > 0, "rekey por volumen activo por defecto");
     }
 
     #[test]
