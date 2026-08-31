@@ -202,6 +202,36 @@ impl LinkFrameAuth {
         }
     }
 
+    /// Espera (solo en el arranque) a que haya material de sello de salida:
+    /// en `PerEpoch`, la primera época del handshake; en `Fixed`, inmediato.
+    /// Evita que los primeros NOTIFY salgan en claro — el receptor con raíz
+    /// los descarta fail-closed y sus claves quedan huérfanas hasta que el
+    /// volumen las repone, que en un enlace parado es nunca. Medido en la
+    /// malla mTLS 2026-08-31 (brazo QKD): el KME local llena antes de que el
+    /// handshake instale la época → 2 NOTIFY en claro rechazados → 256 claves
+    /// ENC a un lado y 0 DEC al otro, indefinidamente. Tras `timeout` se
+    /// sigue (con aviso): un enlace cuyo handshake no converge no debe
+    /// bloquear el refill para siempre — quedará el síntoma histórico, no un
+    /// cuelgue nuevo.
+    pub async fn wait_send_root(&self, timeout: std::time::Duration) {
+        let RootSource::PerEpoch { store, .. } = &self.src else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        while store.highest().is_none() {
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    peer = self.peer_id,
+                    timeout_s = timeout.as_secs(),
+                    "qkc.frame_auth: sin época tras el timeout; los NOTIFY saldrán en claro \
+                     (y un peer con raíz los descartará)"
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// ¿Hay que firmar este kind?
     ///
     /// El NOTIFY siempre que haya raíz: decide qué `key_ID` pide el peer a su
@@ -414,6 +444,40 @@ pub fn authenticate(
 
 #[cfg(test)]
 mod tests {
+    /// `wait_send_root`: con raíz per-época, espera a la primera época (el
+    /// primer NOTIFY nunca sale en claro por la carrera KME-vs-handshake) y
+    /// es no-op con raíz fija.
+    #[tokio::test]
+    async fn wait_send_root_waits_for_the_first_epoch() {
+        use std::time::Duration;
+        let store = crate::pqc_source::SecretStore::new(2, 0);
+        let fa = std::sync::Arc::new(LinkFrameAuth::per_epoch(
+            crate::config::FrameAuth::Require,
+            2,
+            std::sync::Arc::clone(&store),
+        ));
+        let waiter = tokio::spawn({
+            let fa = std::sync::Arc::clone(&fa);
+            async move { fa.wait_send_root(Duration::from_secs(5)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!waiter.is_finished(), "sin época debe seguir esperando");
+        store.insert(0, [7u8; 32]);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("desbloquea al llegar la época")
+            .unwrap();
+        // Raíz fija: inmediato.
+        let fixed =
+            LinkFrameAuth::new(crate::config::FrameAuth::Prefer, 2, Some(vec![9u8; 32])).unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            fixed.wait_send_root(Duration::from_secs(5)),
+        )
+        .await
+        .expect("Fixed no espera");
+    }
+
     use super::*;
     use wire::{FRAME_RECV, FRAME_RECV_AUTH, FRAME_RELAY, FRAME_RELAY_AUTH};
 

@@ -408,6 +408,15 @@ impl KeyStore {
     // ─── Workers de background ─────────────────────────────────────
 
     async fn enc_refill_loop(self: Arc<Self>) {
+        // Con raíz per-época, no pedir claves (ni por tanto emitir el primer
+        // NOTIFY) hasta que el handshake instale la primera época: un NOTIFY
+        // en claro contra un peer con raíz se descarta fail-closed y sus
+        // claves quedan huérfanas. En QKD el KME local gana la carrera al
+        // handshake sin esta espera; en PQC es un no-op (la fuente de claves
+        // ES el handshake). Ver `LinkFrameAuth::wait_send_root`.
+        if let Some(fa) = &self.frame_auth {
+            fa.wait_send_root(Duration::from_secs(30)).await;
+        }
         loop {
             self.enc_low.notified().await;
             // Refill mientras el buffer esté bajo. Una vez arriba,
