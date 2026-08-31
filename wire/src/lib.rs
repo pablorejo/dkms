@@ -158,7 +158,19 @@ pub const GRADE_QKD: u8 = 0;
 pub const GRADE_PQC: u8 = 1;
 
 const FIXED_PREFIX: usize = 4 + 1 + 1 + 4;
-const MAX_TOTAL_LEN: u32 = 64 * 1024 * 1024; // 64 MiB safety cap
+/// Tope del frame COMPLETO, solo del lado lector (cero cambios de bytes).
+///
+/// El lector reserva `total_len` bytes ANTES de leer el cuerpo y antes de
+/// cualquier MAC, así que este número es memoria que un prefijo de 10 bytes
+/// sin autenticar le compra a cualquiera en un listener TCP plano — con 64
+/// MiB, N conexiones ociosas × 64 MiB, y con `panic = "abort"` un fallo de
+/// alloc mata el proceso. El peor frame LEGAL está ~5× por debajo de 1 MiB:
+/// key_ids ≤ 255 ids × 255 B (cuentas u8), cada header MP ≤ 65 535 B (lp16),
+/// payload de datos = 32 B por diseño, NOTIFY ≤ 4 + 128×16 B
+/// (`REFILL_BATCH`), handshake PQC ≤ ~5 KB (ct ML-KEM-1024 + firma ML-DSA).
+/// Ningún productor de ninguna versión pudo emitir más, así que bajarlo es
+/// seguro entre versiones.
+const MAX_TOTAL_LEN: u32 = 1024 * 1024; // 1 MiB
 
 #[derive(Debug, Error)]
 pub enum WireError {
@@ -483,6 +495,40 @@ mod tests {
         f.payload = vec![1, 2, 3];
         let bytes = f.encode();
         assert_eq!(bytes[5], 1, "grade must ride the RESERVED prefix byte");
+    }
+
+    /// El lector rechaza un prefijo que anuncie más de `MAX_TOTAL_LEN` ANTES
+    /// de reservar memoria; y un frame legal deliberadamente gordo (headers
+    /// MP grandes, muy por encima de lo que emite nadie) sigue pasando.
+    #[tokio::test]
+    async fn reader_caps_the_announced_length_before_allocating() {
+        let mut evil = Vec::from(MAGIC);
+        evil.push(FRAME_RECV);
+        evil.push(0);
+        evil.extend_from_slice(&(2 * 1024 * 1024u32).to_le_bytes()); // 2 MiB
+        let mut cursor = std::io::Cursor::new(evil);
+        match read_frame(&mut cursor).await {
+            Err(WireError::TooLarge(n)) => assert_eq!(n, 2 * 1024 * 1024),
+            other => panic!("esperaba TooLarge, fue {other:?}"),
+        }
+
+        let fat = Frame {
+            grade: 0,
+            kind: FRAME_RECV,
+            sender_id: 1,
+            receiver_id: 2,
+            dest_final: 2,
+            key_size_bits: 256,
+            epoch_id: 7,
+            key_ids: vec!["k".repeat(36); 64],
+            header_orr_mp: vec![0xAB; 60_000],
+            header_dkms_mp: vec![0xCD; 60_000],
+            payload: vec![0xEF; 4096],
+        };
+        let mut cursor = std::io::Cursor::new(fat.encode().to_vec());
+        let back = read_frame(&mut cursor).await.expect("frame legal gordo");
+        assert_eq!(back.header_orr_mp.len(), 60_000);
+        assert_eq!(back.epoch_id, 7);
     }
 
     #[test]
