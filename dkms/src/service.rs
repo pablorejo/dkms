@@ -1052,7 +1052,7 @@ impl DkmsService {
                     .recv_no_epoch
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.e2e.request_agreement(&source_dkms);
-                if n == 0 || n.is_multiple_of(1000) {
+                if common::log_throttle::nth_is_loud(n) {
                     warn!(
                         source = %source_dkms,
                         epoch,
