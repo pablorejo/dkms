@@ -92,18 +92,34 @@ pub fn decrypt(
         )));
     }
 
-    // Index by key_id para no asumir orden.
-    let mut by_id = std::collections::HashMap::with_capacity(keys.len());
-    for k in keys {
-        by_id.insert(k.key_id, &k.material[..]);
-    }
+    // Buscar sin asumir orden. El caso de diseño es 1 clave por frame
+    // (payload de 32 B): montar un HashMap era una alloc + SipHash por frame
+    // para un único lookup. Con pocas claves un barrido lineal gana; el mapa
+    // queda para batches grandes.
+    let by_id = if keys.len() > 8 {
+        let mut m = std::collections::HashMap::with_capacity(keys.len());
+        for k in keys {
+            m.insert(k.key_id, &k.material[..]);
+        }
+        Some(m)
+    } else {
+        None
+    };
+    let find = |id: &Uuid| -> Option<&[u8]> {
+        match &by_id {
+            Some(m) => m.get(id).copied(),
+            None => keys
+                .iter()
+                .find(|k| k.key_id == *id)
+                .map(|k| &k.material[..]),
+        }
+    };
 
     let mut out = Vec::with_capacity(ciphertext.len());
     for (i, chunk) in ciphertext.chunks(chunk_bytes).enumerate() {
         let id = &key_ids_order[i];
-        let mat = by_id
-            .get(id)
-            .ok_or_else(|| QkcError::Quditto(format!("missing key for key_id {id}")))?;
+        let mat =
+            find(id).ok_or_else(|| QkcError::Quditto(format!("missing key for key_id {id}")))?;
         if mat.len() < chunk.len() {
             return Err(QkcError::Quditto(format!(
                 "key for {id} is shorter than chunk ({} < {})",
@@ -167,5 +183,17 @@ mod tests {
         keys_rev.reverse();
         let pt2 = decrypt(&ct, &ids, &keys_rev, 32).unwrap();
         assert_eq!(pt, pt2);
+    }
+
+    /// Con >8 claves entra el camino del HashMap (el lineal cubre el caso de
+    /// diseño de 1 clave/frame): mismo resultado con cualquier orden.
+    #[test]
+    fn decrypt_hash_path_with_many_keys() {
+        let pt = vec![0x5c; 12 * 32];
+        let keys: Vec<_> = (1..=12).map(fake_key).collect();
+        let (ct, ids) = encrypt(&pt, &keys).unwrap();
+        let mut keys_rev = keys.clone();
+        keys_rev.reverse();
+        assert_eq!(decrypt(&ct, &ids, &keys_rev, 32).unwrap(), pt);
     }
 }
