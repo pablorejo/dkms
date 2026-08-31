@@ -55,10 +55,16 @@ def with_port(addr, default_port):
 
 def sdn_http_from(grpc_url):
     """The ORR/DKMS point at the SDN's gRPC; registration lives on its HTTP
-    admin. Same host, the HTTP port from PORTS."""
-    rest = str(grpc_url).partition("//")[2] or str(grpc_url)
+    admin. Same host, the HTTP port from PORTS. El ESQUEMA se hereda del
+    sdn_url: una SDN con control_tls se escribe `https://...` en el node.yml
+    de cada módulo y el anuncio sale mTLS — antes esto emitía http:// SIEMPRE,
+    con lo que un despliegue con la SDN en mTLS anunciaba en claro contra un
+    puerto TLS para siempre, sin forma de decirlo en node.yml."""
+    u = str(grpc_url)
+    scheme = "https://" if u.strip().lower().startswith("https://") else "http://"
+    rest = u.partition("//")[2] or u
     host = rest.rstrip("/").rsplit(":", 1)[0]
-    return "http://" + host + ":" + str(PORTS["sdn"]["http"])
+    return scheme + host + ":" + str(PORTS["sdn"]["http"])
 
 
 def url_with_port(url, default_port):

@@ -92,6 +92,30 @@ class OrrGrpcTlsPlacement(unittest.TestCase):
         self.assertEqual(cfg["orr_id"], "orr_1")
 
 
+class SdnHttpUrlScheme(unittest.TestCase):
+    """sdn_http_url hereda el esquema del sdn_url: una SDN con control_tls se
+    escribe https:// en cada node.yml y el anuncio sale mTLS. Antes se emitía
+    http:// siempre y un despliegue con la SDN en mTLS anunciaba en claro
+    contra un puerto TLS para siempre."""
+
+    def test_https_sdn_url_derives_https_announce(self):
+        cfg = render("orr", "orr_id: orr_1\nqkc_id: 1\nsdn_url: https://10.0.0.2:19000\n")
+        self.assertEqual(cfg["sdn_http_url"], "https://10.0.0.2:19002")
+
+    def test_http_sdn_url_stays_http(self):
+        cfg = render("orr", ORR_BASE)
+        self.assertEqual(cfg["sdn_http_url"], "http://10.0.0.2:19002")
+
+    def test_dkms_inherits_the_scheme_too(self):
+        cfg = render(
+            "dkms",
+            "node_id: dkms-1\nadvertise_ip: 10.0.0.7\n"
+            "sdn_endpoint: https://10.0.0.2:19000\n"
+            "sae_bindings: {sae_1: dkms-1}\n",
+        )
+        self.assertEqual(cfg["southbound"]["sdn_http_url"], "https://10.0.0.2:19002")
+
+
 class SdnControlTls(unittest.TestCase):
     def test_cert_name_names_the_tls_paths(self):
         cfg = render("sdn", "control_tls: true\ncert_name: sdn-madrid\n")

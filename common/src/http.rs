@@ -61,6 +61,21 @@ pub fn announcer_client(
 ) -> anyhow::Result<Client> {
     let base = Client::builder().timeout(timeout);
     if !url_is_https(url) {
+        if tls.is_some() {
+            // No se sube el esquema a la fuerza: el DKMS siempre tiene [tls]
+            // (su plano SAE) y el ORR casi siempre (grpc_tls), así que
+            // "tengo certs" NO implica "el SDN habla TLS" — un upgrade aquí
+            // rompería todo despliegue con la SDN en claro (el default).
+            // Pero sí se dice: si el SDN corre control_tls, el node.yml debe
+            // llevar https:// en sdn_url (el render deriva sdn_http_url con
+            // el mismo esquema desde 2026-08-31).
+            tracing::warn!(
+                %url,
+                "anuncio al SDN en claro aunque hay material [tls] de cliente: cualquiera \
+                 con red puede registrar nodos; si tu SDN corre control_tls escribe \
+                 https:// en su URL"
+            );
+        }
         return Ok(base.build()?);
     }
     let Some(tls) = tls else {
