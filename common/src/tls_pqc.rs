@@ -10,7 +10,7 @@
 //!     draft-tls-mldsa; interopera con la verificación de aws-lc-rs).
 //!   * `pqc_crypto_provider()` — clona el provider aws-lc-rs por defecto y le
 //!     añade ML-DSA tanto en la verificación (`signature_verification_algorithms`)
-//!     como en la carga de claves (`key_provider`, con fallback a RSA/ECDSA/EdDSA).
+//!     como en la carga de claves (`key_provider`; clásico solo con el opt-in de migración).
 //!
 //! Los certs ML-DSA se generan con openssl 3.5+ (`req -newkey ML-DSA-65`).
 
@@ -79,11 +79,17 @@ impl Signer for MlDsa65Signer {
     }
 }
 
-/// `KeyProvider` que carga claves ML-DSA-65 y, si no lo son, delega en el
-/// provider aws-lc-rs por defecto (RSA/ECDSA/EdDSA). Así conviven certs
-/// clásicos y post-cuánticos durante la migración.
+/// `KeyProvider` que carga claves ML-DSA-65. Por DEFECTO una clave que no es
+/// ML-DSA es un **error**: hasta 2026-08-31 delegaba en el provider clásico
+/// con un `debug!` que nadie ve, así que un nodo desplegado por accidente con
+/// una clave RSA arrancaba, firmaba el handshake con RSA y la única evidencia
+/// quedaba apagada — justo el downgrade silencioso que el resto del módulo
+/// prohíbe. Con el opt-in de migración ([`classical_certs_allowed`]) delega,
+/// pero avisando alto.
 #[derive(Debug)]
-struct PqcKeyProvider;
+struct PqcKeyProvider {
+    classical: bool,
+}
 
 impl KeyProvider for PqcKeyProvider {
     fn load_private_key(
@@ -98,8 +104,17 @@ impl KeyProvider for PqcKeyProvider {
                 return Ok(Arc::new(k));
             }
         }
-        tracing::debug!(
-            "tls_pqc: clave no-ML-DSA; delego en el provider clásico (RSA/ECDSA/EdDSA)"
+        if !self.classical {
+            return Err(Error::General(
+                "clave privada no-ML-DSA en un runtime PQC-only: regenera la identidad con \
+                 docker/gen-certs.sh (ML-DSA-65) o, SOLO para migración, arranca con \
+                 DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1"
+                    .into(),
+            ));
+        }
+        tracing::warn!(
+            "tls_pqc: clave no-ML-DSA cargada por el opt-in de migración — este nodo FIRMA \
+             con criptografía clásica, no post-cuántica"
         );
         aws_lc_rs::default_provider()
             .key_provider
@@ -219,7 +234,8 @@ pub(crate) fn verify_algs(
     verify_supported().all
 }
 
-static PQC_KEY_PROVIDER: PqcKeyProvider = PqcKeyProvider;
+static PQC_KEY_PROVIDER_STRICT: PqcKeyProvider = PqcKeyProvider { classical: false };
+static PQC_KEY_PROVIDER_CLASSICAL: PqcKeyProvider = PqcKeyProvider { classical: true };
 
 /// Construye el `CryptoProvider` con firma ML-DSA. Base:
 /// `aws_lc_rs::default_provider()`. La política de certs clásicos la decide
@@ -231,7 +247,11 @@ fn build_provider() -> CryptoProvider {
 fn build_provider_with(classical: bool) -> CryptoProvider {
     let mut provider = aws_lc_rs::default_provider();
     provider.signature_verification_algorithms = *verify_supported_for(classical);
-    provider.key_provider = &PQC_KEY_PROVIDER;
+    provider.key_provider = if classical {
+        &PQC_KEY_PROVIDER_CLASSICAL
+    } else {
+        &PQC_KEY_PROVIDER_STRICT
+    };
 
     // Intercambio de claves HÍBRIDO post-cuántico, y SOLO ese.
     //
@@ -631,6 +651,18 @@ mod tests {
             "un cert RSA no debe autenticar con la política ML-DSA-only"
         );
         handshake(true).expect("con DKMS_TLS_ACCEPT_CLASSICAL_CERTS el RSA de migración funciona");
+
+        // Y la carga de la CLAVE, aislada del handshake: el KeyProvider
+        // estricto rechaza la RSA con el mensaje accionable; el permisivo la
+        // carga (delegando en aws-lc-rs).
+        let key = PrivateKeyDer::from_pem_file(dir.join("srv.key")).unwrap();
+        let err = PQC_KEY_PROVIDER_STRICT
+            .load_private_key(key.clone_key())
+            .expect_err("clave RSA con provider estricto");
+        assert!(err.to_string().contains("DKMS_TLS_ACCEPT_CLASSICAL_CERTS"));
+        PQC_KEY_PROVIDER_CLASSICAL
+            .load_private_key(key)
+            .expect("clave RSA con el opt-in de migración");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
