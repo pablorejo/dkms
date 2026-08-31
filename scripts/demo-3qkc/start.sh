@@ -101,9 +101,10 @@ wait_for_http() {
 
 # ─── 4. Arrancar qudittos ─────────────────────────────────────────────
 echo "── arrancando qudittos…"
-start_bg quditto-A "$ROOT/target/release/quditto" \
+# --tls off explícito: sidecars en 127.0.0.1 (el default del binario es mTLS).
+start_bg quditto-A "$ROOT/target/release/quditto" --tls off \
     --listen 127.0.0.1:8081 --r0 10000000 --alpha 0 --distance 0 --max-buffer 1048576 --key-size-bits 1024
-start_bg quditto-B "$ROOT/target/release/quditto" \
+start_bg quditto-B "$ROOT/target/release/quditto" --tls off \
     --listen 127.0.0.1:8082 --r0 10000000 --alpha 0 --distance 0 --max-buffer 1048576 --key-size-bits 1024
 
 wait_for_http "http://127.0.0.1:8081/healthz" "quditto-A" 15

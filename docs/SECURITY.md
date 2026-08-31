@@ -46,7 +46,7 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | pubkey firmada ML-DSA + **mTLS por defecto** (`grpc_tls`, identidad de nodo, CA de red) | hecho (6, 8) | 6, 8 |
 | DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) — o sí, si se separan | **mTLS por defecto** (`grpc_tls` en el ORR, `orr_tls` en el DKMS; certs de nodo ML-DSA-65, CA de red). En claro sólo con opt-out explícito en los dos extremos | hecho (8) | 8 |
 | ORR↔QKC (gRPC) | interno | no | ninguna | ninguna — red interna obligatoria | — |
-| QKC↔KME/quditto (ETSI-014) | `quditto_url` | no (KME propio) | ninguna | ninguna — red interna obligatoria | — |
+| QKC↔KME/quditto (ETSI-014) | `quditto_url` | no (KME propio) | **mTLS por defecto** (2026-08-31: quditto sirve TLS con cert cliente obligatorio net-ca; el QKC presenta su identidad de nodo con `quditto_url` https). En claro solo con el opt-out explícito `QUDITTO_TLS=off` / `tls: false` (sidecar co-localizado) | hecho | — |
 | DKMS gRPC `DkmsControl` | `listen.grpc_addr` :50054 | no (operador) | **ninguna** (`Drain` borra buffers con 1 RPC) | bind localhost por defecto | 7 |
 | /metrics (todos) | :9100–:9103 | no | ninguna | bind configurable | 7 |
 

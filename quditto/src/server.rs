@@ -51,12 +51,25 @@ pub fn router(svc: QudittoService) -> Router {
         .with_state(svc)
 }
 
-pub async fn serve(svc: QudittoService, addr: &str) -> anyhow::Result<()> {
+/// Sirve el ETSI-014. Con `tls` (el default del binario) el listener va con
+/// mTLS y cert de cliente obligatorio: por este canal viajan los pads OTP en
+/// claro dentro del body. `None` solo con el opt-out explícito
+/// (`QUDITTO_TLS=off`, sidecar co-localizado).
+pub async fn serve(
+    svc: QudittoService,
+    addr: &str,
+    tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    info!(addr = %bound, "quditto HTTP ETSI 014 listening");
-    axum::serve(listener, router(svc)).await?;
-    Ok(())
+    match tls {
+        Some(cfg) => crate::tls_server::serve_mtls(listener, cfg, router(svc)).await,
+        None => {
+            info!(addr = %bound, "quditto HTTP ETSI 014 listening (EN CLARO, QUDITTO_TLS=off)");
+            axum::serve(listener, router(svc)).await?;
+            Ok(())
+        }
+    }
 }
 
 // ─────────────────────────── helpers ─────────────────────────────

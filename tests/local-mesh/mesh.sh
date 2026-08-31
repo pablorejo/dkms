@@ -512,7 +512,9 @@ if [ -n "\$QD_LINES" ]; then
   while read -r idx a b; do
     [ -n "\$idx" ] || continue
     mark "quditto\$idx"
-    nohup "$BIN/quditto" --listen "127.0.0.1:\$((28000 + idx))" \
+    # QUDITTO_TLS=off explícito: aquí quditto y sus dos QKCs comparten
+    # 127.0.0.1 (el caso sidecar documentado); el default del binario es mTLS.
+    QUDITTO_TLS=off nohup "$BIN/quditto" --listen "127.0.0.1:\$((28000 + idx))" \
         --r0 __R0__ --alpha __ALPHA__ --distance __DIST__ \
         > "$DIR/logs/quditto\$idx.log" 2>&1 &
     echo \$! > "$DIR/logs/quditto\$idx.pid"

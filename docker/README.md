@@ -655,21 +655,31 @@ docker compose -f quditto.yml up -d
 docker compose -f quditto.yml logs -f   # sano: "minter started ... rate_kps=..."
 ```
 
+**mTLS por defecto (2026-08-31).** Por este ETSI-014 viajan los pads OTP:
+quditto sirve TLS (híbrido PQC + cert ML-DSA) con cert de cliente OBLIGATORIO
+de la `net-ca`, y el QKC le presenta su identidad de nodo cuando `kme_url` es
+`https` (su `[tls]`, el mismo material del anuncio). Certs: `gen-certs.sh
+quditto <ip> ./certs` montados en `./certs`. `tls: false` en su node.yml lo
+deja en claro — SOLO si el QKC consumidor corre en el mismo host.
+
 Comprobación:
 
 ```bash
-curl -s http://localhost:20010/api/v1/keys/1/status
+curl -s --cert certs/qkc-1.crt --key certs/qkc-1.key --cacert certs/net-ca.crt \
+     https://localhost:20010/api/v1/keys/1/status
 # {"source_KME_ID":"quditto", ..., "stored_key_count":8192, "key_size":256}
 ```
 
-En el `node.yml` de **los dos** QKC del enlace basta con apuntar al simulador:
+En el `node.yml` de **los dos** QKC del enlace basta con apuntar al simulador
+(el render antepone `https://` si no escribes esquema; `http://` explícito solo
+contra un quditto con `tls: false`):
 
 ```yaml
 links:
   - neighbor_id: 2
     neighbor_addr: "10.0.0.12"
     type: qkd
-    kme_url: "http://10.0.0.50:20010"
+    kme_url: "10.0.0.50:20010"
     r0: 2000          # los mismos que el node.yml del quditto
     alpha: 0.2
     distance_km: 5
@@ -686,7 +696,9 @@ extremos no coinciden entre sí, y se queda con el primero que llegó.
 
 Escape hatch: si no montas `node.yml`, el contenedor arranca con las variables
 `QUDITTO_R0`, `QUDITTO_ALPHA`, `QUDITTO_DISTANCE`, `QUDITTO_MAX_BUFFER`,
-`QUDITTO_KEY_SIZE_BITS` y `QUDITTO_LISTEN` del entorno.
+`QUDITTO_KEY_SIZE_BITS`, `QUDITTO_LISTEN` y las de TLS (`QUDITTO_TLS=on|off`,
+`QUDITTO_TLS_CERT/KEY/CLIENT_CA`) del entorno — sin certs ni `QUDITTO_TLS=off`
+no arranca, y dice qué le falta.
 
 ---
 

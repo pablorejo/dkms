@@ -44,6 +44,24 @@ struct Cli {
     /// Otros valores fallan en validación.
     #[arg(long, default_value_t = 256, env = "QUDITTO_KEY_SIZE_BITS")]
     key_size_bits: u32,
+
+    /// TLS del ETSI-014: `on` (mTLS, default — por este canal viajan los pads
+    /// OTP) u `off` (claro; SOLO si el QKC y este quditto comparten host).
+    #[arg(long, default_value = "on", env = "QUDITTO_TLS")]
+    tls: String,
+
+    /// Cert de servidor (PEM, firmado por la CA de red). Obligatorio con
+    /// `--tls on`.
+    #[arg(long, env = "QUDITTO_TLS_CERT")]
+    tls_cert: Option<std::path::PathBuf>,
+
+    /// Clave privada del cert (PEM, ML-DSA seed-only de gen-certs.sh).
+    #[arg(long, env = "QUDITTO_TLS_KEY")]
+    tls_key: Option<std::path::PathBuf>,
+
+    /// CA de red: verifica el cert cliente del QKC (obligatorio con TLS).
+    #[arg(long, env = "QUDITTO_TLS_CLIENT_CA")]
+    tls_client_ca: Option<std::path::PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -74,7 +92,41 @@ async fn main() -> Result<()> {
         eprintln!("invalid config: {e}");
         std::process::exit(2);
     }
-    info!(?cfg, "quditto starting");
+    // mTLS POR DEFECTO (2026-08-31): este servidor entrega los pads OTP en el
+    // body — en claro, quien lea el canal lee la clave del enlace sin
+    // criptoanálisis ninguno. Sin certs no se arranca (y se dice qué falta);
+    // el claro es un opt-out explícito, como grpc_tls.
+    let tls = match cli.tls.to_ascii_lowercase().as_str() {
+        "on" | "1" | "true" => {
+            let (Some(cert), Some(key), Some(ca)) =
+                (&cli.tls_cert, &cli.tls_key, &cli.tls_client_ca)
+            else {
+                anyhow::bail!(
+                    "quditto sirve material de clave: su ETSI-014 va con mTLS por defecto y \
+                     faltan --tls-cert/--tls-key/--tls-client-ca (env QUDITTO_TLS_CERT/KEY/\
+                     CLIENT_CA). Genera la identidad con docker/gen-certs.sh <id> <ip> ./certs \
+                     o, SOLO si el QKC y este quditto comparten host o red interna de \
+                     confianza, arranca con QUDITTO_TLS=off"
+                );
+            };
+            // Con identidad ya hay algo que auto-comprobar: el mismo
+            // self-check de arranque que los otros binarios.
+            common::tls_pqc::self_check_hybrid_kx_files(cert, key).map_err(anyhow::Error::msg)?;
+            Some(
+                common::tls::server_config(cert, key, Some(ca))
+                    .map_err(|e| anyhow::anyhow!("quditto [tls]: {e}"))?,
+            )
+        }
+        "off" | "0" | "false" => {
+            tracing::warn!(
+                "quditto ETSI-014 EN CLARO (QUDITTO_TLS=off): los pads OTP viajan sin cifrar — \
+                 solo mismo host o red interna de confianza"
+            );
+            None
+        }
+        other => anyhow::bail!("--tls '{other}' no es on|off"),
+    };
+    info!(?cfg, tls = tls.is_some(), "quditto starting");
 
     let svc = QudittoService::new(cfg);
 
@@ -85,7 +137,7 @@ async fn main() -> Result<()> {
     let http = tokio::spawn({
         let svc = svc.clone();
         let addr = cli.listen.clone();
-        async move { quditto::server::serve(svc, &addr).await }
+        async move { quditto::server::serve(svc, &addr, tls).await }
     });
 
     tokio::select! {

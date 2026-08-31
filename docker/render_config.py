@@ -411,6 +411,20 @@ def render_quditto(n, out):
         ("QUDITTO_MAX_BUFFER", str(int(n.get("max_buffer", 8192)))),
         ("QUDITTO_KEY_SIZE_BITS", str(int(n.get("key_size_bits", 256)))),
     ]
+    # mTLS por defecto: por este ETSI-014 viajan los pads OTP. `tls: false`
+    # (claro) SOLO si el QKC consumidor corre en el mismo host — y entonces su
+    # quditto_url debe ser http://. Certs: gen-certs.sh <cert_name> <ip>.
+    if n.get("tls", True):
+        certs = n.get("certs_dir", "/config/certs")
+        cert = str(n.get("cert_name", "quditto"))
+        env += [
+            ("QUDITTO_TLS", "on"),
+            ("QUDITTO_TLS_CERT", certs + "/" + cert + ".crt"),
+            ("QUDITTO_TLS_KEY", certs + "/" + cert + ".key"),
+            ("QUDITTO_TLS_CLIENT_CA", certs + "/net-ca.crt"),
+        ]
+    else:
+        env += [("QUDITTO_TLS", "off")]
     write(os.path.join(out, "quditto.env"),
           "".join("export " + k + "=" + v + "\n" for k, v in env))
 

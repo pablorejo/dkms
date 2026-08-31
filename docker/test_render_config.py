@@ -116,6 +116,35 @@ class SdnHttpUrlScheme(unittest.TestCase):
         self.assertEqual(cfg["southbound"]["sdn_http_url"], "https://10.0.0.2:19002")
 
 
+class QudittoTls(unittest.TestCase):
+    """El ETSI-014 de quditto va con mTLS POR DEFECTO (sirve los pads OTP);
+    `tls: false` es el opt-out explícito del caso sidecar."""
+
+    def _env(self, node_yaml):
+        text = render_raw("quditto", node_yaml)
+        out = {}
+        for line in text.splitlines():
+            k, _, v = line.removeprefix("export ").partition("=")
+            out[k] = v
+        return out
+
+    def test_default_is_mtls_with_cert_paths(self):
+        env = self._env("r0: 2000\n")
+        self.assertEqual(env["QUDITTO_TLS"], "on")
+        self.assertEqual(env["QUDITTO_TLS_CERT"], "/config/certs/quditto.crt")
+        self.assertEqual(env["QUDITTO_TLS_KEY"], "/config/certs/quditto.key")
+        self.assertEqual(env["QUDITTO_TLS_CLIENT_CA"], "/config/certs/net-ca.crt")
+
+    def test_cert_name_is_honored(self):
+        env = self._env("r0: 2000\ncert_name: quditto-3\n")
+        self.assertEqual(env["QUDITTO_TLS_CERT"], "/config/certs/quditto-3.crt")
+
+    def test_explicit_opt_out(self):
+        env = self._env("r0: 2000\ntls: false\n")
+        self.assertEqual(env["QUDITTO_TLS"], "off")
+        self.assertNotIn("QUDITTO_TLS_CERT", env)
+
+
 class SdnControlTls(unittest.TestCase):
     def test_cert_name_names_the_tls_paths(self):
         cfg = render("sdn", "control_tls: true\ncert_name: sdn-madrid\n")

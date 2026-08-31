@@ -19,3 +19,10 @@ distance_km: 5             # longitud del enlace simulado
 # listen_ip: "0.0.0.0"
 # ports:
 #   http: 20010
+
+# El ETSI-014 sirve mTLS POR DEFECTO (por él viajan los pads OTP): certs de
+# gen-certs.sh en ./certs (quditto.crt/.key + net-ca.crt; `cert_name` para otro
+# nombre) y los QKC dialan https con su cert de nodo. `tls: false` lo deja en
+# claro — SOLO si el QKC consumidor corre en esta misma máquina.
+# tls: true
+# cert_name: quditto

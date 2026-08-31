@@ -33,6 +33,9 @@ tokio = { workspace = true }
 axum  = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
+hyper-util = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 
 # Serialización / CLI / errores / logging.
 serde              = { workspace = true }

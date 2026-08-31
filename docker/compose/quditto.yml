@@ -7,8 +7,10 @@
 #   docker compose -f quditto.yml pull && docker compose -f quditto.yml up -d
 #   docker compose -f quditto.yml logs -f
 #
-# Comprobación rápida (puerto por defecto 20010):
-#   curl -s http://localhost:20010/api/v1/keys/1/status
+# Comprobación rápida (puerto por defecto 20010; mTLS por defecto, así que
+# hace falta el cert de cliente — con `tls: false` en node.yml vale http):
+#   curl -s --cert certs/qkc-1.crt --key certs/qkc-1.key --cacert certs/net-ca.crt \
+#        https://localhost:20010/api/v1/keys/1/status
 services:
   quditto:
     image: ${IMAGE_PREFIX:-ORG}/quditto:${TAG:-latest}
@@ -16,3 +18,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
+      # certs: el ETSI-014 sirve mTLS POR DEFECTO (por él viajan los pads
+      # OTP): quditto.crt/.key + net-ca.crt de gen-certs.sh. Solo sobra con
+      # `tls: false` en node.yml (QKC co-localizado).
+      - ./certs:/config/certs:ro

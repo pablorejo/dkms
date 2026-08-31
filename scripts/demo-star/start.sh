@@ -108,7 +108,8 @@ QD_NAMES=("qd-1a" "qd-1b" "qd-2a" "qd-2b" "qd-3a" "qd-3b" "qd-4a" "qd-4b")
 for i in "${!QD_PORTS[@]}"; do
     port=${QD_PORTS[$i]}
     name=${QD_NAMES[$i]}
-    start_bg "$name" "$ROOT/target/release/quditto" \
+    # --tls off explícito: sidecars en 127.0.0.1 (el default es mTLS).
+    start_bg "$name" "$ROOT/target/release/quditto" --tls off \
         --listen "127.0.0.1:$port" \
         --r0 "$QD_R0" --alpha "$QD_ALPHA" --distance "$QD_DISTANCE_KM" \
         --max-buffer "$QD_BUFFER" --key-size-bits "$QD_KEY_BITS"
