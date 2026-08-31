@@ -498,8 +498,12 @@ el path es byte-idéntico al actual (frames 0x21/0x22). Cambios:
     forma seed-only (`openssl genpkey -provparam ml-dsa.output_formats=seed-only`),
     y webpki necesita el feature `aws-lc-rs-unstable`.
     **CABLEADO Y COMPLETO (2026-08-27)**: `common::tls::{server_config,
-    client_config,client_config_mtls}` usan `pqc_crypto_provider()`
-    (retrocompatible: RSA/ECDSA siguen funcionando, y además ML-DSA).
+    client_config,client_config_mtls}` usan `pqc_crypto_provider()`.
+    **Desde 2026-08-31 la verificación es ML-DSA-only POR DEFECTO** — la
+    autenticación sigue la misma regla que el KX («sin respaldo clásico en
+    ningún plano»); RSA/ECDSA solo con el opt-in de migración
+    `DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1` (warn! al activarlo), y también la
+    verificación de anuncios firmados (`cert_identity`) usa la tabla vigente.
     `gen-certs.sh KEY_ALG=ml-dsa-65` emite certs ML-DSA (claves seed-only).
     Verificado: `public_api_loads_ml_dsa_certs_needs_openssl35` (la API pública carga certs
     ML-DSA) + el handshake mTLS completo. gen-certs produce certs con

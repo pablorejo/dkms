@@ -48,7 +48,8 @@ case "$KEY_ALG" in
   ml-dsa-65|ml-dsa|mldsa|mldsa65)
     if ! openssl list -public-key-algorithms 2>/dev/null | grep -qi "ML-DSA"; then
       echo "[gen-certs] FATAL: $(openssl version) no genera ML-DSA (hace falta OpenSSL >= 3.5)." >&2
-      echo "[gen-certs]        Genera los certs en otra máquina y tráelos, o KEY_ALG=rsa (no PQC)." >&2
+      echo "[gen-certs]        Genera los certs en otra máquina y tráelos, o KEY_ALG=rsa (no PQC;" >&2
+      echo "[gen-certs]        además el verificador necesita DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1)." >&2
       exit 1
     fi ;;
 esac

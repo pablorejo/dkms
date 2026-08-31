@@ -107,9 +107,18 @@ impl KeyProvider for PqcKeyProvider {
     }
 }
 
-/// Algoritmos de verificación: los clásicos del provider aws-lc-rs **más**
-/// ML-DSA-65. `&'static` como exige `WebPkiSupportedAlgorithms`.
-pub(crate) static VERIFY_ALGS: &[&dyn rustls::pki_types::SignatureVerificationAlgorithm] = &[
+/// Algoritmos de verificación por DEFECTO: **solo ML-DSA-65**. Desde el
+/// 2026-08-31 la autenticación sigue la misma regla que el intercambio de
+/// claves ("sin respaldo clásico en ningún plano"): un cert RSA/ECDSA firmado
+/// por la misma CA autenticaba igual, y eso dejaba la *identidad* rompible
+/// clásicamente aunque el KX fuese híbrido. Lo clásico queda detrás del
+/// opt-in explícito de migración [`classical_certs_allowed`].
+static VERIFY_ALGS_PQC: &[&dyn rustls::pki_types::SignatureVerificationAlgorithm] =
+    &[webpki::aws_lc_rs::ML_DSA_65];
+
+/// Tabla de MIGRACIÓN: los clásicos del provider aws-lc-rs además de
+/// ML-DSA-65. Solo activa con `DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1`.
+static VERIFY_ALGS_CLASSICAL: &[&dyn rustls::pki_types::SignatureVerificationAlgorithm] = &[
     webpki::aws_lc_rs::ML_DSA_65,
     webpki::aws_lc_rs::ECDSA_P256_SHA256,
     webpki::aws_lc_rs::ECDSA_P384_SHA384,
@@ -120,11 +129,14 @@ pub(crate) static VERIFY_ALGS: &[&dyn rustls::pki_types::SignatureVerificationAl
     webpki::aws_lc_rs::RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
 ];
 
-/// Mapeo `SignatureScheme → algoritmos` (TLS 1.2 y selección de esquema).
-/// ML-DSA-65 más los clásicos, para no romper el mTLS RSA/ECDSA durante la
-/// migración.
 #[allow(clippy::type_complexity)]
-static VERIFY_MAPPING: &[(
+static VERIFY_MAPPING_PQC: &[(
+    SignatureScheme,
+    &[&dyn rustls::pki_types::SignatureVerificationAlgorithm],
+)] = &[(SignatureScheme::ML_DSA_65, &[webpki::aws_lc_rs::ML_DSA_65])];
+
+#[allow(clippy::type_complexity)]
+static VERIFY_MAPPING_CLASSICAL: &[(
     SignatureScheme,
     &[&dyn rustls::pki_types::SignatureVerificationAlgorithm],
 )] = &[
@@ -156,13 +168,69 @@ static VERIFY_MAPPING: &[(
     ),
 ];
 
+const VERIFY_SUPPORTED_PQC: rustls::crypto::WebPkiSupportedAlgorithms =
+    rustls::crypto::WebPkiSupportedAlgorithms {
+        all: VERIFY_ALGS_PQC,
+        mapping: VERIFY_MAPPING_PQC,
+    };
+
+const VERIFY_SUPPORTED_CLASSICAL: rustls::crypto::WebPkiSupportedAlgorithms =
+    rustls::crypto::WebPkiSupportedAlgorithms {
+        all: VERIFY_ALGS_CLASSICAL,
+        mapping: VERIFY_MAPPING_CLASSICAL,
+    };
+
+/// ¿Está activo el opt-in de migración que acepta certificados clásicos
+/// (RSA/ECDSA/Ed25519) además de ML-DSA? `DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1`.
+/// Se lee UNA vez (el provider se instala una vez por proceso) y avisa alto:
+/// con él puesto la autenticación TLS deja de ser post-cuántica.
+pub fn classical_certs_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        let on = std::env::var("DKMS_TLS_ACCEPT_CLASSICAL_CERTS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if on {
+            tracing::warn!(
+                "tls_pqc: DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1 — se aceptan certificados \
+                 RSA/ECDSA: la AUTENTICACIÓN TLS deja de ser post-cuántica (solo migración)"
+            );
+        }
+        on
+    })
+}
+
+fn verify_supported_for(classical: bool) -> &'static rustls::crypto::WebPkiSupportedAlgorithms {
+    if classical {
+        &VERIFY_SUPPORTED_CLASSICAL
+    } else {
+        &VERIFY_SUPPORTED_PQC
+    }
+}
+
+fn verify_supported() -> &'static rustls::crypto::WebPkiSupportedAlgorithms {
+    verify_supported_for(classical_certs_allowed())
+}
+
+/// La lista de algoritmos de verificación vigente (para `webpki` fuera de
+/// rustls, p. ej. la verificación de anuncios firmados de `cert_identity`).
+pub(crate) fn verify_algs(
+) -> &'static [&'static dyn rustls::pki_types::SignatureVerificationAlgorithm] {
+    verify_supported().all
+}
+
 static PQC_KEY_PROVIDER: PqcKeyProvider = PqcKeyProvider;
 
-/// Construye el `CryptoProvider` con ML-DSA (+ clásicos). Base:
-/// `aws_lc_rs::default_provider()`.
+/// Construye el `CryptoProvider` con firma ML-DSA. Base:
+/// `aws_lc_rs::default_provider()`. La política de certs clásicos la decide
+/// [`classical_certs_allowed`]; `build_provider_with` es la costura de test.
 fn build_provider() -> CryptoProvider {
+    build_provider_with(classical_certs_allowed())
+}
+
+fn build_provider_with(classical: bool) -> CryptoProvider {
     let mut provider = aws_lc_rs::default_provider();
-    provider.signature_verification_algorithms = VERIFY_SUPPORTED;
+    provider.signature_verification_algorithms = *verify_supported_for(classical);
     provider.key_provider = &PQC_KEY_PROVIDER;
 
     // Intercambio de claves HÍBRIDO post-cuántico, y SOLO ese.
@@ -191,19 +259,11 @@ fn build_provider() -> CryptoProvider {
     provider
 }
 
-/// Algoritmos de verificación de firma del provider PQC (ML-DSA-65 más los
-/// clásicos), en la forma que rustls consume.
-const VERIFY_SUPPORTED: rustls::crypto::WebPkiSupportedAlgorithms =
-    rustls::crypto::WebPkiSupportedAlgorithms {
-        all: VERIFY_ALGS,
-        mapping: VERIFY_MAPPING,
-    };
-
 /// El único grupo de intercambio de claves que este código negocia.
 pub const REQUIRED_KX_GROUP: rustls::NamedGroup = rustls::NamedGroup::X25519MLKEM768;
 
-/// Provider criptográfico con firma ML-DSA en certificados, además de los
-/// algoritmos clásicos.
+/// Provider criptográfico con firma ML-DSA en certificados (los clásicos
+/// solo con el opt-in de migración, ver [`classical_certs_allowed`]).
 pub fn pqc_crypto_provider() -> Arc<CryptoProvider> {
     Arc::new(build_provider())
 }
@@ -232,7 +292,7 @@ impl rustls::client::danger::ServerCertVerifier for TrustAnything {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &VERIFY_SUPPORTED)
+        rustls::crypto::verify_tls12_signature(message, cert, dss, verify_supported())
     }
 
     fn verify_tls13_signature(
@@ -241,11 +301,11 @@ impl rustls::client::danger::ServerCertVerifier for TrustAnything {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &VERIFY_SUPPORTED)
+        rustls::crypto::verify_tls13_signature(message, cert, dss, verify_supported())
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        VERIFY_SUPPORTED.supported_schemes()
+        verify_supported().supported_schemes()
     }
 }
 
@@ -361,7 +421,9 @@ pub fn install_process_default() -> bool {
     let installed = build_provider().install_default().is_ok();
     if installed {
         tracing::info!(
-            "tls_pqc: provider PQC (ML-DSA + clásicos) instalado como default del proceso"
+            classical_certs = classical_certs_allowed(),
+            "tls_pqc: provider PQC instalado como default del proceso (certs: ML-DSA-only \
+             salvo opt-in de migración)"
         );
     } else {
         // Ya había un provider (p. ej. otro install anterior). reqwest/tonic
@@ -436,6 +498,140 @@ mod tests {
             .iter()
             .any(|(scheme, _)| *scheme == SignatureScheme::ML_DSA_65));
         assert!(!p.signature_verification_algorithms.all.is_empty());
+    }
+
+    /// La política por defecto verifica SOLO ML-DSA-65; los clásicos existen
+    /// únicamente detrás del opt-in de migración. Si alguien re-añade RSA a
+    /// la tabla por defecto, esto lo dice antes que un despliegue.
+    #[test]
+    fn default_verification_is_ml_dsa_only_and_classical_is_opt_in() {
+        let strict = build_provider_with(false);
+        let schemes: Vec<_> = strict
+            .signature_verification_algorithms
+            .mapping
+            .iter()
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(schemes, vec![SignatureScheme::ML_DSA_65]);
+
+        let permissive = build_provider_with(true);
+        let has = |s: SignatureScheme| {
+            permissive
+                .signature_verification_algorithms
+                .mapping
+                .iter()
+                .any(|(x, _)| *x == s)
+        };
+        assert!(has(SignatureScheme::ML_DSA_65));
+        assert!(has(SignatureScheme::RSA_PSS_SHA256));
+        assert!(has(SignatureScheme::ECDSA_NISTP256_SHA256));
+    }
+
+    /// End-to-end negativo: un servidor con certificado RSA (generable con
+    /// CUALQUIER openssl, sin skip) no puede completar el handshake contra la
+    /// política por defecto — el cliente solo anuncia ML_DSA_65 — y sí lo
+    /// completa con el opt-in clásico. La carga de la clave RSA en el lado
+    /// servidor pasa por el KeyProvider permisivo, que es el camino de
+    /// migración real.
+    #[test]
+    fn rsa_certs_fail_by_default_and_work_with_the_migration_opt_in() {
+        use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+
+        let dir = std::env::temp_dir().join(format!("tls_rsa_optin_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = |f: &str| dir.join(f).to_str().unwrap().to_string();
+        assert!(openssl(&[
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-out",
+            &p("ca.key")
+        ]));
+        assert!(openssl(&[
+            "req",
+            "-x509",
+            "-key",
+            &p("ca.key"),
+            "-out",
+            &p("ca.crt"),
+            "-days",
+            "2",
+            "-subj",
+            "/CN=rsa-ca",
+        ]));
+        assert!(openssl(&[
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-out",
+            &p("srv.key")
+        ]));
+        assert!(openssl(&[
+            "req",
+            "-new",
+            "-key",
+            &p("srv.key"),
+            "-out",
+            &p("srv.csr"),
+            "-subj",
+            "/CN=srv",
+        ]));
+        let ext = dir.join("srv.ext");
+        std::fs::write(
+            &ext,
+            "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n",
+        )
+        .unwrap();
+        assert!(openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            &p("srv.csr"),
+            "-CA",
+            &p("ca.crt"),
+            "-CAkey",
+            &p("ca.key"),
+            "-CAcreateserial",
+            "-days",
+            "2",
+            "-out",
+            &p("srv.crt"),
+            "-extfile",
+            ext.to_str().unwrap(),
+        ]));
+
+        let handshake = |classical: bool| -> Result<rustls::NamedGroup, String> {
+            let provider = Arc::new(build_provider_with(classical));
+            let certs: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_file_iter(dir.join("srv.crt"))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+            let key = PrivateKeyDer::from_pem_file(dir.join("srv.key")).unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            for c in CertificateDer::pem_file_iter(dir.join("ca.crt")).unwrap() {
+                roots.add(c.unwrap()).unwrap();
+            }
+            let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| e.to_string())?
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|e| e.to_string())?;
+            let client = rustls::ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| e.to_string())?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            handshake_in_memory(Arc::new(server), Arc::new(client))
+        };
+
+        assert!(
+            handshake(false).is_err(),
+            "un cert RSA no debe autenticar con la política ML-DSA-only"
+        );
+        handshake(true).expect("con DKMS_TLS_ACCEPT_CLASSICAL_CERTS el RSA de migración funciona");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn openssl(args: &[&str]) -> bool {

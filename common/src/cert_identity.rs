@@ -130,7 +130,7 @@ pub fn verify_node_cert(
         .map(|c| CertificateDer::from(c.as_slice()))
         .collect();
     ee.verify_for_usage(
-        crate::tls_pqc::VERIFY_ALGS,
+        crate::tls_pqc::verify_algs(),
         &anchors,
         &intermediates,
         UnixTime::now(),

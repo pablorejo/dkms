@@ -713,9 +713,13 @@ cert de cliente firmado por la CA común **con la identidad en el SAN**:
 ### Requisitos del cliente SAE (léelo antes de culpar al DKMS)
 
 El plano SAE es TLS 1.3 **solo con el intercambio híbrido post-cuántico
-`X25519MLKEM768`** y, por defecto, certificados **ML-DSA-65**. No hay respaldo
-clásico: un cliente que no ofrezca ese grupo no negocia y ve un
-`handshake failure` (el DKMS lo registra como `tls handshake failed`). Vale:
+`X25519MLKEM768`** y certificados **ML-DSA-65**. No hay respaldo clásico en
+ninguno de los dos: un cliente que no ofrezca ese grupo no negocia y ve un
+`handshake failure` (el DKMS lo registra como `tls handshake failed`), y desde
+2026-08-31 un certificado RSA/ECDSA tampoco autentica — la verificación es
+ML-DSA-only salvo que el nodo verificador arranque con el opt-in de migración
+`DKMS_TLS_ACCEPT_CLASSICAL_CERTS=1` (avisa alto: la autenticación deja de ser
+post-cuántica). Vale:
 
 - **OpenSSL ≥ 3.5** debajo del cliente (`openssl version`; en Python
   `python3 -c 'import ssl; print(ssl.OPENSSL_VERSION)'`). `curl`, `requests`,
