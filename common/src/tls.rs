@@ -46,8 +46,14 @@ pub fn server_config(
     // Provider con ML-DSA (§Fase 5/6 PQC) además de RSA/ECDSA/EdDSA: acepta
     // certs post-cuánticos y clásicos (retrocompatible durante la migración).
     let provider = crate::tls_pqc::pqc_crypto_provider();
+    // Solo TLS 1.3, explícito: el único grupo de intercambio del provider
+    // (X25519MLKEM768) no existe en 1.2, así que con «safe defaults» un
+    // cliente 1.2 moría igual pero como un error de KX opaco — y el
+    // self-check de arranque (tls_pqc) pina 1.3, con lo que no cubría la
+    // config que corre de verdad. Ahora builder y self-check son la misma
+    // política y un cliente 1.2 recibe un alert de versión limpio.
     let builder = ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(TlsError::Rustls)?;
     let mut cfg = if let Some(ca) = client_ca {
         let mut roots = RootCertStore::empty();
@@ -81,7 +87,7 @@ pub fn client_config(ca_path: Option<&Path>) -> Result<Arc<ClientConfig>, TlsErr
     let provider = crate::tls_pqc::pqc_crypto_provider();
     Ok(Arc::new(
         ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(TlsError::Rustls)?
             .with_root_certificates(roots)
             .with_no_client_auth(),
@@ -107,7 +113,7 @@ pub fn client_config_mtls(
     let provider = crate::tls_pqc::pqc_crypto_provider();
     Ok(Arc::new(
         ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(TlsError::Rustls)?
             .with_root_certificates(roots)
             .with_client_auth_cert(certs, key)?,
@@ -219,18 +225,24 @@ mod tests {
         }
 
         // Las funciones públicas cargan y construyen las configs con certs ML-DSA.
-        server_config(
+        let srv = server_config(
             &dir.join("srv.crt"),
             &dir.join("srv.key"),
             Some(&dir.join("ca.crt")),
         )
         .expect("server_config con cert ML-DSA");
-        client_config_mtls(
+        let cli = client_config_mtls(
             Some(&dir.join("ca.crt")),
             &dir.join("cli.crt"),
             &dir.join("cli.key"),
         )
         .expect("client_config_mtls con cert ML-DSA");
+        // Y el handshake real entre las DOS configs de producción (no las del
+        // self-check) negocia el híbrido: mismo camino que un peer de verdad,
+        // con TLS 1.3-only, mTLS y firma ML-DSA de por medio.
+        let kx = crate::tls_pqc::handshake_in_memory(srv, cli)
+            .expect("handshake con los builders de producción");
+        assert_eq!(kx, crate::tls_pqc::REQUIRED_KX_GROUP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
