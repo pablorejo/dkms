@@ -81,6 +81,15 @@ pub struct LinkRuntime {
     pub frame_auth: Option<Arc<crate::frame_auth::LinkFrameAuth>>,
 }
 
+/// Bytes mínimos de la raíz simétrica de autenticación de enlace (`link_psk`).
+/// 32 B = 256 bits, quantum-safe (Grover deja 128 efectivos).
+pub const MIN_LINK_ROOT_BYTES: usize = 32;
+
+/// `true` si una raíz de enlace decodificada tiene fuerza suficiente.
+fn strong_link_root(len: usize) -> bool {
+    len >= MIN_LINK_ROOT_BYTES
+}
+
 #[derive(Clone)]
 pub struct QkcService {
     pub cfg: Arc<QkcConfig>,
@@ -191,10 +200,30 @@ impl QkcService {
                             })
                             .ok()
                     };
+                    // La raíz de la autenticación de enlace es simétrica y
+                    // debe ser quantum-safe: 256 bits (Grover deja 128). Una
+                    // PSK presente pero más corta es casi siempre un typo, y
+                    // dejarla pasar da falsa sensación de seguridad. Se avisa
+                    // alto y se ignora (como el base64 inválido); si el modo
+                    // exige auth (`require`), el arranque falla luego por falta
+                    // de PSK, que es justo lo que se quiere.
                     let psk = link
                         .link_psk
                         .as_deref()
-                        .and_then(|b| decode_b64(b, "link_psk"));
+                        .and_then(|b| decode_b64(b, "link_psk"))
+                        .and_then(|k| {
+                            if strong_link_root(k.len()) {
+                                Some(k)
+                            } else {
+                                tracing::warn!(
+                                    neighbor = link.neighbor_id,
+                                    len = k.len(),
+                                    min = MIN_LINK_ROOT_BYTES,
+                                    "link_psk de menos de 32 B (no quantum-safe); se ignora"
+                                );
+                                None
+                            }
+                        });
                     // Modo `sign` (Fase 5 upgrade, ML-DSA): seed de firma de este
                     // nodo + clave pública de verificación del peer.
                     let sign_seed = cfg
@@ -502,6 +531,15 @@ impl QkcService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_root_must_be_256_bits() {
+        assert!(!strong_link_root(0));
+        assert!(!strong_link_root(16));
+        assert!(!strong_link_root(31));
+        assert!(strong_link_root(32));
+        assert!(strong_link_root(64));
+    }
 
     fn cfg_with(links: Vec<LinkConfig>) -> QkcConfig {
         QkcConfig {
