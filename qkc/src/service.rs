@@ -213,7 +213,11 @@ impl QkcService {
         {
             // La fuente de claves depende del tipo de enlace; el resto del
             // KeyStore es idéntico (mismo hot path, mismo NOTIFY).
-            let (kme, pqc): (Arc<dyn KeySource>, Option<Arc<PqcHandshake>>) = match link.link_type {
+            let (kme, pqc, pqc_store): (
+                Arc<dyn KeySource>,
+                Option<Arc<PqcHandshake>>,
+                Option<Arc<SecretStore>>,
+            ) = match link.link_type {
                 LinkType::Qkd => {
                     let url = link.quditto_url.clone().ok_or_else(|| {
                         QkcError::BadRequest(format!(
@@ -229,7 +233,7 @@ impl QkcService {
                         link.key_size_bits,
                         cfg.tls.as_ref().map(|t| t.as_client_tls()),
                     )?);
-                    (c as Arc<dyn KeySource>, None)
+                    (c as Arc<dyn KeySource>, None, None)
                 }
                 LinkType::Pqc => {
                     // Re-keying por épocas (forward secrecy): el SecretStore +
@@ -305,13 +309,14 @@ impl QkcService {
                     );
                     // El reloj solo lo alimenta el emisor del lado iniciador; el
                     // respondedor sigue la rotación vía store.highest().
+                    let store_for_fa = Arc::clone(&store);
                     let src = Arc::new(PqcKeySource::new(
                         link.key_size_bits,
                         store,
                         lookahead,
                         is_initiator.then(|| Arc::clone(&clock)),
                     ));
-                    (src as Arc<dyn KeySource>, Some(hs))
+                    (src as Arc<dyn KeySource>, Some(hs), Some(store_for_fa))
                 }
             };
             // La clave del enlace autentica los NOTIFY (ver KeyStore::verify_notify).
@@ -325,22 +330,33 @@ impl QkcService {
             // NOTIFY. En `require` sin PSK se falla el arranque: seguir
             // adelante sería correr sin autenticar creyendo que sí, que es
             // exactamente lo que el flag existe para impedir.
-            if link.frame_auth.rejects_plaintext() && notify_psk.is_none() {
+            if link.frame_auth.rejects_plaintext() && notify_psk.is_none() && pqc_store.is_none() {
                 return Err(QkcError::BadRequest(format!(
-                    "enlace {}: frame_auth = require exige link_psk",
+                    "enlace {}: frame_auth = require exige link_psk o un enlace PQC (secreto de enlace)",
                     link.neighbor_id
                 )));
             }
-            let frame_auth = crate::frame_auth::LinkFrameAuth::new(
-                link.frame_auth,
-                link.neighbor_id,
-                notify_psk,
-            )
+            // Raíz del MAC de frames, por orden de preferencia:
+            //   1. `link_psk` explícita (raíz fija, QKD o PQC con psk).
+            //   2. el secreto del enlace PQC (per-epoch, sin PSK que repartir;
+            //      la autenticación la hereda del handshake firmado con cert).
+            // Si no hay ninguna, no hay MAC (comportamiento histórico).
+            let frame_auth = if notify_psk.is_some() {
+                crate::frame_auth::LinkFrameAuth::new(link.frame_auth, link.neighbor_id, notify_psk)
+            } else {
+                pqc_store.map(|store| {
+                    crate::frame_auth::LinkFrameAuth::per_epoch(
+                        link.frame_auth,
+                        link.neighbor_id,
+                        store,
+                    )
+                })
+            }
             .map(Arc::new);
             if link.frame_auth.signs() && frame_auth.is_none() {
                 warn!(
                     peer = link.neighbor_id,
-                    "qkc.frame_auth: modo prefer sin link_psk; los frames van sin MAC"
+                    "qkc.frame_auth: modo prefer sin raíz (ni link_psk ni enlace PQC); frames sin MAC"
                 );
             }
             let keys = KeyStore::new(

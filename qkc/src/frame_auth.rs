@@ -26,6 +26,7 @@ use wire::{Frame, AUTH_TRAILER_LEN};
 use zeroize::Zeroizing;
 
 use crate::config::FrameAuth;
+use crate::pqc_source::SecretStore;
 
 /// Por qué se ha rechazado un frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -51,17 +52,35 @@ pub struct FrameAuthStats {
     pub plaintext_rejected: AtomicU64,
 }
 
+/// De dónde sale la raíz del MAC de frames.
+enum RootSource {
+    /// `link_psk`: raíz simétrica fija, compartida por config. La `session` es
+    /// una encarnación aleatoria por arranque (distingue reinicios de un
+    /// replay).
+    Fixed {
+        root: Zeroizing<Vec<u8>>,
+        session: u64,
+        send_key: Zeroizing<[u8; 32]>,
+    },
+    /// Secreto del enlace PQC: la raíz es el secreto de la ÉPOCA del enlace
+    /// (que ya rota sola con el handshake) y la `session` del frame ES esa
+    /// época. No hay PSK que repartir — la autenticación la hereda del
+    /// handshake, que va firmado con el certificado de nodo. Cada rotación
+    /// cambia la raíz; el receptor deriva con el secreto de la época que trae
+    /// el propio frame. Si aún no tiene ese secreto (rotación en vuelo), el
+    /// frame se descarta y se regenera, nunca se acepta sin verificar.
+    PerEpoch {
+        store: Arc<SecretStore>,
+        /// Caché del emisor: `(época, clave)`. La época de envío es `highest`.
+        send_cache: Mutex<Option<(u32, Zeroizing<[u8; 32]>)>>,
+    },
+}
+
 pub struct LinkFrameAuth {
     mode: FrameAuth,
     peer_id: u32,
-    /// Raíz del enlace (`link_psk`). Simétrica: la misma en los dos extremos.
-    root: Zeroizing<Vec<u8>>,
-    /// Nuestra encarnación para este enlace, aleatoria por arranque de proceso.
-    /// Sin ella, un reinicio volvería al contador 1 y nuestros frames legítimos
-    /// serían indistinguibles de un replay para el peer.
-    session: u64,
-    /// Clave de salida, derivada de (raíz, nuestra sesión).
-    send_key: Zeroizing<[u8; 32]>,
+    /// Fuente de la raíz del MAC: PSK fija o secreto de época del enlace.
+    src: RootSource,
     /// Contador monotónico de salida. El primer frame lleva 1.
     counter: AtomicU64,
     /// Ventana anti-replay de entrada y clave cacheada de la sesión del peer.
@@ -93,28 +112,94 @@ impl LinkFrameAuth {
         // los logs cuesta nada y evita confusiones al leerlos.
         let session = u64::from_be_bytes(session_bytes).max(1);
         let send_key = Zeroizing::new(frame_mac::derive_key(&root, session));
-        info!(peer = peer_id, ?mode, session, "qkc.frame_auth.enabled");
-        Some(Self {
+        info!(
+            peer = peer_id,
+            ?mode,
+            session,
+            root = "psk",
+            "qkc.frame_auth.enabled"
+        );
+        Some(Self::with_source(
             mode,
             peer_id,
-            root: Zeroizing::new(root),
-            session,
-            send_key,
+            RootSource::Fixed {
+                root: Zeroizing::new(root),
+                session,
+                send_key,
+            },
+        ))
+    }
+
+    /// Como [`new`](Self::new) pero derivando la raíz del **secreto del enlace
+    /// PQC** (ver [`RootSource::PerEpoch`]): no necesita `link_psk`, la
+    /// autenticación la hereda del handshake firmado con el cert. El sello se
+    /// activa en cuanto el handshake establece la primera época.
+    pub fn per_epoch(mode: FrameAuth, peer_id: u32, store: Arc<SecretStore>) -> Self {
+        info!(
+            peer = peer_id,
+            ?mode,
+            root = "pqc-epoch",
+            "qkc.frame_auth.enabled"
+        );
+        Self::with_source(
+            mode,
+            peer_id,
+            RootSource::PerEpoch {
+                store,
+                send_cache: Mutex::new(None),
+            },
+        )
+    }
+
+    fn with_source(mode: FrameAuth, peer_id: u32, src: RootSource) -> Self {
+        Self {
+            mode,
+            peer_id,
+            src,
             counter: AtomicU64::new(0),
             recv: Mutex::new(RecvState {
                 window: ReplayWindow::new(DEFAULT_WINDOW),
                 cached: None,
             }),
             stats: Arc::new(FrameAuthStats::default()),
-        })
+        }
     }
 
     pub fn mode(&self) -> FrameAuth {
         self.mode
     }
 
+    /// Sesión de salida actual (para el log). Con PSK es la encarnación fija;
+    /// con secreto de época es la época activa (0 si aún no hay ninguna).
     pub fn session(&self) -> u64 {
-        self.session
+        match &self.src {
+            RootSource::Fixed { session, .. } => *session,
+            RootSource::PerEpoch { store, .. } => store.highest().map(u64::from).unwrap_or(0),
+        }
+    }
+
+    /// Material de salida `(session, clave)`. `None` en `PerEpoch` si el
+    /// handshake aún no estableció ninguna época (el enlace tampoco tendría
+    /// material OTP que enviar, así que no se llega a sellar en la práctica).
+    fn send_material(&self) -> Option<(u64, Zeroizing<[u8; 32]>)> {
+        match &self.src {
+            RootSource::Fixed {
+                session, send_key, ..
+            } => Some((*session, send_key.clone())),
+            RootSource::PerEpoch { store, send_cache } => {
+                let epoch = store.highest()?;
+                let mut c = send_cache.lock();
+                if let Some((e, k)) = &*c {
+                    if *e == epoch {
+                        return Some((u64::from(epoch), k.clone()));
+                    }
+                }
+                let secret = store.get(epoch)?;
+                let k = Zeroizing::new(frame_mac::derive_key(secret.as_ref(), u64::from(epoch)));
+                *c = Some((epoch, k.clone()));
+                Some((u64::from(epoch), k))
+            }
+        }
     }
 
     /// ¿Hay que firmar este kind?
@@ -142,12 +227,17 @@ impl LinkFrameAuth {
         if !self.seals(frame.kind) {
             return;
         }
+        // Sin material (PerEpoch antes de la primera época) no se sella; el
+        // relay no habría llegado aquí porque tampoco hay OTP que cifrar.
+        let Some((session, send_key)) = self.send_material() else {
+            return;
+        };
         let counter = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
         let tag = {
             let aad = FrameAad {
                 kind: auth_kind,
                 grade: frame.grade,
-                session: self.session,
+                session,
                 counter,
                 sender_id: frame.sender_id,
                 receiver_id: frame.receiver_id,
@@ -159,23 +249,32 @@ impl LinkFrameAuth {
                 header_dkms_mp: &frame.header_dkms_mp,
                 body: &frame.payload,
             };
-            frame_mac::tag(&self.send_key, &aad)
+            frame_mac::tag(&send_key, &aad)
         };
-        wire::append_auth_trailer(&mut frame.payload, self.session, counter, &tag);
+        wire::append_auth_trailer(&mut frame.payload, session, counter, &tag);
         frame.kind = auth_kind;
         self.stats.signed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clave de la sesión del peer, cacheada. `recv` ya está bloqueado.
-    fn peer_key(st: &mut RecvState, root: &[u8], session: u64) -> Zeroizing<[u8; 32]> {
+    /// `None` en `PerEpoch` si aún no tenemos el secreto de esa época (el
+    /// emisor rotó y su frame llegó antes de que el handshake nos instalase la
+    /// época): el frame se descarta como si el MAC no cuadrara.
+    fn peer_key(&self, st: &mut RecvState, session: u64) -> Option<Zeroizing<[u8; 32]>> {
         if let Some((s, k)) = &st.cached {
             if *s == session {
-                return k.clone();
+                return Some(k.clone());
             }
         }
-        let k = Zeroizing::new(frame_mac::derive_key(root, session));
+        let k = match &self.src {
+            RootSource::Fixed { root, .. } => Zeroizing::new(frame_mac::derive_key(root, session)),
+            RootSource::PerEpoch { store, .. } => {
+                let secret = store.get(session as u32)?;
+                Zeroizing::new(frame_mac::derive_key(secret.as_ref(), session))
+            }
+        };
         st.cached = Some((session, k.clone()));
-        k
+        Some(k)
     }
 
     /// Verifica un frame autenticado, comprueba la frescura y lo deja como el
@@ -186,7 +285,13 @@ impl LinkFrameAuth {
             let (body, session, counter, tag) =
                 wire::split_auth_trailer(&frame.payload).map_err(|_| FrameAuthError::Truncated)?;
             let mut st = self.recv.lock();
-            let key = Self::peer_key(&mut st, &self.root, session);
+            let Some(key) = self.peer_key(&mut st, session) else {
+                // PerEpoch sin el secreto de esa época todavía: descartar como
+                // un MAC que no cuadra (el emisor lo regenerará; el lookahead
+                // del handshake hace que esta ventana sea rara y breve).
+                self.stats.bad_mac.fetch_add(1, Ordering::Relaxed);
+                return Err(FrameAuthError::BadMac);
+            };
             let aad = FrameAad {
                 kind: frame.kind,
                 grade: frame.grade,
@@ -316,6 +421,44 @@ mod tests {
 
     fn mk(mode: FrameAuth) -> LinkFrameAuth {
         LinkFrameAuth::new(mode, 2, Some(ROOT.to_vec())).unwrap()
+    }
+
+    /// Raíz per-época: sella con el secreto de la época del enlace (el que el
+    /// handshake ya negocia), sin `link_psk`. Round-trip, rotación y el frame
+    /// cuya época el receptor aún no tiene.
+    #[test]
+    fn per_epoch_seals_with_the_link_secret_and_rotates() {
+        use crate::pqc_source::SecretStore;
+        // Dos stores (los dos extremos) con el MISMO secreto por época, que es
+        // lo que el handshake ML-KEM garantiza.
+        let a = SecretStore::new(2, 0);
+        let b = SecretStore::new(2, 0);
+        a.insert(5, [0x11; 32]);
+        b.insert(5, [0x11; 32]);
+        let tx = LinkFrameAuth::per_epoch(FrameAuth::Require, 2, a.clone());
+        let rx = LinkFrameAuth::per_epoch(FrameAuth::Require, 2, b.clone());
+
+        // Round-trip con la época 5.
+        let mut f = frame(FRAME_RECV);
+        tx.seal(&mut f);
+        assert_eq!(f.kind, FRAME_RECV_AUTH, "se selló con el secreto de época");
+        rx.open(&mut f).unwrap();
+        assert_eq!(f.kind, FRAME_RECV);
+
+        // Rotación: ambos instalan la época 6; el emisor sella con la nueva
+        // (highest) y el receptor la sigue.
+        a.insert(6, [0x22; 32]);
+        b.insert(6, [0x22; 32]);
+        let mut f2 = frame(FRAME_RECV);
+        tx.seal(&mut f2);
+        rx.open(&mut f2).unwrap();
+
+        // Un frame cuya época el receptor aún no tiene se descarta (no se
+        // acepta sin verificar).
+        a.insert(7, [0x33; 32]); // solo el emisor
+        let mut f3 = frame(FRAME_RECV);
+        tx.seal(&mut f3);
+        assert!(matches!(rx.open(&mut f3), Err(FrameAuthError::BadMac)));
     }
 
     fn frame(kind: u8) -> Frame {
