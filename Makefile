@@ -28,7 +28,7 @@ IMMUTABLE_TAG   ?= $(TAG)-$(GIT_SHA)
 
 ALL_RUST        := dkms orr qkc sdn quditto
 
-.PHONY: help check fmt clippy test images push
+.PHONY: help check fmt clippy test rendercheck images push
 
 # ──────────────────────────────────────────────────────────────────────
 # help
@@ -60,8 +60,11 @@ clippy: ## cargo clippy --workspace --all-targets -- -D warnings
 test: ## cargo test --workspace
 	@cargo test --workspace
 
+rendercheck: ## tests of the node.yml -> TOML renderer (docker/render_config.py)
+	@python3 -m unittest discover -s docker -p "test_*.py"
+
 check: export DKMS_NO_TEST_SKIPS = 1
-check: fmt clippy test ## fmt + clippy + test, in that order (no test skips)
+check: fmt clippy rendercheck test ## fmt + clippy + rendercheck + test (no skips)
 
 # ──────────────────────────────────────────────────────────────────────
 # Build (local, no push).

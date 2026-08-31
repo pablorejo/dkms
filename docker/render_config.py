@@ -225,20 +225,23 @@ def render_orr(n, out):
             lines.append("advertise_ip = " + q(n["advertise_ip"]))
         if n.get("sdn_announce_secs") is not None:
             lines.append("sdn_announce_secs = " + str(int(n["sdn_announce_secs"])))
-    peers = n.get("peers") or {}           # orr_id -> qkc_id
-    if peers:
-        lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
     # grpc_tls: mTLS en el gRPC del ORR (DKMS↔ORR y ORR↔ORR). ACTIVADO por
     # defecto: por ese gRPC viaja el material de transporte. Exige la identidad
     # de nodo del ORR —certs/<orr_id>.crt/.key + net-ca.crt—, así que el bloque
     # [tls] sale siempre que grpc_tls esté puesto, haya o no control_tls.
     # `grpc_tls: false` lo deja en claro (sólo DKMS y ORR en la misma máquina o
     # red interna de confianza) y entonces [tls] sólo sale con control_tls.
-    # Va ANTES del bloque [tls]: en TOML una clave suelta después de una tabla
-    # pertenece a la tabla, y `tls.grpc_tls` no es lo mismo que `grpc_tls`
-    # (pasó: el ORR arrancaba en claro con la opción "puesta").
+    # Es un ESCALAR: va antes de CUALQUIER tabla, no solo de [tls]. En TOML una
+    # clave suelta tras una tabla pertenece a esa tabla, y ya pasó dos veces:
+    # `tls.grpc_tls` (el ORR arrancaba en claro con la opción "puesta") y
+    # `peers.grpc_tls` (se emitía después de [peers]: config-rs coercionaba el
+    # bool a un peer fantasma `grpc_tls -> 1` y el opt-out `grpc_tls: false`
+    # se ignoraba en silencio). Lo fija test_render_config.py.
     grpc_tls = n.get("grpc_tls", True)
     lines.append("grpc_tls = " + ("true" if grpc_tls else "false"))
+    peers = n.get("peers") or {}           # orr_id -> qkc_id
+    if peers:
+        lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
     orr_cert = n.get("cert_name", req(n, "orr_id", "orr"))
     lines += control_tls_lines(n, orr_cert, "client", force=bool(grpc_tls))
     pvk = n.get("peer_verify_keys") or {}  # orr_id -> base64(ML-DSA verify key)

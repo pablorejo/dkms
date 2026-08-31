@@ -22,12 +22,14 @@ jobs:
 
       # protoc para common/build.rs; cmake + clang/libclang porque highs-sys
       # compila HiGHS con cmake y genera los bindings con bindgen; openssl
-      # (CLI) para los tests que emiten certificados.
+      # (CLI) para los tests que emiten certificados; python3 + python3-yaml
+      # para los tests del renderer de node.yml (make rendercheck).
       - name: system deps
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            protobuf-compiler cmake clang libclang-dev make openssl
+            protobuf-compiler cmake clang libclang-dev make openssl \
+            python3 python3-yaml
           openssl version
 
       - uses: Swatinem/rust-cache@v2
