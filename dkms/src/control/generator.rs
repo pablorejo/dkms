@@ -155,13 +155,7 @@ impl Generator {
                 );
             }
         }
-        // Prefer the explicit advertised endpoint (DNS-routable in K8s)
-        // over the bind SocketAddr (which would stringify as 0.0.0.0:PORT).
-        let ack_endpoint = cfg
-            .generator
-            .ack_advertised_endpoint
-            .clone()
-            .or_else(|| cfg.generator.ack_socket_addr.map(|a| a.to_string()));
+        let ack_endpoint = advertised_ack_endpoint(&cfg.generator);
         Self {
             cfg: Arc::new(cfg.generator.clone()),
             my_dkms_id: cfg.node_id.clone(),
@@ -1132,5 +1126,48 @@ impl Generator {
                 (None, None) => unreachable!("loop guarantees one branch"),
             }
         }
+    }
+}
+
+/// El `ack_endpoint` que viaja en la cabecera de cada `DKMS_BUFFER`: el
+/// anunciado explícito (rutable) o, si no, el bind del socket — pero SOLO si
+/// el listener corre de verdad (`ack_socket_listen`). Los peers en etsi020 no
+/// lo dialan nunca; anunciarlo con el listener apagado ponía un endpoint
+/// muerto en cada clave y el connect fallido aparecía en el nodo equivocado.
+fn advertised_ack_endpoint(g: &GeneratorCfg) -> Option<String> {
+    g.ack_socket_listen
+        .then(|| {
+            g.ack_advertised_endpoint
+                .clone()
+                .or_else(|| g.ack_socket_addr.map(|a| a.to_string()))
+        })
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ack_endpoint_is_not_advertised_when_the_listener_is_off() {
+        let mut g = GeneratorCfg {
+            ack_advertised_endpoint: Some("10.0.0.7:20009".into()),
+            ..GeneratorCfg::default()
+        };
+        assert_eq!(
+            advertised_ack_endpoint(&g).as_deref(),
+            Some("10.0.0.7:20009")
+        );
+
+        g.ack_socket_listen = false;
+        assert_eq!(advertised_ack_endpoint(&g), None);
+
+        g.ack_socket_listen = true;
+        g.ack_advertised_endpoint = None;
+        g.ack_socket_addr = Some("0.0.0.0:20009".parse().unwrap());
+        assert_eq!(
+            advertised_ack_endpoint(&g).as_deref(),
+            Some("0.0.0.0:20009")
+        );
     }
 }
