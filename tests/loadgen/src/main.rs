@@ -121,8 +121,8 @@ fn build_client(args: &Args) -> Result<reqwest::Client> {
 /// `--roundtrip` cada lado del par usa su propio cert de SAE.
 fn build_client_as(args: &Args, sae: &str) -> Result<reqwest::Client> {
     let ca_path = args.certs.join("net-ca.crt");
-    let cert_path = args.certs.join(format!("{}.crt", sae));
-    let key_path = args.certs.join(format!("{}.key", sae));
+    let cert_path = args.certs.join(format!("{sae}.crt"));
+    let key_path = args.certs.join(format!("{sae}.key"));
 
     let mut bundle = std::fs::read(&cert_path)
         .with_context(|| format!("leyendo cert de cliente {}", cert_path.display()))?;
