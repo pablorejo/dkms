@@ -11,10 +11,17 @@
 //!                 L=32)
 //! ```
 //!
-//! y sella con `AES-256-GCM(K, nonce aleatorio, plaintext, aad)`. En el wire
-//! la capa es `nonce(12) ‖ ciphertext ‖ tag(16)`. El receptor, que tiene el
-//! mismo `master_secret`, deriva la misma K con el `key_id` (que viaja en
-//! cleartext en `header_orr_mp`) y abre.
+//! y sella con AES-256-GCM en modo *detached*: el payload del wire es SOLO el
+//! ciphertext (mismo tamaño que el plaintext), el tag viaja aparte —en
+//! `OrrHeader.tag` la capa externa, en `InnerLayer.tag` las internas— y el
+//! nonce ni siquiera viaja: se deriva de `key_id` junto a la K
+//! (`layer_nonce`), así que cada K se usa con exactamente un nonce y el reúso
+//! GCM es imposible por construcción. Todo byte añadido al payload cuesta
+//! material QKD por salto (el chunker OTP gasta una clave por bloque de
+//! `key_size_bits/8`): meter `nonce ‖ tag` dentro midió un −51 % en el brazo
+//! QKD, y por eso van fuera. El receptor, que tiene el mismo
+//! `master_secret`, deriva la misma K y nonce con el `key_id` (cleartext en
+//! `header_orr_mp`) y abre.
 //!
 //! ## Por qué AEAD y no XOR
 //!
@@ -32,10 +39,12 @@
 //! más barato: antes se expandía HKDF byte a byte sobre todo el mensaje; ahora
 //! son 32 B de HKDF y AES-NI para el resto.
 //!
-//! El `aad` ata la capa a la cabecera **en claro** que la acompaña —`key_id`,
-//! `epoch_id` y `max_hops`—, de modo que un QKC del camino no puede mover una
-//! capa válida a otra época ni cambiarle el `max_hops` para que el destino la
-//! entregue en vez de reenviarla.
+//! El `aad` ata la capa a lo que la acompaña **en claro** —`key_id`,
+//! `epoch_id`, `max_hops`, `session ‖ counter` (la frescura del origen, ver
+//! `onion_replay`) y la cabecera DKMS—, de modo que un QKC del camino no
+//! puede mover una capa válida a otra época, cambiarle el `max_hops` para que
+//! el destino la entregue en vez de reenviarla, rejuvenecer un frame viejo ni
+//! recolocar la cebolla bajo otra cabecera DKMS.
 //!
 //! ## Construcción multi-capa
 //!
@@ -75,18 +84,14 @@
 //!
 //! ## Tamaño (vs. esquema v2)
 //!
-//! `InnerLayer` msgpack-named overhead ≈ 45 B (next_orr_id ~22 B +
-//! key_id 18 B + length prefix 3 B + struct overhead 4 B), más 28 B de
-//! `nonce ‖ tag` por capa. Crecimiento **lineal** en nº de hops:
-//!
-//! ```text
-//! modo 0 (passthrough):  64 B
-//! modo 1 (1 capa):       64 + 28 = 92 B
-//! modo 2 (2 capas):      64 + 28 + 45 + 28 = 165 B
-//! modo -1 (3 capas):     64 + 2·(45 + 28) + 28 ≈ 238 B
-//! ```
-//!
-//! El esquema v2 (`Vec<kem_ct>` per layer) explotaba a ~4 MB en modo -1.
+//! La capa externa no añade NADA al payload (ciphertext = tamaño del
+//! plaintext; su tag va en `OrrHeader.tag` y el nonce se deriva): en modo 1,
+//! un body de 32 B viaja como payload de 32 B y el OTP gasta exactamente lo
+//! mismo que en passthrough. Cada capa **interna** (modos ≥2 / -1) envuelve
+//! la anterior en un `InnerLayer` msgpack —`next_orr_id`, `epoch_id`,
+//! `key_id` (18 B como `bin`), su `tag` (16 B) y el ciphertext— unas decenas
+//! de bytes por hop: crecimiento **lineal** en nº de hops. El esquema v2
+//! (`Vec<kem_ct>` por capa, ~1,1 KB cada uno) explotaba a ~4 MB en modo -1.
 
 use common::crypto::aead::TAG_LEN;
 use hkdf::Hkdf;

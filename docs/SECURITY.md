@@ -39,7 +39,7 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 | DKMS↔DKMS (ETSI-020) | `listen.peer_addr` :8444 | **sí** | mTLS real, pero identidad no comprobada y CA colapsada | mTLS + binding SAN==origen | 2, 4 |
 | DKMS↔DKMS ACK socket | `peer_addr`+1000 (auto) | **sí** | **ninguna** (TCP plano, identidad = campo JSON) | eliminado — ACKs por ETSI-020 | 4 |
 | todos↔SDN (HTTP admin) | SDN `http_addr` :19002 | **sí** | en claro por defecto; **mTLS + identity binding con `control_tls`** (`[tls]` del SDN) | mTLS por defecto cuando el testbed lo valide | 3 |
-| SDN→QKC (push forwarding) | QKC `admin_http` :20002 | **sí** | en claro por defecto; **mTLS con `[tls]` en ambos** (2026-08-31: QKC sirve con cert cliente obligatorio net-ca; SDN empuja https con su cert). `POST /forwarding-table` = decidir por dónde viaja cada frame OTP | mTLS por defecto cuando el testbed lo valide | 3 |
+| SDN→QKC (push forwarding) | QKC `admin_http` :20002 | **sí** | en claro por defecto; **mTLS con `[tls]` en ambos** (2026-08-31: QKC sirve con cert cliente obligatorio net-ca; SDN empuja https con su cert) y **el POST solo lo autoriza la identidad `sdn` del cert** (Fase 10 B1b: otro miembro de la red no reescribe rutas ajenas). `POST /forwarding-table` = decidir por dónde viaja cada frame OTP | mTLS por defecto cuando el testbed lo valide | 3 |
 | todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
 | QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
 | ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
@@ -741,8 +741,9 @@ cubre el contenido deja el frame repetido igual de válido. En las dos capas la
 pareja es `(session, counter)`: `session` es una encarnación aleatoria por
 arranque de proceso —sin ella, un emisor que reinicia vuelve al contador 1 y sus
 mensajes legítimos son indistinguibles de un replay— y `counter` un monotónico.
-El receptor lleva una ventana deslizante (1024) y un conjunto de sesiones
-retiradas. En la cebolla, `(session, counter)` los pone el ORR de **origen** y
+El receptor lleva una ventana deslizante (1024 en el MAC de enlace; 65 536 en
+la cebolla, holgada para la reordenación del multipath WCMP) y un conjunto de
+sesiones retiradas. En la cebolla, `(session, counter)` los pone el ORR de **origen** y
 entran en el AAD de todas las capas: el que reenvía tiene que copiarlos tal
 cual, porque si los cambia el peel del salto siguiente falla.
 
@@ -752,12 +753,17 @@ cual, porque si los cambia el peel del salto siguiente falla.
   cualquiera tira la ventana del receptor mandando basura con una `session`
   inventada; con el MAC delante hace falta la clave para siquiera proponer una
   sesión nueva.
-- **Un enlace con MAC se declara en los DOS extremos**, igual que `pqc_auth =
-  sign`: la raíz es `link_psk`, config local que la SDN no transporta ni debe,
+- **Un enlace con raíz `link_psk` se declara en los DOS extremos**, igual que
+  el HMAC-PSK del handshake: es config local que la SDN no transporta ni debe,
   así que el extremo que recibe el enlace por anuncio se queda sin PSK y
   descarta todo. `render_config.py` emite `link_psk`/`frame_auth` **fuera** de
   la bifurcación qkd/pqc — estuvieron dentro de la rama pqc y un enlace QKD los
-  perdía al renderizar, en silencio.
+  perdía al renderizar, en silencio. **Desde 2026-08-31 esto solo aplica al
+  `link_psk` explícito** (QKD hoy, o PQC con psk): en un enlace PQC la raíz por
+  defecto es el **secreto de la época del enlace** (Fase 10) — sale del
+  handshake firmado con el cert de nodo, existe en los dos extremos por
+  construcción y no hay nada que declarar en ninguno, tampoco en los enlaces
+  que crea la SDN.
 - **La raíz es simétrica y de 256 bits**, así que es quantum-safe (Grover deja
   128 efectivos) y no hace falta firma por frame: una ML-DSA son 3309 B por
   mensaje, inviable a este ritmo. Upgrade documentado: derivar la raíz del
@@ -889,6 +895,88 @@ una preferencia y no una garantía:
 Residual conocido tras la fase: el socket de ACK (Fase 4, flip pendiente del
 testbed) y la comprobación que el propio SAE no puede hacer de su clave de
 sesión (por diseño: se fía de su KME).
+
+### Fase 10 — Dos raíces de confianza por salto: cert de nodo en el QKC, autorización de superficies (HECHA 2026-08-31)
+
+Auditoría de las 4 promesas (confidencialidad, integridad, autenticación,
+frescura) por capa. El material ya las cumplía **de punta a punta y de
+fábrica** vía el sello e2e DKMS↔DKMS; el hueco era el salto QKC↔QKC
+(`pqc_auth`/`frame_auth = off` de fábrica, raíz = PSK manual). El modelo que
+lo cierra tiene **dos raíces, una por tipo de enlace** — cada una la natural
+de ese enlace:
+
+- **Enlace PQC → el certificado de nodo del QKC** (net-ca). El handshake
+  ML-KEM del enlace se firma con la clave del cert (`[tls]`) y se adjunta la
+  cadena; el peer verifica contra la net-CA + SAN `dkms://qkc-<id>` — sin
+  material por-par (`sign_secret_seed`/`peer_verify_key` quedan como camino
+  legacy). Del secreto de la ÉPOCA de ese handshake sale la raíz del sello
+  HMAC por frame (`RootSource::PerEpoch`: la `session` del frame ES la
+  época; rota sola con el relink; el frame de una época no instalada se
+  descarta y se regenera). El cert autentica el handshake UNA vez; cada
+  frame paga 48 B de trailer HMAC, nunca una firma ML-DSA (~3,3 KB) ni un
+  byte de payload (el trailer se quita antes del chunker OTP). **Con `[tls]`
+  presente, `pqc_auth = sign` y `frame_auth = require` son el DEFAULT** en
+  enlaces PQC (patrón `grpc_tls`; un `off` explícito manda) — y como ni la
+  firma ni la raíz necesitan config por-par, hasta los enlaces que crea la
+  SDN quedan autenticados solos. `require` no bloquea el arranque: antes de
+  la primera época no fluye ningún frame.
+- **Enlace QKD → el KME real** (no la net-ca). El material que reparte por
+  ETSI 014 es secreto compartido solo entre los dos extremos legítimos: esa
+  ES la autenticación del enlace, y el KME la aplica por identidad. Cada KME
+  es **privado, con su propia PKI**: el QKC gana `kme_cert`/`kme_key`/
+  `kme_ca` POR ENLACE (o los tres o ninguno; parcial no arranca) y sin
+  declararlos cae al `[tls]` de red — la simplificación de la prueba, porque
+  quditto es un SIMULADOR y acepta la net-ca; en producción son autoridades
+  separadas. quditto no se endurece a propósito: los tests con él validan
+  funcionalidad y rendimiento, no hacen de garantía. El sello por-frame en
+  QKD (derivado de bits QKD o anclado de otra forma) queda **pendiente de
+  decisión de mecanismo** — hoy su `frame_auth` sigue en `off` salvo
+  `link_psk` explícita (≥ 32 B, validada al arrancar: menos no es
+  quantum-safe y casi seguro es un typo).
+
+Autorización de superficies, mismo lote:
+
+- **`POST /forwarding-table` del QKC exige el cert de la SDN** (SAN
+  `dkms://sdn`), no cualquier cert de la net-ca: quien lo controla decide por
+  dónde viaja cada frame OTP. El listener en claro (opt-out `[tls]`-less)
+  conserva el histórico; los GET se quedan en el listón mTLS.
+- **La superficie de aplicación del ORR (`SendMessage`/`StreamDeliveries`)
+  se acota a `served_dkms`** — su DKMS co-anclado, que el renderer deriva
+  solo del `node_id` de la misma node.yml. Sin la lista: histórico + aviso.
+  El plano ORR↔ORR sigue atado al `from`↔cert (Fase 9).
+
+Límites de uso y proceso: la **primera rotación del `master_secret` ORR es
+inmediata** (la época 0 = `bootstrap_secret` ya no cubre ni un periodo); el
+e2e DKMS rota **también por volumen** (`rekey_keys`, default 100 000 — lo
+dispara cualquiera de los dos extremos) y gana un guardarraíl fail-closed
+anti-reúso de `key_id` por época (el nonce se deriva del key_id: repetirlo
+sería reúso de nonce GCM); `mlockall(MCL_CURRENT|MCL_FUTURE)` +
+`PR_SET_DUMPABLE=0` en dkms/orr/qkc/sdn (best-effort con aviso y remediación;
+quditto fuera a propósito); y `PeerCfg.max_hops`/`orr_path` dejaron de ser
+código muerto (override por-peer del modo de routing, default global 0).
+
+**Renovación y revocación de certificados.** La renovación es gratis desde
+esta fase: los vecinos confían en la CA + SAN, no en la clave concreta —
+reemitir el cert de un nodo no toca la config de nadie (a diferencia de
+`peer_verify_key`, que había que repartir otra vez). La **revocación activa
+(CRL/OCSP) NO está implementada** y queda como roadmap: el camino que mejor
+encaja con esta infra es certs de vida corta + reemisión (la maquinaria ya
+rota claves por época en tres capas), y si hace falta revocación inmediata,
+una CRL firmada por la net-CA distribuida por la SDN en el announce (el canal
+de convergencia que ya existe). Mientras tanto, expulsar un nodo = retirar su
+cert del despliegue y reiniciar sus peers, y el radio de daño de una clave
+robada lo acotan las rotaciones (época PQC ~1 h/1000 claves, master ORR 1 h,
+e2e 1 h/100 k claves).
+
+Verificación de la fase: 500+ tests en verde con `make check` en el
+contenedor `rust:1.88` (el toolchain de CI), incluidos: handshake QKC
+cert-bound contra cadena buena/SAN malo/CA ajena; sello per-época que rota y
+descarta épocas no instaladas; push de tabla 200 con cert `sdn` y 403 con
+otro cert de red sobre mTLS real; `served_dkms` con PERMISSION_DENIED;
+primera rotación ORR < periodo; reúso de key_id rechazado y permitido tras
+rotar; parciales de `kme_*` que no arrancan. Pendiente de la fase: el sello
+por-frame QKD (decisión de mecanismo) y medir en malla que los defaults
+nuevos no bajan el throughput (brazos PQC y QKD).
 
 ## 4. Decisions log
 

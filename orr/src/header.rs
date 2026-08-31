@@ -1,31 +1,38 @@
 //! Cabecera ORR v3.
 //!
 //! Va en `frame.header_orr_mp` (cleartext) junto al payload (lo que el QKC
-//! OTP-cifrará en cada enlace). El QKC NO la toca: la propaga byte-a-byte.
+//! OTP-cifrará en cada enlace). El QKC NO la toca: la propaga byte-a-byte —
+//! incluida `frame.epoch_id` a nivel de wire, que dice qué época del
+//! `master_secret` pela esta capa (el relay la reconstruía sin copiarla y
+//! toda cebolla llegaba como época 0; arreglado 2026-08-30 en
+//! `qkc/src/relay.rs`).
 //!
-//! ## Diseño v3 (shared-key XOR + key_id pre-shared)
+//! ## Diseño v3 (AEAD por capa sobre secreto compartido; antes XOR)
 //!
 //! El ORR origen y cada hop (intermedio + destino) comparten un
-//! `master_secret_{from→peer}` de 32 B (establecido al arrancar via ML-KEM
-//! encap, RPC `EstablishSecret`). Por cada frame onion, derivan
-//! `K = HKDF-SHA256(salt="orr.onion.v1", ikm=master_secret,
-//!  info=key_id ‖ u32(len(payload)), L=len(payload))` y hacen XOR.
+//! `master_secret_{from→peer}` de 32 B por ÉPOCA (bootstrap ML-KEM
+//! `EstablishSecret` + rotación periódica, `rotation.rs`). Por cada capa el
+//! origen elige un `key_id` UUID v4 y la sella con AES-256-GCM: clave y nonce
+//! derivados de `(master_secret, key_id)` —el nonce NO viaja, así que cada K
+//! se usa con exactamente un nonce— y AAD que ata la capa a lo que la
+//! acompaña en claro (`key_id`, `epoch_id`, `max_hops`, `session`, `counter`
+//! y la cabecera DKMS). Detalles y racional en `onion.rs`.
 //!
-//! Esto reemplaza el esquema v2 (`OnionFrame { kem_cts: Vec<Vec<u8>>, ... }`)
-//! que enviaba ~1.1 KB de ML-KEM ciphertext por cada 32 B de plaintext,
-//! produciendo crecimiento exponencial por capa onion (4 MB en modo -1).
+//! Hasta 2026-08-28 la capa era XOR puro con la K (maleable: un QKC del
+//! camino podía aplicar un delta sin que nada lo notase); el esquema v2
+//! anterior (~1,1 KB de ML-KEM ciphertext por capa) murió antes.
 //!
-//! Campos:
-//!   * `from`, `to`: ids lógicos de ORR (origen final y destino final).
-//!   * `next_orr_id`: dst de ESTA capa — quién pela este wire frame.
-//!     Para passthrough (modo 0) = `to`.
-//!   * `key_id`: UUID v4 que identifica la K usada para cifrar `payload`.
-//!     `None` ⇒ passthrough (no hay capa onion, `payload` es body_dkms
-//!     en claro hacia el QKC, que lo OTP-cifra en el enlace).
-//!   * `max_hops`: hops onion restantes; `0` significa que la siguiente
-//!     vez que un ORR descifre con K, el plaintext es body_dkms directo
-//!     (capa terminal), no un `InnerLayer`.
-//!   * `timestamp`: `time.time()` del emisor, segundos UNIX. Informativo.
+//! El **tag AEAD viaja en esta cabecera** (campo [`OrrHeader::tag`]), no
+//! pegado al payload: el tag no es secreto y en el payload cada byte cuesta
+//! material QKD por salto — el chunker OTP gasta una clave por bloque de
+//! `key_size_bits/8`, y meter `nonce ‖ tag` dentro midió un −51 % de
+//! rendimiento en el brazo QKD.
+//!
+//! Campos: ver los docs de [`OrrHeader`] — `from`/`to`/`next_orr_id`
+//! (routing), `key_id` (deriva K y nonce; `None` ⇒ modo 0 passthrough),
+//! `max_hops`, `session`/`counter` (frescura extremo a extremo del ORIGEN,
+//! dentro del AAD de todas las capas; ver `onion_replay`), `tag` y
+//! `timestamp` (informativo).
 //!
 //! El metadato de la clave QKD (key_id QKD, sae_origin/destination, ...) NO
 //! va aquí — va en `header_dkms_mp`, escrito por el DKMS.
