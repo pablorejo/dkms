@@ -151,7 +151,12 @@ pub struct FrameAad<'a> {
 }
 
 fn write_lp16(mac: &mut HmacSha256, x: &[u8]) {
-    debug_assert!(x.len() <= u16::MAX as usize, "lp16 overflow: {}", x.len());
+    // assert duro, no debug_assert: en release el cast truncaría y la
+    // codificación con prefijos dejaría de ser inyectiva (dos campos vecinos
+    // podrían mover su frontera). Inalcanzable desde el wire (el decoder
+    // acota a u16) y desde productores sanos (`Frame::validate_for_encode`);
+    // defensa en profundidad.
+    assert!(x.len() <= u16::MAX as usize, "lp16 overflow: {}", x.len());
     mac.update(&(x.len() as u16).to_be_bytes());
     mac.update(x);
 }

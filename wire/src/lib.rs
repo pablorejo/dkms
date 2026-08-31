@@ -182,6 +182,8 @@ pub enum WireError {
     TooLarge(u32),
     #[error("truncated frame: {0}")]
     Truncated(&'static str),
+    #[error("field too long for its length prefix: {0}")]
+    FieldTooLong(&'static str),
 }
 
 /// Frame deserializado. `kind` lo rellena el reader desde el prefijo.
@@ -236,6 +238,51 @@ impl Frame {
     }
 
     /// Serializa a bytes listos para escribir al socket.
+    /// Comprueba que cada campo cabe en su prefijo de longitud ANTES de
+    /// codificar. Sin esto, `len() as u16` / `as u8` TRUNCA en release: un
+    /// header MP de 65 536 B se emitía con prefijo 0, el resto del frame se
+    /// desplazaba y el receptor leía basura bien formada — corrupción
+    /// silenciosa, no un error. Los tamaños legales quedan a órdenes de
+    /// magnitud (ver `MAX_TOTAL_LEN`), así que esto es un cinturón para el
+    /// productor con un bug, no un límite que ningún camino real roce.
+    pub fn validate_for_encode(&self) -> Result<(), WireError> {
+        if self.key_ids.len() > u8::MAX as usize {
+            return Err(WireError::FieldTooLong("key_ids count"));
+        }
+        let key_id_len = self.key_ids.first().map_or(0, |s| s.len());
+        if key_id_len > u8::MAX as usize {
+            return Err(WireError::FieldTooLong("key_id length"));
+        }
+        if self.key_ids.iter().any(|k| k.len() != key_id_len) {
+            return Err(WireError::FieldTooLong("non-uniform key_id length"));
+        }
+        if self.header_orr_mp.len() > u16::MAX as usize {
+            return Err(WireError::FieldTooLong("header_orr_mp"));
+        }
+        if self.header_dkms_mp.len() > u16::MAX as usize {
+            return Err(WireError::FieldTooLong("header_dkms_mp"));
+        }
+        let total = FIXED_PREFIX
+            + 4
+            + 4
+            + 4
+            + 2
+            + 4
+            + 1
+            + 1
+            + key_id_len * self.key_ids.len()
+            + 2
+            + self.header_orr_mp.len()
+            + 2
+            + self.header_dkms_mp.len()
+            + 4
+            + self.payload.len();
+        if total > MAX_TOTAL_LEN as usize {
+            return Err(WireError::TooLarge(total as u32));
+        }
+        Ok(())
+    }
+
     pub fn encode(&self) -> BytesMut {
         // KEY_ID_LEN uniforme: si hay keys, todos los ids deben tener la
         // misma longitud.
@@ -375,6 +422,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     stream: &mut W,
     frame: &Frame,
 ) -> Result<(), WireError> {
+    // Antes de codificar: un campo que no cabe en su prefijo TRUNCARÍA la
+    // longitud en release y saldría al cable como corrupción bien formada.
+    frame.validate_for_encode()?;
     let buf = frame.encode();
     stream.write_all(&buf).await?;
     Ok(())
@@ -529,6 +579,31 @@ mod tests {
         let back = read_frame(&mut cursor).await.expect("frame legal gordo");
         assert_eq!(back.header_orr_mp.len(), 60_000);
         assert_eq!(back.epoch_id, 7);
+    }
+
+    /// Un frame construido localmente con un campo que no cabe en su
+    /// prefijo es un ERROR del productor, nunca un truncado silencioso.
+    #[tokio::test]
+    async fn oversized_fields_error_instead_of_truncating() {
+        let mut f = Frame::empty(FRAME_RECV);
+        f.header_orr_mp = vec![0u8; 70_000]; // > u16::MAX
+        let mut sink = Vec::new();
+        match write_frame(&mut sink, &f).await {
+            Err(WireError::FieldTooLong(what)) => assert_eq!(what, "header_orr_mp"),
+            other => panic!("esperaba FieldTooLong, fue {other:?}"),
+        }
+        assert!(sink.is_empty(), "nada debe salir al cable");
+
+        let mut f = Frame::empty(FRAME_RECV);
+        f.key_ids = vec!["x".into(); 300]; // > u8::MAX entradas
+        assert!(matches!(
+            f.validate_for_encode(),
+            Err(WireError::FieldTooLong("key_ids count"))
+        ));
+
+        // Y los legales pasan la validación sin cambiar ni un byte.
+        let ok = Frame::empty(FRAME_RECV);
+        ok.validate_for_encode().unwrap();
     }
 
     #[test]
