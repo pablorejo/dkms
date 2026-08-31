@@ -90,6 +90,58 @@ fn strong_link_root(len: usize) -> bool {
     len >= MIN_LINK_ROOT_BYTES
 }
 
+/// Cadena de certs DER (hoja primero) de un PEM. Mismo patrón que el ORR.
+fn load_cert_chain_der(path: &std::path::Path) -> Result<Vec<Vec<u8>>, QkcError> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let pem =
+        std::fs::read(path).map_err(|e| QkcError::BadRequest(format!("tls.cert_path: {e}")))?;
+    let chain: Vec<Vec<u8>> = CertificateDer::pem_slice_iter(&pem)
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| QkcError::BadRequest(format!("tls.cert_path PEM: {e}")))?;
+    if chain.is_empty() {
+        return Err(QkcError::BadRequest(
+            "tls.cert_path sin certificados".into(),
+        ));
+    }
+    Ok(chain)
+}
+
+/// Identidad de certificado de nodo para el handshake firmado (modo `sign`
+/// con certs). `None` sin `[tls]`; un `[tls]` presente pero ilegible cae a
+/// `None` con aviso (queda el camino legacy sign_seed/peer_verify_key), en vez
+/// de romper el arranque por un enlace.
+fn build_sign_identity(
+    cfg: &QkcConfig,
+    neighbor_id: u32,
+) -> Option<crate::pqc_handshake::SignIdentity> {
+    let t = cfg.tls.as_ref()?;
+    let load = || -> Result<crate::pqc_handshake::SignIdentity, QkcError> {
+        let key_pem = std::fs::read(&t.key_path)
+            .map_err(|e| QkcError::BadRequest(format!("tls.key_path: {e}")))?;
+        let signer = common::crypto::pqc_sign::MlDsa65Signer::from_pkcs8_pem(&key_pem)
+            .map_err(|e| QkcError::BadRequest(format!("tls.key_path ML-DSA: {e:?}")))?;
+        let chain = load_cert_chain_der(&t.cert_path)?;
+        let ca_pem = std::fs::read(&t.control_plane_ca)
+            .map_err(|e| QkcError::BadRequest(format!("tls.control_plane_ca: {e}")))?;
+        let roots = common::cert_identity::TrustRoots::from_pem(&ca_pem)
+            .map_err(|e| QkcError::BadRequest(format!("tls.control_plane_ca PEM: {e}")))?;
+        Ok(crate::pqc_handshake::SignIdentity {
+            signer: Arc::new(signer),
+            chain: Arc::new(chain),
+            roots,
+        })
+    };
+    match load() {
+        Ok(id) => Some(id),
+        Err(e) => {
+            warn!(neighbor = neighbor_id, error = %e,
+                "qkc: [tls] presente pero la identidad de cert no carga; enlace en modo legacy");
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct QkcService {
     pub cfg: Arc<QkcConfig>,
@@ -249,6 +301,7 @@ impl QkcService {
                         link.pqc_auth,
                         sign_seed,
                         peer_verify_key,
+                        build_sign_identity(cfg, link.neighbor_id),
                     );
                     // El reloj solo lo alimenta el emisor del lado iniciador; el
                     // respondedor sigue la rotación vía store.highest().

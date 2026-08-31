@@ -215,6 +215,34 @@ fn announcement_msg(orr_id: &str, suite: &str, public_key: &[u8]) -> Vec<u8> {
     m
 }
 
+/// Firma un mensaje del handshake de enlace con la clave del **certificado de
+/// nodo** (`MlDsa65Signer`), en vez de con una semilla cruda. El mensaje
+/// canónico es idéntico al de [`sign_handshake`], así que un peer lo verifica
+/// con [`verify_handshake`] usando la clave pública que salga de
+/// `cert_identity::verify_node_cert`.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_handshake_with(
+    signer: &MlDsa65Signer,
+    tag: &[u8],
+    epoch: u32,
+    sender_id: u32,
+    receiver_id: u32,
+    blob: &[u8],
+    suite_id: &str,
+    key_size_bits: u32,
+) -> Vec<u8> {
+    let msg = canonical_msg(
+        tag,
+        epoch,
+        sender_id,
+        receiver_id,
+        blob,
+        suite_id,
+        key_size_bits,
+    );
+    signer.sign(&msg)
+}
+
 /// Firma el anuncio `(orr_id, suite, public_key)` con la clave del cert de nodo.
 pub fn sign_orr_pubkey_with(
     signer: &MlDsa65Signer,

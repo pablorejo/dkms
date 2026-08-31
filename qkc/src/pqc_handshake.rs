@@ -99,6 +99,54 @@ impl HandshakeTransport for PeerOut {
 }
 
 /// Coordinador del handshake ML-KEM (multi-época) de UN enlace PQC.
+/// Identidad de **certificado de nodo** para el handshake firmado (modo
+/// `sign`). Preferida sobre la semilla cruda `sign_seed`: la cadena viaja en
+/// el propio handshake y el peer la verifica contra la CA de red, así no hay
+/// que precargar la clave pública del vecino (que además obligaría a tocar a
+/// todos los vecinos al renovar). Es el patrón que el ORR ya usa para su
+/// anuncio (commit 28525cb).
+#[derive(Clone)]
+pub struct SignIdentity {
+    /// Firma con la clave del cert de ESTE nodo (`tls.key_path`, ML-DSA-65).
+    pub signer: Arc<pqc_sign::MlDsa65Signer>,
+    /// Cadena de certs de este nodo (DER, hoja primero) que se adjunta.
+    pub chain: Arc<Vec<Vec<u8>>>,
+    /// CA de red para verificar la cadena del peer.
+    pub roots: common::cert_identity::TrustRoots,
+}
+
+/// Serializa una cadena de certs DER: `u16(n) ‖ [u32(len) ‖ der]*`. Cadena
+/// vacía (`n = 0`) marca el camino legacy (firma con `sign_seed`, verificación
+/// con `peer_verify_key`).
+fn encode_cert_chain(chain: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(chain.len() as u16).to_be_bytes());
+    for c in chain {
+        out.extend_from_slice(&(c.len() as u32).to_be_bytes());
+        out.extend_from_slice(c);
+    }
+    out
+}
+
+/// Inverso de [`encode_cert_chain`]. Devuelve `(cadena, resto)`, donde `resto`
+/// es lo que sigue a la cadena en el payload (el blob). `None` si está
+/// truncado.
+fn split_cert_chain(buf: &[u8]) -> Option<(Vec<Vec<u8>>, &[u8])> {
+    let (n_bytes, mut rest) = buf.split_first_chunk::<2>()?;
+    let n = u16::from_be_bytes(*n_bytes) as usize;
+    let mut chain = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (len_bytes, tail) = rest.split_first_chunk::<4>()?;
+        let len = u32::from_be_bytes(*len_bytes) as usize;
+        if tail.len() < len {
+            return None;
+        }
+        chain.push(tail[..len].to_vec());
+        rest = &tail[len..];
+    }
+    Some((chain, rest))
+}
+
 pub struct PqcHandshake {
     suite: String,
     my_id: u32,
@@ -138,8 +186,14 @@ pub struct PqcHandshake {
     psk: Option<Vec<u8>>,
     /// Semilla ML-DSA de firma de ESTE nodo (modo `sign`). `None` → no firma.
     sign_seed: Option<Vec<u8>>,
-    /// Clave pública ML-DSA del PEER para verificar sus firmas (modo `sign`).
+    /// Clave pública ML-DSA del PEER para verificar sus firmas (modo `sign`,
+    /// camino legacy sin certificados).
     peer_verify_key: Option<Vec<u8>>,
+    /// Identidad de certificado de nodo (modo `sign` moderno). Preferida sobre
+    /// `sign_seed`/`peer_verify_key`. Ver [`SignIdentity`].
+    cert_id: Option<SignIdentity>,
+    /// Id esperado en el SAN del cert del peer: `qkc-<peer_id>`.
+    peer_cert_id: String,
     /// Política de autenticación (off/prefer/require/sign).
     auth: PqcAuth,
     /// Tamaño de clave en bits, atado en el MAC/firma (cierra el mismatch).
@@ -227,7 +281,9 @@ impl PqcHandshake {
         auth: PqcAuth,
         sign_seed: Option<Vec<u8>>,
         peer_verify_key: Option<Vec<u8>>,
+        cert_id: Option<SignIdentity>,
     ) -> Arc<Self> {
+        let peer_cert_id = format!("qkc-{peer_id}");
         Arc::new(Self {
             suite,
             my_id,
@@ -249,6 +305,8 @@ impl PqcHandshake {
             psk,
             sign_seed,
             peer_verify_key,
+            cert_id,
+            peer_cert_id,
             auth,
             key_size_bits,
         })
@@ -312,8 +370,25 @@ impl PqcHandshake {
         payload.extend_from_slice(blob);
 
         let kind = if self.auth == PqcAuth::Sign {
-            match self.sign_seed.as_deref() {
-                Some(seed) => match pqc_sign::sign_handshake(
+            // Preferir el certificado de nodo (cadena verificable contra la CA)
+            // sobre la semilla cruda con pubkey precargada (legacy). El payload
+            // firmado es `época ‖ cadena ‖ blob ‖ firma`: la cadena va ANTES
+            // del blob para poder delimitarla (el blob es el resto hasta la
+            // firma). Cadena vacía = legacy.
+            let signed = if let Some(id) = &self.cert_id {
+                let sig = pqc_sign::sign_handshake_with(
+                    &id.signer,
+                    tag_kind,
+                    epoch,
+                    self.my_id,
+                    self.peer_id,
+                    blob,
+                    &self.suite,
+                    self.key_size_bits,
+                );
+                Some((encode_cert_chain(&id.chain), sig))
+            } else if let Some(seed) = self.sign_seed.as_deref() {
+                match pqc_sign::sign_handshake(
                     seed,
                     tag_kind,
                     epoch,
@@ -323,22 +398,31 @@ impl PqcHandshake {
                     &self.suite,
                     self.key_size_bits,
                 ) {
-                    Ok(sig) => {
-                        payload.extend_from_slice(&sig);
-                        signed_kind
-                    }
+                    Ok(sig) => Some((encode_cert_chain(&[]), sig)),
                     Err(e) => {
                         warn!(peer = self.peer_id, error = ?e, "qkc.pqc: fallo al firmar; envío en claro");
-                        plain
+                        None
                     }
-                },
-                None => {
-                    warn!(
-                        peer = self.peer_id,
-                        "qkc.pqc: modo sign sin sign_secret_seed; envío en claro"
-                    );
-                    plain
                 }
+            } else {
+                warn!(
+                    peer = self.peer_id,
+                    "qkc.pqc: modo sign sin cert ni sign_secret_seed; envío en claro"
+                );
+                None
+            };
+            match signed {
+                Some((chain_block, sig)) => {
+                    // Reconstruir en el orden nuevo: época ‖ cadena ‖ blob ‖ firma.
+                    let mut p = Vec::with_capacity(4 + chain_block.len() + blob.len() + sig.len());
+                    p.extend_from_slice(&epoch.to_be_bytes());
+                    p.extend_from_slice(&chain_block);
+                    p.extend_from_slice(blob);
+                    p.extend_from_slice(&sig);
+                    payload = p;
+                    signed_kind
+                }
+                None => plain,
             }
         } else if let Some(psk) = self.psk.as_deref().filter(|_| self.hmac_active()) {
             let mac = link_mac::tag(
@@ -393,13 +477,6 @@ impl PqcHandshake {
     ) -> Option<(u32, &'a [u8])> {
         match recv {
             RecvAuth::Signed => {
-                let Some(vk) = self.peer_verify_key.as_deref() else {
-                    warn!(
-                        peer = self.peer_id,
-                        "qkc.pqc: frame firmado pero sin peer_verify_key; descarto"
-                    );
-                    return None;
-                };
                 if payload.len() < 4 + SIGNATURE_LEN {
                     warn!(
                         peer = self.peer_id,
@@ -407,10 +484,47 @@ impl PqcHandshake {
                     );
                     return None;
                 }
-                let (msg, sig) = payload.split_at(payload.len() - SIGNATURE_LEN);
-                let (epoch, blob) = split_epoch(msg)?;
+                // época ‖ cadena ‖ blob ‖ firma
+                let (rest, sig) = payload.split_at(payload.len() - SIGNATURE_LEN);
+                let (epoch, after_epoch) = split_epoch(rest)?;
+                let (chain, blob) = split_cert_chain(after_epoch)?;
+                // La clave de verificación sale de la cadena (verificada contra
+                // la CA de red) o, si la cadena viene vacía, de la pubkey
+                // precargada (legacy). El SAN de la cadena debe decir
+                // `qkc-<peer_id>`: así un miembro de la red con otro cert no
+                // puede hacerse pasar por este vecino.
+                let vk: Vec<u8> = if !chain.is_empty() {
+                    let Some(roots) = self.cert_id.as_ref().map(|c| &c.roots) else {
+                        warn!(
+                            peer = self.peer_id,
+                            "qkc.pqc: handshake con cadena de certs pero sin CA de red; descarto"
+                        );
+                        return None;
+                    };
+                    match common::cert_identity::verify_node_cert(&chain, roots, &self.peer_cert_id)
+                    {
+                        Ok(vk) => vk,
+                        Err(e) => {
+                            warn!(
+                                peer = self.peer_id,
+                                error = %e,
+                                "qkc.pqc: cadena de certs del handshake rechazada; descarto"
+                            );
+                            return None;
+                        }
+                    }
+                } else {
+                    let Some(vk) = self.peer_verify_key.clone() else {
+                        warn!(
+                            peer = self.peer_id,
+                            "qkc.pqc: frame firmado sin cadena y sin peer_verify_key; descarto"
+                        );
+                        return None;
+                    };
+                    vk
+                };
                 if pqc_sign::verify_handshake(
-                    vk,
+                    &vk,
                     tag_kind,
                     epoch,
                     self.peer_id,
@@ -957,7 +1071,7 @@ mod tests {
         psk: Option<Vec<u8>>,
         auth: PqcAuth,
     ) -> Arc<PqcHandshake> {
-        handshake_full(my_id, peer_id, psk, auth, None, None)
+        handshake_full(my_id, peer_id, psk, auth, None, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -968,6 +1082,7 @@ mod tests {
         auth: PqcAuth,
         sign_seed: Option<Vec<u8>>,
         peer_verify_key: Option<Vec<u8>>,
+        cert_id: Option<SignIdentity>,
     ) -> Arc<PqcHandshake> {
         PqcHandshake::new(
             common::crypto::pqc::suite::ML_KEM_768.to_string(),
@@ -984,6 +1099,7 @@ mod tests {
             auth,
             sign_seed,
             peer_verify_key,
+            cert_id,
         )
     }
 
@@ -1110,6 +1226,7 @@ mod tests {
             PqcAuth::Sign,
             Some(a.secret_seed.to_vec()),
             Some(b.verifying_key.clone()),
+            None,
         );
         let resp = handshake_full(
             2,
@@ -1118,6 +1235,7 @@ mod tests {
             PqcAuth::Sign,
             Some(b.secret_seed.to_vec()),
             Some(a.verifying_key.clone()),
+            None,
         );
         let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
         let kp = kem.keygen().unwrap();
@@ -1128,6 +1246,7 @@ mod tests {
         // Construye un INIT firmado por el nodo 1 (sender=1, receiver=2).
         let signed_init = |epoch: u32, blob: &[u8]| {
             let mut p = epoch.to_be_bytes().to_vec();
+            p.extend_from_slice(&[0, 0]); // cadena de certs vacía (camino legacy)
             p.extend_from_slice(blob);
             let sig = pqc_sign::sign_handshake(
                 &a.secret_seed,
@@ -1156,6 +1275,7 @@ mod tests {
         // 2) INIT firmado pero por la clave EQUIVOCADA (nodo b firmando como a)
         //    → firma inválida contra a.verifying_key → rechazado.
         let mut wrong = 3u32.to_be_bytes().to_vec();
+        wrong.extend_from_slice(&[0, 0]); // cadena vacía
         wrong.extend_from_slice(&kp.public);
         let bad_sig = pqc_sign::sign_handshake(
             &b.secret_seed,
@@ -1182,6 +1302,7 @@ mod tests {
         // RESP firmado por el nodo 2 (sender=2, receiver=1); el nodo 1 lo verifica
         // con b.verifying_key (su peer_verify_key).
         let mut resp_payload = 3u32.to_be_bytes().to_vec();
+        resp_payload.extend_from_slice(&[0, 0]); // cadena vacía
         resp_payload.extend_from_slice(&ct);
         let resp_sig =
             pqc_sign::sign_handshake(&b.secret_seed, TAG_RESP, 3, 2, 1, &ct, "ml-kem-768", 1024)
@@ -1191,6 +1312,125 @@ mod tests {
 
         // Ambos extremos comparten el mismo secreto, con handshake 100% firmado PQC.
         assert_eq!(*ini.store.get(3).unwrap(), *resp.store.get(3).unwrap());
+    }
+
+    /// Handshake atado a **certificados de nodo** (el camino moderno): el
+    /// respondedor verifica la cadena del iniciador contra la CA de red y el
+    /// SAN `qkc-<peer_id>`, en vez de una pubkey precargada. Cubre: cadena
+    /// buena → acepta; CA ajena → rechaza; SAN equivocado → rechaza.
+    #[tokio::test]
+    async fn cert_bound_handshake_accepts_valid_chain_and_rejects_impostors() {
+        use common::crypto::pqc_sign::{self, MlDsa65Signer};
+        let dir = std::env::temp_dir().join(format!("qkc_hs_cert_{}", std::process::id()));
+        let Some(pki) = common::test_support::mldsa_test_pki(&dir, &["qkc-1", "qkc-99"]) else {
+            common::test_support::skip_or_fail("openssl sin ML-DSA (<3.5)");
+            return;
+        };
+        let net_roots =
+            common::cert_identity::TrustRoots::from_pem(&std::fs::read(&pki.ca_crt).unwrap())
+                .unwrap();
+        let sign_id = |id: &str, roots: common::cert_identity::TrustRoots| SignIdentity {
+            signer: Arc::new(
+                MlDsa65Signer::from_pkcs8_pem(&std::fs::read(pki.key(id)).unwrap()).unwrap(),
+            ),
+            chain: Arc::new(vec![pki.cert_der(id)]),
+            roots,
+        };
+
+        // Respondedor (nodo 2) que espera que su peer, el nodo 1, presente un
+        // cert de la net-CA con SAN `qkc-1`.
+        let resp = handshake_full(
+            2,
+            1,
+            None,
+            PqcAuth::Sign,
+            None,
+            None,
+            Some(sign_id("qkc-99", net_roots.clone())), // su propia identidad; da igual cuál
+        );
+        let kem = common::crypto::pqc::kem_for(common::crypto::pqc::suite::ML_KEM_768).unwrap();
+        let kp = kem.keygen().unwrap();
+
+        // INIT firmado con un cert de nodo (sender=1, receiver=2). `signer_id`
+        // es el cert que firma; `chain_id` la cadena que se adjunta.
+        let make_init = |signer_id: &str, chain_id: &str| {
+            let signer =
+                MlDsa65Signer::from_pkcs8_pem(&std::fs::read(pki.key(signer_id)).unwrap()).unwrap();
+            let sig = pqc_sign::sign_handshake_with(
+                &signer,
+                TAG_INIT,
+                3,
+                1,
+                2,
+                &kp.public,
+                "ml-kem-768",
+                1024,
+            );
+            let mut p = 3u32.to_be_bytes().to_vec();
+            p.extend_from_slice(&encode_cert_chain(&[pki.cert_der(chain_id)]));
+            p.extend_from_slice(&kp.public);
+            p.extend_from_slice(&sig);
+            p
+        };
+
+        // 1) Cadena buena (qkc-1) → aceptado.
+        resp.handle_init(&make_init("qkc-1", "qkc-1"), RecvAuth::Signed);
+        assert!(
+            resp.resp_cache.lock().contains_key(&3),
+            "cert de qkc-1 válido: aceptado"
+        );
+
+        // 2) SAN equivocado: qkc-99 es de la net-CA pero no es el peer esperado.
+        let resp2 = handshake_full(
+            2,
+            1,
+            None,
+            PqcAuth::Sign,
+            None,
+            None,
+            Some(sign_id("qkc-99", net_roots.clone())),
+        );
+        resp2.handle_init(&make_init("qkc-99", "qkc-99"), RecvAuth::Signed);
+        assert!(
+            resp2.resp_cache.lock().is_empty(),
+            "SAN qkc-99 ≠ peer esperado qkc-1: rechazado"
+        );
+
+        // 3) CA ajena: un cert de "qkc-1" emitido por otra CA no verifica.
+        let rogue_dir = dir.join("rogue");
+        let rogue = common::test_support::mldsa_test_pki(&rogue_dir, &["qkc-1"]).unwrap();
+        let resp3 = handshake_full(
+            2,
+            1,
+            None,
+            PqcAuth::Sign,
+            None,
+            None,
+            Some(sign_id("qkc-99", net_roots)), // roots = net-CA
+        );
+        let rogue_signer =
+            MlDsa65Signer::from_pkcs8_pem(&std::fs::read(rogue.key("qkc-1")).unwrap()).unwrap();
+        let rogue_sig = pqc_sign::sign_handshake_with(
+            &rogue_signer,
+            TAG_INIT,
+            3,
+            1,
+            2,
+            &kp.public,
+            "ml-kem-768",
+            1024,
+        );
+        let mut rogue_init = 3u32.to_be_bytes().to_vec();
+        rogue_init.extend_from_slice(&encode_cert_chain(&[rogue.cert_der("qkc-1")]));
+        rogue_init.extend_from_slice(&kp.public);
+        rogue_init.extend_from_slice(&rogue_sig);
+        resp3.handle_init(&rogue_init, RecvAuth::Signed);
+        assert!(
+            resp3.resp_cache.lock().is_empty(),
+            "cadena de una CA ajena: rechazada"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1286,6 +1526,7 @@ mod tests {
             PqcAuth::Off,
             None,
             None,
+            None,
         );
         assert!(hs.clock_disabled());
         // (epoch_of sanity, para no dejar el import sin uso si se recorta arriba)
@@ -1364,6 +1605,7 @@ mod tests {
                 1024,
                 None,
                 PqcAuth::Off,
+                None,
                 None,
                 None,
             )
