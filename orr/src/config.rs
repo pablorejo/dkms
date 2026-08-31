@@ -29,9 +29,9 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct OrrConfig {
     /// ID lógico del ORR (string, lo elige el operador / SDN).
     pub orr_id: String,

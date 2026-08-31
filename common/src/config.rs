@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use config::{Config, Environment, File, FileFormat};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -63,8 +63,11 @@ pub fn load_config<T: DeserializeOwned>(module_name: &str) -> Result<T, ConfigEr
 /// `link_psk` acababa en claro en el log del contenedor.
 ///
 /// No implementa `Display` a propósito: `%secreto` en un `info!` fallaría al
-/// compilar en vez de filtrar el valor.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// compilar en vez de filtrar el valor. Tampoco implementa `Serialize`, por
+/// lo mismo: la redacción del `Debug` no vale de nada si un endpoint de
+/// debug o un volcado de config puede serializar el struct entero — mejor
+/// que ese código no compile.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
 pub struct SecretString(String);
 

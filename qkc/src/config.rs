@@ -53,7 +53,7 @@ pub enum LinkType {
     Pqc,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct QkcConfig {
     pub qkc_id: u32,
 
@@ -105,7 +105,7 @@ fn default_announce_secs() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LinkConfig {
     /// ID del QKC vecino al otro lado del enlace.
     pub neighbor_id: u32,
