@@ -18,11 +18,40 @@
 
 use std::{collections::HashMap, sync::atomic::Ordering};
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State, http::StatusCode, response::IntoResponse, routing::get, Extension, Json, Router,
+};
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::{routing::NextHop, service::QkcService};
+use crate::{mtls_admin::PeerCertIdentity, routing::NextHop, service::QkcService};
+
+/// Única identidad autorizada a empujar la forwarding table (B1): el cert de
+/// nodo de la SDN (SAN `dkms://sdn`), que es con el que su cliente de push se
+/// presenta (`sdn/src/service.rs`, `common::http::mtls_client`). Es el nombre
+/// fijo del despliegue mantenido (`render_config.py` escribe `node_id = "sdn"`
+/// y `gen-certs.sh sdn <ip>` emite ese SAN).
+const FORWARDING_PUSHER: &str = "sdn";
+
+/// Autorización del `POST /forwarding-table`. Quien lo controla decide por
+/// dónde viaja cada frame OTP de este nodo, así que con mTLS no basta
+/// «cualquier cert de la net-ca» — un QKC/ORR/DKMS comprometido no debe poder
+/// redirigir el tráfico ajeno. Sin extensión (listener en claro, el opt-out
+/// [tls]-less de red interna) se mantiene el comportamiento histórico; con
+/// mTLS, sólo la SDN. Los GET (tabla, stats) se quedan en el listón mTLS: son
+/// diagnóstico, no mutan.
+fn sdn_may_push(identity: Option<&PeerCertIdentity>) -> Result<(), String> {
+    match identity {
+        None => Ok(()),
+        Some(id) => match id.node_id.as_deref() {
+            Some(FORWARDING_PUSHER) => Ok(()),
+            other => Err(format!(
+                "forwarding-table: el cert del cliente ({}) no es la SDN ('{FORWARDING_PUSHER}')",
+                other.unwrap_or("<sin SAN dkms://>")
+            )),
+        },
+    }
+}
 
 pub fn router(svc: QkcService) -> Router {
     Router::new()
@@ -117,8 +146,13 @@ struct TableBody {
 
 async fn post_table(
     State(svc): State<QkcService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(body): Json<TableBody>,
 ) -> impl IntoResponse {
+    if let Err(msg) = sdn_may_push(identity.as_deref()) {
+        warn!(%msg, "qkc.http_admin push rechazado");
+        return (StatusCode::FORBIDDEN, msg).into_response();
+    }
     // Soporta dos modos: replace completo (full y/o QKD) o delta.
     let mut did_replace = false;
     if let Some(replace_qkd) = body.replace_qkd {
@@ -328,5 +362,97 @@ mod tests {
         m.insert("not-a-number".into(), NextHopValue::Single(1));
         let err = parse_map(m).unwrap_err();
         assert!(err.contains("not-a-number"));
+    }
+
+    /// B1: el push de la tabla sólo lo autoriza el cert de la SDN. Sin
+    /// extensión (listener en claro) se mantiene el histórico; un cert de
+    /// red que no es la SDN —o sin SAN `dkms://`— se rechaza.
+    #[test]
+    fn only_the_sdn_cert_may_push() {
+        let with = |id: Option<&str>| PeerCertIdentity {
+            node_id: id.map(str::to_owned),
+        };
+        assert!(sdn_may_push(None).is_ok(), "listener en claro: histórico");
+        assert!(sdn_may_push(Some(&with(Some("sdn")))).is_ok());
+        let e = sdn_may_push(Some(&with(Some("qkc-2")))).unwrap_err();
+        assert!(e.contains("qkc-2") && e.contains("sdn"), "{e}");
+        assert!(
+            sdn_may_push(Some(&with(None))).is_err(),
+            "cert verificado pero sin SAN dkms:// no autoriza"
+        );
+    }
+
+    fn test_svc() -> crate::service::QkcService {
+        crate::service::QkcService::new(crate::config::QkcConfig {
+            qkc_id: 1,
+            peer_listen: "127.0.0.1:0".into(),
+            local_listen: "127.0.0.1:0".into(),
+            admin_http: "127.0.0.1:0".into(),
+            sdn_url: None,
+            advertise_ip: None,
+            sdn_announce_secs: 30,
+            tls: None,
+            sign_secret_seed: None,
+            links: vec![],
+        })
+        .unwrap()
+    }
+
+    /// B1, de punta a punta sobre mTLS real: el admin sirve con el cert
+    /// `qkc-1` y exige cert cliente de la net-ca; el push con el cert de la
+    /// SDN pasa (200) y el mismo push con el cert de otro miembro legítimo de
+    /// la red (`orr_1`) recibe 403 — mTLS solo ya no basta para reescribir
+    /// rutas. Los GET de diagnóstico se quedan en el listón mTLS.
+    #[tokio::test]
+    async fn post_table_over_mtls_requires_the_sdn_identity() {
+        let dir = std::env::temp_dir().join(format!("qkc_admin_mtls_{}", std::process::id()));
+        let Some(pki) = common::test_support::mldsa_test_pki(&dir, &["qkc-1", "sdn", "orr_1"])
+        else {
+            common::test_support::skip_or_fail("openssl sin ML-DSA (<3.5)");
+            return;
+        };
+        // El provider PQC del proceso, como hacen los binarios: reqwest
+        // (rustls) lo necesita para verificar/presentar certs ML-DSA.
+        common::tls_pqc::ensure_process_default().expect("provider PQC");
+
+        let tls_cfg =
+            common::tls::server_config(&pki.cert("qkc-1"), &pki.key("qkc-1"), Some(&pki.ca_crt))
+                .expect("server_config");
+        let listener = common::net::bind_reuse_addr("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(crate::mtls_admin::serve_mtls(
+            listener,
+            tls_cfg,
+            router(test_svc()),
+        ));
+
+        let client = |id: &str| {
+            common::http::mtls_client(
+                common::http::ClientTls {
+                    ca_path: &pki.ca_crt,
+                    cert_path: &pki.cert(id),
+                    key_path: &pki.key(id),
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .expect("mtls client")
+        };
+        let url = format!("https://localhost:{}/forwarding-table", addr.port());
+        let body = serde_json::json!({"replace": {"5": 2}});
+
+        let ok = client("sdn").post(&url).json(&body).send().await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK, "la SDN empuja");
+
+        let bad = client("orr_1").post(&url).json(&body).send().await.unwrap();
+        assert_eq!(
+            bad.status(),
+            StatusCode::FORBIDDEN,
+            "otro cert de red NO reescribe rutas"
+        );
+
+        let get = client("orr_1").get(&url).send().await.unwrap();
+        assert_eq!(get.status(), StatusCode::OK, "GET diagnóstico: listón mTLS");
     }
 }

@@ -2,15 +2,16 @@
 //!
 //! Por este puerto entra `POST /forwarding-table`: quien lo controla decide
 //! por dónde viaja cada frame OTP de la red. En multi-host va sobre TLS con
-//! verificación de cert cliente (trust root = CA de red): la autorización es
-//! «presenta un cert de la net-ca», el mismo listón que el gRPC del ORR. No
-//! hace falta extraer la identidad del SAN — no hay un `from` en el body que
-//! atar, a diferencia del registro del SDN.
+//! verificación de cert cliente (trust root = CA de red), y además se extrae
+//! la identidad del SAN ([`PeerCertIdentity`]) y se inyecta en las extensiones
+//! de cada request: el push de la tabla sólo se acepta de la SDN (B1), no de
+//! cualquier miembro de la red — un QKC/ORR/DKMS comprometido no debe poder
+//! redirigir el tráfico de este nodo. La comprobación vive en el handler
+//! (`http_admin::sdn_may_push`); aquí sólo se transporta la identidad.
 //!
-//! Es una copia deliberada de `sdn/src/mtls.rs::serve_mtls` sin la extensión
-//! de identidad: la consolidación en `common` es un follow-on
-//! (docs/SECURITY.md §Fase 3), no se hace ahora para no arrastrar
-//! axum/hyper-util a `common` ni acoplar qkc↔sdn.
+//! Es una copia deliberada de `sdn/src/mtls.rs::serve_mtls`: la consolidación
+//! en `common` es un follow-on (docs/SECURITY.md §Fase 3), no se hace ahora
+//! para no arrastrar axum/hyper-util a `common` ni acoplar qkc↔sdn.
 
 use std::sync::Arc;
 
@@ -25,6 +26,17 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use tracing::{debug, error, info, warn};
+
+/// Identidad del cliente mTLS, extraída del cert verificado por rustls e
+/// inyectada a nivel de conexión en las extensiones de cada request. Los
+/// handlers la leen con `Option<Extension<PeerCertIdentity>>`: la extensión
+/// ausente significa listener en claro (sin `[tls]`), no «cliente anónimo».
+#[derive(Clone, Debug)]
+pub struct PeerCertIdentity {
+    /// `node_id` del SAN `URI:dkms://<id>` de la hoja, en minúsculas.
+    /// `None` si el cert (ya verificado contra la net-ca) no lleva ese SAN.
+    pub node_id: Option<String>,
+}
 
 /// Sirve `router` sobre TLS con cert de cliente OBLIGATORIO. Bucle
 /// resiliente: un fallo de accept/handshake/conexión nunca tumba el listener.
@@ -58,10 +70,22 @@ pub async fn serve_mtls(
                     return;
                 }
             };
+            // Identidad del cliente, una vez por conexión (rustls ya verificó
+            // la cadena contra la net-ca; aquí sólo se lee el SAN de la hoja).
+            let peer_id = {
+                let (_io, session) = tls_stream.get_ref();
+                PeerCertIdentity {
+                    node_id: session
+                        .peer_certificates()
+                        .and_then(common::cert_identity::node_id_from_certs),
+                }
+            };
             let svc = service_fn(move |req: Request<Incoming>| {
                 let mut router = router.clone();
+                let pid = peer_id.clone();
                 async move {
-                    let req: Request<Body> = req.map(Body::new);
+                    let mut req: Request<Body> = req.map(Body::new);
+                    req.extensions_mut().insert(pid);
                     router.call(req).await
                 }
             });
