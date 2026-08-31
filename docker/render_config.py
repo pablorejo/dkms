@@ -425,6 +425,14 @@ def render_dkms(n, out):
         orr_id = pc.get("orr_id", "orr_" + str(pid).split("-")[-1])
         lines += ["", "[peers." + str(pid) + "]", "endpoint = " + q(ep),
                   'transport = "orr"', "orr_id = " + q(orr_id)]
+        # Override por-peer del modo de routing ORR. Sin esto se usa
+        # default_max_hops (0 = passthrough de fábrica). Subirlo a >=2 (cebolla
+        # multi-salto) requiere además orr_path (CSV de orr_ids) mientras la SDN
+        # no calcule paths; con 1 (cebolla E2E) no hace falta.
+        if pc.get("max_hops") is not None:
+            lines.append("max_hops = " + str(int(pc["max_hops"])))
+        if pc.get("orr_path") is not None:
+            lines.append("orr_path = " + q(str(pc["orr_path"])))
     merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 

@@ -886,6 +886,18 @@ impl Generator {
         if let Some(ep) = &self.ack_endpoint {
             header.insert(HDR_ACK_ENDPOINT.into(), ep.clone());
         }
+        // `max_hops` por-peer: override local o el default (0 = passthrough).
+        // Un peer puede subirlo para routing cebolla; el default respeta
+        // «max_hops = 0» de fábrica.
+        let max_hops = self.peers.max_hops_for(peer_dkms_id, self.default_max_hops);
+        // Los modos cebolla >=2/-1 necesitan el `orr_path`; si el peer lo
+        // declara localmente, va en el app_header (si no, el ORR lo pide a la
+        // SDN). En passthrough (0) y cebolla E2E (1) no hace falta.
+        if max_hops >= 2 || max_hops == -1 {
+            if let Some(path) = self.peers.orr_path_for(peer_dkms_id) {
+                header.insert("orr_path".into(), path);
+            }
+        }
         // Sellado extremo a extremo, con la cabecera ya completa (entra en el
         // AAD). Sale del DKMS cifrado y autenticado para el DKMS destino: ni
         // el ORR ni ningún QKC del camino ven ni pueden alterar el material.
@@ -909,13 +921,7 @@ impl Generator {
         drop(bytes);
         if let Err(e) = self
             .orr
-            .send_key(
-                &dest_orr_id,
-                sealed,
-                header,
-                self.default_max_hops,
-                grade.wire_byte(),
-            )
+            .send_key(&dest_orr_id, sealed, header, max_hops, grade.wire_byte())
             .await
         {
             // Si el ORR falla, no esperamos ACK — retiramos del pending.

@@ -78,6 +78,28 @@ impl PeerRegistry {
         self.orr.load_full()
     }
 
+    /// `max_hops` efectivo hacia un peer: su override local (`PeerCfg.max_hops`)
+    /// o el `default` (`southbound.default_max_hops`, 0 = passthrough). Permite
+    /// que un peer suba el modo de routing (cebolla ORR) sin cambiar el global.
+    /// Carga barata (`ArcSwap`), en el hot path del generador.
+    pub fn max_hops_for(&self, dkms_id: &str, default: i32) -> i32 {
+        self.inner
+            .load()
+            .get(dkms_id)
+            .and_then(|p| p.max_hops)
+            .unwrap_or(default)
+    }
+
+    /// Hint de `orr_path` (CSV de orr_ids) para un peer, necesario en los modos
+    /// cebolla `>=2`/`-1` mientras la SDN no calcule paths. `None` si no lo
+    /// declara: entonces el ORR lo pide a la SDN.
+    pub fn orr_path_for(&self, dkms_id: &str) -> Option<String> {
+        self.inner
+            .load()
+            .get(dkms_id)
+            .and_then(|p| p.orr_path.clone())
+    }
+
     /// Aplica la lista que manda la SDN. Devuelve `true` si algo cambió.
     ///
     /// Las políticas locales de un peer que ya conocíamos se conservan: la SDN
@@ -173,6 +195,28 @@ mod tests {
         for _ in 0..5 {
             assert!(!r.apply_from_sdn(&list));
         }
+    }
+
+    /// B5: `max_hops_for`/`orr_path_for` resuelven la política por-peer que el
+    /// generador ahora cablea. Sin override → el default (0 de fábrica); con
+    /// override → el del peer, y su `orr_path` acompaña.
+    #[test]
+    fn per_peer_max_hops_and_orr_path_resolve() {
+        let mut seed = HashMap::new();
+        seed.insert("dkms-2".to_string(), seed_peer("https://a:20006", None));
+        let mut p3 = seed_peer("https://b:20006", Some(3));
+        p3.orr_path = Some("orr_5,orr_9".into());
+        seed.insert("dkms-3".to_string(), p3);
+        let r = PeerRegistry::from_config(seed);
+
+        // Sin override: el default (0 = passthrough de fábrica).
+        assert_eq!(r.max_hops_for("dkms-2", 0), 0);
+        assert_eq!(r.orr_path_for("dkms-2"), None);
+        // Con override: el del peer, y su orr_path.
+        assert_eq!(r.max_hops_for("dkms-3", 0), 3);
+        assert_eq!(r.orr_path_for("dkms-3").as_deref(), Some("orr_5,orr_9"));
+        // Peer desconocido: cae al default.
+        assert_eq!(r.max_hops_for("dkms-x", 0), 0);
     }
 
     #[test]
