@@ -68,9 +68,19 @@ IDLE="${IDLE:-0}"
 # convaleciente (medido 2026-08-26: 40 jobs muertos en 3 s tras la avería del
 # clúster — el load moría entre binutils y gcc SOLO en los nodos de cómputo).
 # Reintentar con paciencia convierte esa muerte instantánea en una espera.
+#
+# OJO con el `set -e` de arriba: la comprobación TIENE que ir dentro de un
+# `if`. Escrita como `command -v rustc && rustc --version && break`, la lista
+# entera devuelve no-cero cuando rust no está, y al no estar en contexto de
+# condición `set -e` mata el trabajo AHÍ MISMO — el reintento no llegaba a
+# correr nunca. Prometía una espera paciente y lo que hacía era morir a la
+# primera: 4 trabajos de la campaña N=30 perdidos así el 2026-09-01, en 3-8 s
+# cada uno, con la salida cortada justo tras `binutils` igual que en 2026-08-26.
 for intento in $(seq 1 15); do
     module load cmake gcc/12.3.0 rust/1.88.0 2>&1 || true
-    command -v rustc >/dev/null 2>&1 && rustc --version >/dev/null 2>&1 && break
+    if command -v rustc >/dev/null 2>&1 && rustc --version >/dev/null 2>&1; then
+        break
+    fi
     echo "módulos incompletos (intento $intento/15); reintento en 60 s"
     sleep 60
 done
