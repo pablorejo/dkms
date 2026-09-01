@@ -36,6 +36,7 @@ pub mod kme;
 pub mod mtls_admin;
 pub mod pqc_handshake;
 pub mod pqc_source;
+pub mod rate_estimator;
 pub mod relay;
 pub mod routing;
 pub mod sdn_client;

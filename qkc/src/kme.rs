@@ -20,7 +20,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etsi::{
-    v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID},
+    v014::{Etsi014Key, Etsi014KeyContainer, Etsi014KeyID, Etsi014Status},
     Base64Bytes,
 };
 use reqwest::{
@@ -64,6 +64,15 @@ pub struct KmeClient {
     inner: Arc<KmeInner>,
 }
 
+/// Nivel del almacén de claves del KME en un instante.
+#[derive(Debug, Clone, Copy)]
+pub struct KmeStock {
+    /// `stored_key_count` del `/status` ETSI-014.
+    pub stored: u64,
+    /// `max_key_count` — el techo a partir del cual el KME descarta o pausa.
+    pub max: u64,
+}
+
 /// Fuente de claves OTP de un enlace QKC↔QKC.
 ///
 /// Abstrae de dónde salen las claves para que el [`KeyStore`] sea
@@ -85,6 +94,12 @@ pub trait KeySource: Send + Sync {
     async fn enc_keys(&self, number: u32) -> Result<Vec<OtpKey>>;
     /// Recupera el material de los `key_id` que anunció el peer.
     async fn dec_keys(&self, ids: &[Uuid]) -> Result<Vec<OtpKey>>;
+    /// Nivel del almacén del KME (`/status` ETSI-014), para el estimador de
+    /// tasa. `Ok(None)` = la fuente no tiene almacén consultable (PQC deriva
+    /// bajo demanda) y el estimador ni arranca; `Err` = KME inalcanzable.
+    async fn stock(&self) -> Result<Option<KmeStock>> {
+        Ok(None)
+    }
 }
 
 impl KmeClient {
@@ -189,6 +204,37 @@ impl KeySource for KmeClient {
                 material: zeroize::Zeroizing::new(mat),
             })
             .collect())
+    }
+
+    /// `GET /api/v1/keys/{sae_id}/status` — solo dos campos nos importan:
+    /// `stored_key_count` y `max_key_count`. Timeout corto propio (el del
+    /// cliente es 30 s, pensado para lotes de claves): esto se sondea ~1/s y
+    /// un KME colgado no debe encolar sondeos.
+    async fn stock(&self) -> Result<Option<KmeStock>> {
+        let inner = &self.inner;
+        let url = format!("{}/api/v1/keys/{}/status", inner.base, inner.sae_id);
+        let resp = inner
+            .http
+            .get(&url)
+            .header(ACCEPT, "application/json")
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(QkcError::Quditto(format!(
+                "status {url} -> {status}: {text}"
+            )));
+        }
+        let st: Etsi014Status = resp
+            .json()
+            .await
+            .map_err(|e| QkcError::Quditto(format!("status json decode: {e}")))?;
+        Ok(Some(KmeStock {
+            stored: st.stored_key_count,
+            max: st.max_key_count,
+        }))
     }
 
     /// `POST /api/v1/keys/{sae_id}/dec_keys` con body JSON ETSI 014.

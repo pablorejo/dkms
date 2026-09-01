@@ -35,7 +35,8 @@ use wire::{encode_notify_payload, Frame, FRAME_KEY_IDS_NOTIFY};
 use zeroize::Zeroizing;
 
 use crate::{
-    kme::{KeySource, OtpKey},
+    kme::{KeySource, KmeStock, OtpKey},
+    rate_estimator::{RateEstimator, RateReport},
     transport::peer_client::PeerOut,
 };
 
@@ -59,6 +60,26 @@ pub const REFILL_BATCH: u32 = 128;
 /// `REFILL_BATCH`: lotes grandes con quditto sin stock generan
 /// roundtrips lentos.
 const DEC_BATCH_MAX: usize = 128;
+
+/// Cadencia del sondeo de `/status` del KME que alimenta el estimador de
+/// tasa (ver `rate_estimator.rs`). Rápida mientras no hay estimación — la
+/// ventana limpia del arranque (el fill inicial drena el KME) dura pocos
+/// segundos y es la que da el primer número — y 1 Hz después.
+const STOCK_POLL: Duration = Duration::from_millis(1000);
+const STOCK_POLL_COLD: Duration = Duration::from_millis(250);
+/// Marca alta del stock del KME (fracción de `max_key_count`) a partir de la
+/// cual el sondeador *banca*: se lleva lotes al anillo ENC para que el KME no
+/// toque su techo. Al techo el KME descarta (o pausa) producción — material
+/// destruido Y tasa inobservable; bancado, ni se pierde ni deja de medirse.
+const BANK_HIGH_WATER_NUM: u64 = 3;
+const BANK_HIGH_WATER_DEN: u64 = 4;
+/// Hueco del anillo ENC que el banking nunca invade: el refill por demanda
+/// (`enc_low`) tiene que poder trabajar aunque estemos bancando.
+const BANK_RING_HEADROOM: usize = 512;
+/// Lotes de banking por sondeo, como máximo (16 × 128 = 2048 claves/sondeo:
+/// por encima de cualquier R razonable, sin convertir el sondeo en un bucle
+/// infinito si el KME produce más de lo que cabe).
+const MAX_BANK_ROUNDS: u32 = 16;
 
 pub struct KeyStore {
     /// Buffer FIFO de claves listas para cifrar (mías a cuenta del peer).
@@ -113,6 +134,12 @@ pub struct KeyStore {
     enc_inserted: Arc<Notify>,
     enc_inserted_seq: AtomicU64,
 
+    /// Estimador de la tasa de generación del enlace (solo mide algo en
+    /// fuentes con almacén — QKD; en PQC nunca recibe muestras). Lo alimentan
+    /// los workers (entregas) y `stock_rate_loop` (nivel del KME); lo lee el
+    /// anunciante a la SDN vía [`KeyStore::rate_report`].
+    estimator: Arc<RateEstimator>,
+
     // Stats (lecturas en hot path, escrituras desde workers).
     n_enc_taken: AtomicU64,
     n_dec_lookups: AtomicU64,
@@ -161,6 +188,7 @@ impl KeyStore {
             dec_inserted_seq: AtomicU64::new(0),
             enc_inserted: Arc::new(Notify::new()),
             enc_inserted_seq: AtomicU64::new(0),
+            estimator: Arc::new(RateEstimator::new()),
             n_enc_taken: AtomicU64::new(0),
             n_dec_lookups: AtomicU64::new(0),
             n_dec_misses: AtomicU64::new(0),
@@ -187,6 +215,11 @@ impl KeyStore {
         // DEC worker.
         let s = self.clone();
         tokio::spawn(async move { s.dec_refill_loop().await });
+        // Sondeo de stock del KME → estimador de tasa + banking. Si la
+        // fuente no tiene almacén (PQC), la primera llamada devuelve
+        // `Ok(None)` y la task muere sola.
+        let s = self.clone();
+        tokio::spawn(async move { s.stock_rate_loop().await });
         // Prefetch inicial.
         self.enc_low.notify_one();
     }
@@ -399,6 +432,11 @@ impl KeyStore {
     /// añadimos a la cola de `dec_pending` y notificamos al worker
     /// para que haga el `dec_keys` al quditto.
     pub fn notify_remote_enc(&self, ids: Vec<Uuid>) {
+        // Para el estimador, estas claves YA salieron del almacén (las drenó
+        // el `enc_keys` del peer hace milisegundos). Contarlas al completar
+        // nuestro `dec_keys` — segundos por detrás durante el fill — dejaba
+        // su ΔS sin compensar: −15 % medidos en vivo (2026-09-01).
+        self.estimator.on_peer_drained(ids.len());
         let mut g = self.dec_pending.lock();
         g.extend(ids);
         drop(g);
@@ -426,26 +464,7 @@ impl KeyStore {
                 let batch = (space as u32).clamp(1, REFILL_BATCH);
                 match self.kme.enc_keys(batch).await {
                     Ok(keys) => {
-                        self.n_refills_enc.fetch_add(1, Ordering::Relaxed);
-                        let mut ids_raw = Vec::with_capacity(keys.len());
-                        for k in keys {
-                            ids_raw.push(*k.key_id.as_bytes());
-                            // Si el anillo está lleno (no debería) la clave
-                            // se pierde: material QKD ya pagado, así que
-                            // queda contado en `keystore.levels`.
-                            if self.enc.push(k).is_err() {
-                                self.n_enc_dropped_full.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        // Despierta UN solo waiter (notify_one es FIFO en
-                        // tokio). El waiter que se despierta, tras coger
-                        // sus claves, hace cascade `notify_one` al siguiente
-                        // si quedan keys. Esto evita el thundering herd
-                        // del antiguo `notify_waiters` y da fairness real.
-                        self.enc_inserted_seq.fetch_add(1, Ordering::SeqCst);
-                        self.enc_inserted.notify_one();
-                        // NOTIFY al peer.
-                        self.send_notify(&ids_raw);
+                        self.absorb_enc_keys(keys);
                         debug!(
                             peer = self.peer_id,
                             batch = batch,
@@ -473,6 +492,109 @@ impl KeyStore {
         }
     }
 
+    /// Mete un lote recién entregado por el KME en el anillo ENC, cuenta,
+    /// despierta a un waiter y manda el NOTIFY al peer. Común al refill por
+    /// demanda y al banking del sondeador de stock.
+    fn absorb_enc_keys(&self, keys: Vec<OtpKey>) {
+        self.estimator.on_delivered(keys.len());
+        self.n_refills_enc.fetch_add(1, Ordering::Relaxed);
+        let mut ids_raw = Vec::with_capacity(keys.len());
+        for k in keys {
+            ids_raw.push(*k.key_id.as_bytes());
+            // Si el anillo está lleno (no debería) la clave
+            // se pierde: material QKD ya pagado, así que
+            // queda contado en `keystore.levels`.
+            if self.enc.push(k).is_err() {
+                self.n_enc_dropped_full.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // Despierta UN solo waiter (notify_one es FIFO en
+        // tokio). El waiter que se despierta, tras coger
+        // sus claves, hace cascade `notify_one` al siguiente
+        // si quedan keys. Esto evita el thundering herd
+        // del antiguo `notify_waiters` y da fairness real.
+        self.enc_inserted_seq.fetch_add(1, Ordering::SeqCst);
+        self.enc_inserted.notify_one();
+        // NOTIFY al peer.
+        self.send_notify(&ids_raw);
+    }
+
+    /// Sondeo periódico del `/status` del KME: alimenta el estimador de tasa
+    /// y banca lotes al anillo ENC cuando el stock roza su techo (donde el
+    /// KME descarta o pausa producción — material perdido y tasa invisible).
+    /// Ver `rate_estimator.rs` para el porqué completo.
+    async fn stock_rate_loop(self: Arc<Self>) {
+        // Mismo gate que el enc loop: el banking emite NOTIFYs, y con raíz
+        // per-época un NOTIFY en claro se descarta fail-closed en el peer.
+        if let Some(fa) = &self.frame_auth {
+            fa.wait_send_root(Duration::from_secs(30)).await;
+        }
+        let mut n_errs: u64 = 0;
+        loop {
+            match self.kme.stock().await {
+                // Fuente sin almacén (PQC): no hay nada que medir, jamás.
+                Ok(None) => return,
+                Ok(Some(s)) => {
+                    self.estimator.on_stock(s.stored, s.max, Instant::now());
+                    self.bank_from(s).await;
+                }
+                Err(e) => {
+                    self.estimator.on_stock_error();
+                    if common::log_throttle::nth_is_loud(n_errs) {
+                        warn!(
+                            peer = self.peer_id,
+                            error = %e,
+                            failures = n_errs + 1,
+                            "keystore.stock_poll failed"
+                        );
+                    }
+                    n_errs += 1;
+                }
+            }
+            // Cadencia rápida mientras no hay estimación: la ventana limpia
+            // del arranque (el fill inicial drena el KME) dura pocos
+            // segundos y es la que da el primer número.
+            let delay = if self.estimator.report().is_some() {
+                STOCK_POLL
+            } else {
+                STOCK_POLL_COLD
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// Banca lotes mientras el stock del KME siga sobre la marca alta y el
+    /// anillo tenga hueco (dejando [`BANK_RING_HEADROOM`] para el refill por
+    /// demanda). `stored` se descuenta en local entre lotes; el siguiente
+    /// sondeo lo re-ancla.
+    async fn bank_from(&self, s: KmeStock) {
+        let mut stored = s.stored;
+        for _ in 0..MAX_BANK_ROUNDS {
+            let Some(batch) = bank_batch_size(stored, s.max, self.enc.len(), self.enc.capacity())
+            else {
+                return;
+            };
+            match self.kme.enc_keys(batch).await {
+                Ok(keys) => {
+                    let n = keys.len() as u64;
+                    self.absorb_enc_keys(keys);
+                    debug!(
+                        peer = self.peer_id,
+                        batch = n,
+                        enc_len = self.enc.len(),
+                        kme_stored = stored,
+                        "keystore.bank"
+                    );
+                    stored = stored.saturating_sub(n);
+                    if n < u64::from(batch) {
+                        return; // el KME dio menos de lo pedido: no insistas
+                    }
+                }
+                Err(_) => return, // el error ya lo cuenta/loguea el refill normal
+            }
+        }
+    }
+
     async fn dec_refill_loop(self: Arc<Self>) {
         loop {
             self.dec_request.notified().await;
@@ -488,6 +610,11 @@ impl KeyStore {
                 };
                 match self.kme.dec_keys(&ids).await {
                     Ok(keys) => {
+                        // OJO: estas claves NO se cuentan aquí para el
+                        // estimador — ya se contaron al llegar el NOTIFY
+                        // (`notify_remote_enc`), que es cuando de verdad
+                        // salieron del almacén. Contarlas dos veces inflaría
+                        // la tasa.
                         self.n_refills_dec.fetch_add(1, Ordering::Relaxed);
                         let n = keys.len();
                         for k in keys {
@@ -547,9 +674,19 @@ impl KeyStore {
         }
     }
 
+    /// Estimación de la tasa de generación del enlace, si la hay (fuentes
+    /// con almacén — QKD — y al menos una ventana válida). La anuncia el
+    /// `SdnAnnouncer` en cada latido.
+    pub fn rate_report(&self) -> Option<RateReport> {
+        self.estimator.report()
+    }
+
     /// Diagnóstico — snapshot de niveles.
     pub fn levels(&self) -> KeyStoreLevels {
+        let rate = self.estimator.report();
         KeyStoreLevels {
+            rate_est_kps: rate.map(|r| r.keys_per_s),
+            rate_quality: rate.map(|r| r.quality.as_str()),
             enc_buffered: self.enc.len(),
             dec_buffered: self.dec.len(),
             enc_taken: self.n_enc_taken.load(Ordering::Relaxed),
@@ -578,8 +715,29 @@ pub struct KeyWaitTimeout {
     pub missing: usize,
 }
 
+/// Cuánto bancar en este lote, o `None` si no toca: el stock del KME sigue
+/// bajo la marca alta, o el anillo no tiene hueco por encima de la reserva
+/// del refill por demanda. Función pura para poder testearla sin KME.
+fn bank_batch_size(stored: u64, max: u64, ring_len: usize, ring_cap: usize) -> Option<u32> {
+    if max == 0 || stored < max / BANK_HIGH_WATER_DEN * BANK_HIGH_WATER_NUM {
+        return None;
+    }
+    let space = ring_cap.saturating_sub(ring_len);
+    if space <= BANK_RING_HEADROOM {
+        return None;
+    }
+    let batch = (space - BANK_RING_HEADROOM)
+        .min(REFILL_BATCH as usize)
+        .min(stored as usize);
+    u32::try_from(batch).ok().filter(|b| *b > 0)
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyStoreLevels {
+    /// Tasa de generación estimada del enlace (claves/s), si se pudo medir.
+    pub rate_est_kps: Option<f64>,
+    /// `measured` / `floor` / `unavailable` — ver `rate_estimator.rs`.
+    pub rate_quality: Option<&'static str>,
     pub enc_buffered: usize,
     pub dec_buffered: usize,
     pub enc_taken: u64,
@@ -612,6 +770,8 @@ pub fn spawn_level_logger(stores: Vec<(u32, Arc<KeyStore>)>, every: Duration) {
                 let l = ks.levels();
                 info!(
                     peer,
+                    rate = l.rate_est_kps.map(|r| format!("{r:.1}")),
+                    rate_q = l.rate_quality,
                     enc = l.enc_buffered,
                     dec = l.dec_buffered,
                     taken = l.enc_taken,
@@ -650,6 +810,130 @@ mod tests {
         }
         async fn dec_keys(&self, _ids: &[Uuid]) -> crate::error::Result<Vec<OtpKey>> {
             Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn bank_batch_respects_high_water_and_ring_headroom() {
+        let cap = BUFFER_TARGET * 2;
+        // Bajo la marca alta (3/4 de 8192 = 6144): no se banca.
+        assert_eq!(bank_batch_size(1000, 8192, 0, cap), None);
+        assert_eq!(bank_batch_size(6143, 8192, 0, cap), None);
+        // Sobre la marca con anillo vacío: lote completo.
+        assert_eq!(bank_batch_size(8000, 8192, 0, cap), Some(REFILL_BATCH));
+        // El anillo respeta la reserva del refill por demanda.
+        assert_eq!(
+            bank_batch_size(8000, 8192, cap - BANK_RING_HEADROOM, cap),
+            None
+        );
+        assert_eq!(
+            bank_batch_size(8000, 8192, cap - BANK_RING_HEADROOM - 10, cap),
+            Some(10)
+        );
+        // El stock disponible acota el lote (buffer diminuto: marca = 6).
+        assert_eq!(bank_batch_size(7, 8, 0, cap), Some(7));
+    }
+
+    /// KME falso que produce a `rate` claves/s de reloj real y sirve
+    /// `/status` como un quditto en modo descarte: `stored` se recorta al
+    /// techo (la producción que no cabe se pierde). El balance del estimador
+    /// cierra por construcción, así que la medida debe clavar `rate` aunque
+    /// el scheduler del test tenga jitter.
+    struct RampKme {
+        start: Instant,
+        rate: f64,
+        max: u64,
+        delivered: AtomicU64,
+        lost: AtomicU64,
+    }
+
+    impl RampKme {
+        fn new(rate: f64, max: u64) -> Self {
+            Self {
+                start: Instant::now(),
+                rate,
+                max,
+                delivered: AtomicU64::new(0),
+                lost: AtomicU64::new(0),
+            }
+        }
+        fn stored(&self) -> u64 {
+            let produced = (self.start.elapsed().as_secs_f64() * self.rate) as u64;
+            let gone = self.delivered.load(Ordering::Relaxed) + self.lost.load(Ordering::Relaxed);
+            let raw = produced.saturating_sub(gone);
+            if raw > self.max {
+                // descarte al techo, como quditto: lo perdido no vuelve
+                self.lost.fetch_add(raw - self.max, Ordering::Relaxed);
+                self.max
+            } else {
+                raw
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KeySource for RampKme {
+        async fn enc_keys(&self, number: u32) -> crate::error::Result<Vec<OtpKey>> {
+            let n = (u64::from(number)).min(self.stored());
+            if n == 0 {
+                return Err(crate::error::QkcError::NotEnoughKeys {
+                    requested: number,
+                    received: 0,
+                });
+            }
+            self.delivered.fetch_add(n, Ordering::Relaxed);
+            Ok((0..n)
+                .map(|_| OtpKey {
+                    key_id: Uuid::new_v4(),
+                    material: Zeroizing::new(vec![0u8; 32]),
+                })
+                .collect())
+        }
+        async fn dec_keys(&self, _ids: &[Uuid]) -> crate::error::Result<Vec<OtpKey>> {
+            Ok(Vec::new())
+        }
+        async fn stock(&self) -> crate::error::Result<Option<KmeStock>> {
+            Ok(Some(KmeStock {
+                stored: self.stored(),
+                max: self.max,
+            }))
+        }
+    }
+
+    /// Integración del sondeador: sin NINGÚN consumidor, el estimador mide la
+    /// producción (vía la subida del stock + el banking) y el banking mete en
+    /// el anillo claves que el techo del KME habría destruido.
+    #[tokio::test]
+    async fn stock_poller_measures_and_banks_without_consumers() {
+        let rate = 1000.0;
+        let kme = Arc::new(RampKme::new(rate, 2000));
+        let ks = KeyStore::new(
+            kme,
+            Arc::new(PeerOut::new()),
+            2,
+            "127.0.0.1:1".into(),
+            1,
+            256,
+            None,
+        );
+        ks.spawn_workers();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let l = ks.levels();
+            if let Some(est) = l.rate_est_kps {
+                // Balance exacto por construcción del fake: 10 % de margen.
+                if (est - rate).abs() < rate * 0.10 && l.enc_buffered > REFILL_THRESHOLD {
+                    assert_eq!(l.rate_quality, Some("measured"));
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sin converger: {:?} enc={}",
+                l.rate_est_kps,
+                l.enc_buffered
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 

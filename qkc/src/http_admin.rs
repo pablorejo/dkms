@@ -231,6 +231,8 @@ async fn get_stats(State(svc): State<QkcService>) -> impl IntoResponse {
         links.insert(
             peer_id.to_string(),
             serde_json::json!({
+                "rate_est_kps": l.rate_est_kps,
+                "rate_quality": l.rate_quality,
                 "enc_buffered": l.enc_buffered,
                 "dec_buffered": l.dec_buffered,
                 "enc_taken": l.enc_taken,
