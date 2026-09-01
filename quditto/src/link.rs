@@ -43,6 +43,9 @@ pub fn link_rate_kps(r0_kps: f64, alpha: f64, distance_km: f64) -> f64 {
 pub struct Stats {
     pub generated: u64,
     pub dropped: u64,
+    /// Claves NO destiladas por buffer lleno en modo `pause` (el análogo de
+    /// `dropped` para el hardware real, que para en vez de tirar).
+    pub paused: u64,
     pub delivered_enc: u64,
     pub delivered_dec: u64,
 }
@@ -58,6 +61,7 @@ pub struct LinkBuffer {
     // garantizada — solo aproximaciones para `/status`.
     n_generated: AtomicU64,
     n_dropped: AtomicU64,
+    n_paused: AtomicU64,
     n_delivered_enc: AtomicU64,
     n_delivered_dec: AtomicU64,
 }
@@ -72,6 +76,7 @@ impl LinkBuffer {
             rate_kps,
             n_generated: AtomicU64::new(0),
             n_dropped: AtomicU64::new(0),
+            n_paused: AtomicU64::new(0),
             n_delivered_enc: AtomicU64::new(0),
             n_delivered_dec: AtomicU64::new(0),
         }
@@ -137,6 +142,19 @@ impl LinkBuffer {
         self.fresh.len() as u64
     }
 
+    /// Hueco libre del FIFO `fresh` (para el modo `pause` del minter).
+    #[inline]
+    pub fn fresh_space(&self) -> u64 {
+        (self.fresh.capacity() - self.fresh.len()) as u64
+    }
+
+    /// El minter en modo `pause` dejó de destilar `n` claves por falta de
+    /// hueco.
+    #[inline]
+    pub fn note_paused(&self, n: u64) {
+        self.n_paused.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Número de `key_id`s entregados-pero-no-leídos-por-dec.
     #[inline]
     pub fn delivered_pending(&self) -> u64 {
@@ -147,6 +165,7 @@ impl LinkBuffer {
         Stats {
             generated: self.n_generated.load(Ordering::Relaxed),
             dropped: self.n_dropped.load(Ordering::Relaxed),
+            paused: self.n_paused.load(Ordering::Relaxed),
             delivered_enc: self.n_delivered_enc.load(Ordering::Relaxed),
             delivered_dec: self.n_delivered_dec.load(Ordering::Relaxed),
         }
@@ -166,6 +185,9 @@ mod tests {
             distance_km: 5.0,
             max_buffer_keys: 4,
             key_size_bits: 256,
+            full_mode: crate::config::FullMode::Drop,
+            block_keys: 0,
+            rate_step: None,
         }
     }
 

@@ -42,20 +42,33 @@ impl QudittoService {
     ///
     /// El RNG (`ChaCha20Rng`) se aloja en stack-localmente de la task:
     /// se siembra una sola vez desde `OsRng` y luego no hace syscalls.
-    /// Cada tick mintea `round(R · Δt)` claves de golpe y las empuja
-    /// al `ArrayQueue` lock-free.
+    /// La producción se lleva en un acumulador fraccional `due` (claves
+    /// devengadas y aún no empujadas), lo que unifica los tres modos:
     ///
     /// **Cadencia adaptativa**:
     /// - `R ≥ 10` keys/s → lotes de 100 ms (`R/10` claves por tick).
     /// - `R < 10` keys/s → 1 clave cada `1/R` segundos (clamp ≥100 ms).
     /// - `R == 0` → minter dormido para siempre.
+    ///
+    /// **Buffer lleno** (`full_mode`): `drop` mintea y descarta (histórico);
+    /// `pause` deja de destilar como el hardware real — `due` se congela en
+    /// un bloque como mucho, sin acumular deuda, y `paused` lo cuenta.
+    ///
+    /// **`block_keys`**: la clave sale en bloques de N (escalera en
+    /// `stored_key_count`, como la amplificación de privacidad real).
+    ///
+    /// **`rate_step`**: a los `at_s` segundos la tasa se multiplica por
+    /// `factor` y la cadencia se recalcula — para validar el estimador del
+    /// QKC contra un cambio real.
     pub async fn run_minter(self) -> Result<()> {
-        let rate = self.link.current_rate_kps();
+        let rate0 = self.link.current_rate_kps();
         info!(
             r0 = self.cfg().r0,
             alpha = self.cfg().alpha,
             distance = self.cfg().distance_km,
-            rate_kps = rate,
+            rate_kps = rate0,
+            full_mode = ?self.cfg().full_mode,
+            block_keys = self.cfg().block_keys,
             "quditto: minter started",
         );
 
@@ -64,24 +77,40 @@ impl QudittoService {
         let stats_link = self.link.clone();
         tokio::spawn(async move { run_stats_logger(stats_link).await });
 
-        if rate <= 0.0 {
+        if rate0 <= 0.0 {
             futures_park().await;
             return Ok(());
         }
 
-        let tick_ms: u64 = if rate >= 10.0 {
-            100
-        } else {
-            ((1000.0 / rate).round() as u64).max(100)
+        let cadence = |rate: f64| -> (Duration, f64) {
+            let tick_ms: u64 = if rate >= 10.0 {
+                100
+            } else {
+                ((1000.0 / rate).round() as u64).max(100)
+            };
+            (
+                Duration::from_millis(tick_ms),
+                rate * tick_ms as f64 / 1000.0,
+            )
         };
-        let tick_dur = Duration::from_millis(tick_ms);
-        let dt_s = tick_ms as f64 / 1000.0;
-        let per_tick = (rate * dt_s).round() as u64;
-        debug!(tick_ms, per_tick, "quditto: minter cadence");
+
+        let mut rate = rate0;
+        let (mut tick_dur, mut per_tick) = cadence(rate);
+        debug!(
+            tick_ms = tick_dur.as_millis() as u64,
+            per_tick, "quditto: minter cadence"
+        );
 
         // RNG userspace inicializado una vez. No syscalls en el hot path.
         let mut rng = build_rng();
         let n_bytes = (self.cfg().key_size_bits / 8) as usize;
+        let full_mode = self.cfg().full_mode;
+        // Bloque de entrega; 1 = continuo.
+        let block = self.cfg().block_keys.max(1);
+        let step = self.cfg().rate_step;
+        let start = std::time::Instant::now();
+        let mut stepped = false;
+        let mut due: f64 = 0.0;
 
         let mut ticker = tokio::time::interval(tick_dur);
         // Skip el primer tick instantáneo de `interval` para no minar
@@ -90,12 +119,45 @@ impl QudittoService {
 
         loop {
             ticker.tick().await;
-            for _ in 0..per_tick {
-                let pushed = self.link.push(Key::mint(&mut rng, n_bytes));
-                if !pushed {
-                    // Buffer lleno — el resto del tick va a drop también.
+
+            if let (false, Some(s)) = (stepped, step) {
+                if start.elapsed().as_secs_f64() >= s.at_s {
+                    stepped = true;
+                    rate *= s.factor;
+                    info!(
+                        rate_kps = rate,
+                        factor = s.factor,
+                        "quditto: rate step applied"
+                    );
+                    if rate <= 0.0 {
+                        futures_park().await;
+                        return Ok(());
+                    }
+                    (tick_dur, per_tick) = cadence(rate);
+                    ticker = tokio::time::interval(tick_dur);
+                    ticker.tick().await;
+                }
+            }
+
+            due += per_tick;
+            while due >= block as f64 {
+                if full_mode == crate::config::FullMode::Pause && self.link.fresh_space() < block {
+                    // Pausa: se deja de destilar. La deuda no crece más allá
+                    // del bloque en curso — al liberarse hueco se reanuda a
+                    // tasa R, sin ráfaga de "backlog" que nunca existió.
+                    let cap = block as f64;
+                    if due > cap {
+                        self.link.note_paused((due - cap) as u64);
+                        due = cap;
+                    }
                     break;
                 }
+                for _ in 0..block {
+                    // En `drop` el push cuenta el descarte; en `pause` ya
+                    // comprobamos hueco para el bloque entero.
+                    let _ = self.link.push(Key::mint(&mut rng, n_bytes));
+                }
+                due -= block as f64;
             }
         }
     }
@@ -119,6 +181,7 @@ async fn run_stats_logger(link: Arc<LinkBuffer>) {
         let dt = STATS_LOG_PERIOD.as_secs_f64();
         let gen_rate = (cur.generated.saturating_sub(prev.generated)) as f64 / dt;
         let drop_rate = (cur.dropped.saturating_sub(prev.dropped)) as f64 / dt;
+        let paused_rate = (cur.paused.saturating_sub(prev.paused)) as f64 / dt;
         let enc_rate = (cur.delivered_enc.saturating_sub(prev.delivered_enc)) as f64 / dt;
         let dec_rate = (cur.delivered_dec.saturating_sub(prev.delivered_dec)) as f64 / dt;
         info!(
@@ -130,6 +193,7 @@ async fn run_stats_logger(link: Arc<LinkBuffer>) {
             delivered_dec_total = cur.delivered_dec,
             gen_kps = format!("{gen_rate:.1}"),
             drop_kps = format!("{drop_rate:.1}"),
+            paused_kps = format!("{paused_rate:.1}"),
             enc_serve_kps = format!("{enc_rate:.1}"),
             dec_serve_kps = format!("{dec_rate:.1}"),
             "quditto.stats",

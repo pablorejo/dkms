@@ -45,6 +45,23 @@ struct Cli {
     #[arg(long, default_value_t = 256, env = "QUDITTO_KEY_SIZE_BITS")]
     key_size_bits: u32,
 
+    /// Qué pasa con la producción cuando el buffer está lleno: `drop`
+    /// (mintear y descartar, histórico) o `pause` (dejar de destilar, como
+    /// el hardware QKD real).
+    #[arg(long, default_value = "drop", env = "QUDITTO_FULL_MODE")]
+    full_mode: String,
+
+    /// Entrega la clave destilada en bloques de N (escalera en
+    /// `stored_key_count`, como la amplificación de privacidad real).
+    /// 0 = continuo.
+    #[arg(long, default_value_t = 0, env = "QUDITTO_BLOCK_KEYS")]
+    block_keys: u64,
+
+    /// Escalón de tasa "SEGUNDOS:FACTOR" (p. ej. "120:0.5" = a los 2 min la
+    /// tasa cae a la mitad). Para validar el estimador del QKC.
+    #[arg(long, env = "QUDITTO_RATE_STEP")]
+    rate_step: Option<String>,
+
     /// TLS del ETSI-014: `on` (mTLS, default — por este canal viajan los pads
     /// OTP) u `off` (claro; SOLO si el QKC y este quditto comparten host).
     #[arg(long, default_value = "on", env = "QUDITTO_TLS")]
@@ -80,6 +97,29 @@ async fn main() -> Result<()> {
     common::tls_pqc::ensure_process_default().map_err(anyhow::Error::msg)?;
 
     let cli = Cli::parse();
+    let full_mode = match cli.full_mode.to_ascii_lowercase().as_str() {
+        "drop" => quditto::config::FullMode::Drop,
+        "pause" => quditto::config::FullMode::Pause,
+        other => {
+            eprintln!("invalid --full-mode {other:?}: use drop|pause");
+            std::process::exit(2);
+        }
+    };
+    let rate_step = match cli.rate_step.as_deref() {
+        None => None,
+        Some(raw) => match raw.split_once(':').and_then(|(a, f)| {
+            Some(quditto::config::RateStep {
+                at_s: a.parse().ok()?,
+                factor: f.parse().ok()?,
+            })
+        }) {
+            Some(s) => Some(s),
+            None => {
+                eprintln!("invalid --rate-step {raw:?}: expected \"SECONDS:FACTOR\"");
+                std::process::exit(2);
+            }
+        },
+    };
     let cfg = QudittoConfig {
         listen: cli.listen.clone(),
         r0: cli.r0,
@@ -87,6 +127,9 @@ async fn main() -> Result<()> {
         distance_km: cli.distance,
         max_buffer_keys: cli.max_buffer,
         key_size_bits: cli.key_size_bits,
+        full_mode,
+        block_keys: cli.block_keys,
+        rate_step,
     };
     if let Err(e) = cfg.validate() {
         eprintln!("invalid config: {e}");
