@@ -59,6 +59,9 @@ TOPO="${TOPO:-ring}"
 LINK_TYPE="${LINK_TYPE:-pqc}"
 THREADS="${THREADS:-1 4 16}"
 DURATION="${DURATION:-300}"
+# Reposo medido antes del barrido (0 = ninguno). Es el tercer régimen de
+# carga: la malla viva sin NADA de tráfico SAE.
+IDLE="${IDLE:-0}"
 
 # cmake: lo necesita highs-sys (backend `highs` de good-lp) para compilar HiGHS.
 # El módulo de rust puede no cargar si el montaje del árbol de módulos está
@@ -101,6 +104,21 @@ time cargo build --release -j "$(nproc)"
 
 ARGS=(--arm "$ARM" --nodes "$NODES" --threads "$THREADS" --duration "$DURATION")
 [ "$ARM" = B ] && ARGS+=(--tokens "$TOKENS")
+[ "$IDLE" -gt 0 ] 2>/dev/null && ARGS+=(--idle "$IDLE")
+
+# Rescate incremental del informe. Los artefactos viven en el scratch del nodo
+# y solo se copian al home AL FINAL: un trabajo que muere en el último punto
+# del barrido (OOM, límite de tiempo) se llevaba por delante también las fases
+# que SÍ habían terminado. Con esto, lo medido hasta el momento sobrevive.
+DEST_EARLY="$HOME/dkms_rust/results-$ARM-$TOPO-$LINK_TYPE-$SLURM_JOB_ID"
+mkdir -p "$DEST_EARLY"
+( while sleep 60; do
+    for d in "$DKMS_STRESS_OUT"/stress-"$ARM"-*; do
+        [ -f "$d/report.txt" ] && cp "$d/report.txt" "$DEST_EARLY/report.partial.txt" 2>/dev/null
+    done
+  done ) &
+RESCUER=$!
+trap 'kill $RESCUER 2>/dev/null' EXIT
 ./tests/local-mesh/stress.sh "${ARGS[@]}"
 
 # El informe y los CSV comprimidos al home; el scratch del nodo se va con el

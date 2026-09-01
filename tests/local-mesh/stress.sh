@@ -36,6 +36,7 @@ if [ -x "$LOADER_BIN" ]; then LOADER_CMD=("$LOADER_BIN"); else LOADER_CMD=(pytho
 ARM=A
 NODES=10
 SWEEP=(1 4 16)
+IDLE=0                         # s de reposo medido ANTES del barrido (0 = no)
 DURATION=300
 TOKENS=""                      # rama B: max_tokens_per_peer_per_tick
 SUSTAIN_FROM=60                # segundos desde el inicio en que el buffer ya drenó
@@ -50,6 +51,7 @@ while (( $# )); do
         --arm)      ARM="$2"; shift 2 ;;
         --nodes)    NODES="$2"; shift 2 ;;
         --threads)  read -ra SWEEP <<< "$2"; shift 2 ;;
+        --idle)     IDLE="$2"; shift 2 ;;
         --duration) DURATION="$2"; shift 2 ;;
         --tokens)   TOKENS="$2"; shift 2 ;;
         *) echo "opción desconocida: $1" >&2; exit 2 ;;
@@ -131,6 +133,43 @@ wait_buffers_full() {
         sleep 5
     done
     return 1
+}
+
+# ─── reposo: la malla viva sin NINGUNA carga SAE ───────────────────────────
+#
+# El tercer régimen de carga, y el único que aísla lo que hace el sistema por
+# sí solo: el generador llena buffers hasta `capacity_per_peer` y ahí se para,
+# las rotaciones (QKC, ORR, e2e) siguen su cadencia, la presencia late y el
+# estimador de tasa del QKC se queda sin ventanas observables — es justo el
+# estado en que debe mantener su estimación como `floor` y NO decaer a 0.
+# Con carga no se ve ninguna de esas cosas: quedan tapadas por el tráfico.
+run_idle() {
+    local secs=$1 tag=idle
+    head1 "reposo: $secs s SIN carga SAE ($NODES nodos, $(( NODES * (NODES-1) )) pares ociosos)"
+    start_sampling "$tag"
+    # Los buffers se llenan primero: sin esto se mediría el transitorio de
+    # llenado y no el reposo.
+    if wait_buffers_full 300; then
+        log "   buffers llenos; midiendo reposo"
+    else
+        log "   AVISO: los buffers no llegaron a llenarse en 300 s; el reposo se mide igual"
+    fi
+    sleep "$secs"
+    stop_sampling
+
+    # Lo que se quiere ver en reposo, del último muestreo.
+    log "   estado al final del reposo:"
+    local last
+    last=$(awk '/^=== t=/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$OUT/$tag.samples.txt")
+    printf '%s\n' "$last" | grep -oE 'enc=[0-9]+|dec=[0-9]+|expired=[0-9]+|recv_corrupt=[0-9]+' \
+        | sort | uniq -c | sort -rn | head -8 | sed 's/^/     /' | tee -a "$OUT/report.txt"
+    # El estimador de tasa (solo enlaces QKD: en PQC no hay almacén que sondear).
+    log "   estimador de tasa del QKC (rate/rate_q por enlace):"
+    printf '%s\n' "$last" | grep -oE 'rate="[0-9.]+" rate_q="[a-z]+"' \
+        | sort | uniq -c | sort -rn | head -6 | sed 's/^/     /' | tee -a "$OUT/report.txt"
+    if ! printf '%s\n' "$last" | grep -q 'rate_q='; then
+        log "     (sin estimación — esperado en enlaces PQC)"
+    fi
 }
 
 # ─── una tanda del barrido ─────────────────────────────────────────────────
@@ -362,6 +401,7 @@ head1 "tiempos de convergencia"
 sleep 90
 "$HERE/bootstrap_times.py" "$MESH_DIR" 2>&1 | tee -a "$OUT/report.txt"
 
+(( IDLE > 0 )) && run_idle "$IDLE"
 for th in "${SWEEP[@]}"; do run_point "$th"; done
 verify_integrity
 health
