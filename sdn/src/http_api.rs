@@ -239,6 +239,11 @@ async fn get_links(State(svc): State<SdnService>) -> impl IntoResponse {
                 "max_buffer_size":    meta.max_buffer_size,
                 "link_type":          if meta.is_pqc() { "pqc" } else { "qkd" },
                 "capacity_keys_per_second": meta.capacity_keys_per_second(),
+                // Tasa medida in situ: la combinada (min de extremos, con
+                // histéresis) que usa el solver, y los reportes crudos por
+                // extremo para diagnóstico.
+                "measured_keys_per_s": meta.measured_keys_per_s,
+                "measured_reports": svc.topology.measured.reports(a, b),
             })
         })
         .collect();

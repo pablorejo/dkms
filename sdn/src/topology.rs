@@ -103,6 +103,20 @@ pub enum BulkSaeOutcome {
 /// [`TopologyStore::register_qkc`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QkcLinkAnnounce {
+    /// Tasa de generación MEDIDA que reporta este extremo (claves/s), del
+    /// estimador in situ del QKC (`qkc/src/rate_estimator.rs`). Va FUERA de
+    /// `meta` a propósito: no es config declarada — dos extremos midiendo el
+    /// mismo enlace jamás coinciden al decimal, y dentro de `EdgeMeta`
+    /// entraría en la regla de conflicto y en la igualdad del heartbeat.
+    /// Tiene su propio camino: registro por extremo (fuera del snapshot),
+    /// combinación `min` e histéresis (ver [`MeasuredRates`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_rate_keys_per_s: Option<f64>,
+    /// `measured` / `floor` / `unavailable` — diagnóstico, no decisión.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_age_ms: Option<u64>,
     pub neighbor_id: String,
     #[serde(flatten)]
     pub meta: EdgeMeta,
@@ -312,6 +326,16 @@ pub struct EdgeMeta {
     /// insignificante en despliegues PQC-only.
     #[serde(default = "default_pqc_capacity")]
     pub pqc_capacity_keys_per_s: f64,
+    /// Tasa de generación **medida** del enlace QKD (claves/s), cuantizada
+    /// por histéresis. Cuando está, manda sobre la fórmula de quditto en
+    /// [`EdgeMeta::capacity_keys_per_second`] — `r0/alpha/distance` quedan
+    /// como prior de arranque. `serde(skip)`: NO viaja en las declaraciones
+    /// (llega por su campo propio del anuncio y se aplica vía
+    /// [`Topology::apply_measured_capacity`]), no entra en la igualdad del
+    /// heartbeat ni en la regla de conflicto, y `recompute_edge` la conserva
+    /// al reconstruir la arista.
+    #[serde(skip)]
+    pub measured_keys_per_s: Option<f64>,
 }
 
 /// Respaldo cuando un QKC anuncia un enlace QKD sin declarar `r0`. Antes eran
@@ -345,6 +369,7 @@ impl Default for EdgeMeta {
             link_type: LinkType::default(),
             key_size_bits: default_key_size_bits(),
             pqc_capacity_keys_per_s: default_pqc_capacity(),
+            measured_keys_per_s: None,
         }
     }
 }
@@ -357,12 +382,15 @@ impl EdgeMeta {
     }
 
     /// Capacidad efectiva de la arista para el modelo de rates, del tipo que
-    /// sea el enlace: la fórmula de quditto en QKD, la capacidad declarada en
+    /// sea el enlace: en QKD la tasa **medida** in situ si la hay (la fórmula
+    /// de quditto queda de prior de arranque), la capacidad declarada en
     /// PQC. Único punto de decisión — quien necesite la capacidad de una
     /// arista pasa por aquí, no por `is_pqc()` más un caso especial.
     pub fn capacity_keys_per_second(&self) -> f64 {
         if self.is_pqc() {
             self.pqc_capacity_keys_per_s.max(0.0)
+        } else if let Some(m) = self.measured_keys_per_s {
+            m.max(0.0)
         } else {
             self.quditto_capacity_keys_per_second()
         }
@@ -824,7 +852,7 @@ impl Topology {
         let from_other = self.declared.get(other).and_then(|m| m.get(me)).cloned();
         let key = edge_key(me, other);
 
-        let meta = match (from_me, from_other) {
+        let mut meta = match (from_me, from_other) {
             // Ya no la declara ninguno de los dos: fuera del grafo. Es la
             // única vía por la que una arista desaparece sin que caduque un
             // nodo entero.
@@ -852,6 +880,13 @@ impl Topology {
                 }
             }
         };
+
+        // La tasa medida no viaja en las declaraciones (`serde(skip)`), así
+        // que reconstruir la arista desde ellas la borraría en cada latido:
+        // consérvala de la arista viva.
+        if let Some(existing) = self.edges.get(&key) {
+            meta.measured_keys_per_s = existing.measured_keys_per_s;
+        }
 
         // Una arista necesita sus dos extremos registrados. Que falte uno no
         // es un error, es que todavía no ha arrancado: la declaración queda
@@ -986,17 +1021,101 @@ impl Topology {
             // En PQC la capacidad ES el campo declarado; no hay fórmula que
             // invertir.
             edge.pqc_capacity_keys_per_s = capacity_kps;
+        } else if edge.measured_keys_per_s.is_some() {
+            // Con medición activa la capacidad efectiva ES la medida:
+            // reescribir r0 quedaría enmascarado. El override manual pisa la
+            // medida — hasta que el estimador cruce la histéresis otra vez.
+            edge.measured_keys_per_s = Some(capacity_kps);
         } else {
             let exp = edge.alpha * edge.distance_km as f64 / 10.0;
             edge.r0_keys_per_second = capacity_kps * 10f64.powf(exp);
         }
         Some(true)
     }
+
+    /// Aplica la tasa medida combinada a una arista QKD, con la misma
+    /// histéresis que [`Self::set_edge_capacity_kps`] (5 % o 0,5 claves/s):
+    /// la medición cambia en cada latido por ruido, y cada `true` de aquí es
+    /// un bump de versión — re-push de forwarding y recompute de rates.
+    /// `false` también para aristas PQC (nada físico que medir ahí) y para
+    /// aristas que aún no existen (la declaración sigue pendiente).
+    pub fn apply_measured_capacity(&mut self, a: &str, b: &str, kps: f64) -> bool {
+        if !(kps.is_finite() && kps >= 0.0) {
+            return false;
+        }
+        let Some(edge) = self.edges.get_mut(&edge_key(a, b)) else {
+            return false;
+        };
+        if edge.is_pqc() {
+            return false;
+        }
+        let current = edge.capacity_keys_per_second();
+        let threshold = (current * 0.05).max(0.5);
+        if (current - kps).abs() < threshold {
+            return false;
+        }
+        edge.measured_keys_per_s = Some(kps);
+        true
+    }
 }
 
 // ----------------------------------------------------------------- store
 
 /// Lock-free reader / serialized-writer wrapper around [`Topology`].
+/// Último reporte de tasa medida de cada extremo de cada arista QKD.
+///
+/// Vive **fuera** del snapshot [`Topology`], como `crate::presence` y por la
+/// misma razón: cambia en cada latido (valor con ruido, edad), y dentro del
+/// snapshot cada heartbeat parecería una modificación. Al snapshot solo pasa
+/// el valor **combinado y cuantizado** (histéresis) vía
+/// [`Topology::apply_measured_capacity`].
+///
+/// Combinación: **mín de los dos extremos**. Es lo físicamente correcto (el
+/// enlace no sostiene más de lo que reporta el extremo lento) y es monótono
+/// — no oscila entre latidos alternos de cada extremo. Con un solo extremo
+/// reportando, manda él.
+#[derive(Debug, Default)]
+pub struct MeasuredRates {
+    by_edge: Mutex<HashMap<EdgeKey, HashMap<String, EndpointRate>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointRate {
+    pub keys_per_s: f64,
+    /// `measured` / `floor` / `unavailable` — diagnóstico del reporte.
+    pub quality: String,
+}
+
+impl MeasuredRates {
+    /// Registra el reporte de `reporter` sobre su enlace con `neighbor` y
+    /// devuelve la tasa combinada de la arista.
+    pub fn record(&self, reporter: &str, neighbor: &str, kps: f64, quality: Option<&str>) -> f64 {
+        let mut g = self.by_edge.lock();
+        let per_end = g.entry(edge_key(reporter, neighbor)).or_default();
+        per_end.insert(
+            reporter.to_string(),
+            EndpointRate {
+                keys_per_s: kps,
+                quality: quality.unwrap_or("measured").to_string(),
+            },
+        );
+        per_end
+            .values()
+            .map(|e| e.keys_per_s)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Reportes por extremo de una arista, para diagnóstico (`/links`).
+    pub fn reports(&self, a: &str, b: &str) -> Option<HashMap<String, EndpointRate>> {
+        self.by_edge.lock().get(&edge_key(a, b)).cloned()
+    }
+
+    /// Olvida los reportes de una arista (cuando muere su declaración).
+    pub fn forget_edge(&self, a: &str, b: &str) {
+        self.by_edge.lock().remove(&edge_key(a, b));
+    }
+}
+
 ///
 /// Cloning the store is cheap (it's just an `Arc`); the inner snapshot is
 /// only cloned on write.
@@ -1004,6 +1123,9 @@ impl Topology {
 pub struct TopologyStore {
     inner: Arc<ArcSwap<Topology>>,
     write_mux: Arc<Mutex<()>>,
+    /// Reportes crudos de tasa medida, por arista y extremo. Fuera del
+    /// snapshot a propósito — ver [`MeasuredRates`].
+    pub measured: Arc<MeasuredRates>,
 }
 
 impl Default for TopologyStore {
@@ -1017,6 +1139,7 @@ impl TopologyStore {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(initial)),
             write_mux: Arc::new(Mutex::new(())),
+            measured: Arc::new(MeasuredRates::default()),
         }
     }
 
@@ -1096,6 +1219,27 @@ impl TopologyStore {
             qkc_id: reg.id.clone(),
             ..Default::default()
         };
+        // Reportes de tasa medida: al registro lateral SIEMPRE (no toca el
+        // snapshot ni la versión); al snapshot solo el combinado, con
+        // histéresis, dentro del mismo mutate que el resto del anuncio.
+        let measured: Vec<(String, f64)> = reg
+            .links
+            .iter()
+            .filter(|l| l.neighbor_id != reg.id)
+            .filter_map(|l| {
+                let kps = l.measured_rate_keys_per_s?;
+                if !(kps.is_finite() && kps >= 0.0) {
+                    return None;
+                }
+                let combined = self.measured.record(
+                    &reg.id,
+                    &l.neighbor_id,
+                    kps,
+                    l.measured_quality.as_deref(),
+                );
+                Some((l.neighbor_id.clone(), combined))
+            })
+            .collect();
         let changed = self.mutate(|t| {
             // Keep any kme_host we already knew: overwriting it with None on
             // every heartbeat would look like a change and bump the version.
@@ -1116,8 +1260,16 @@ impl TopologyStore {
             changed |= t.apply_declared_links(&reg.id, links, &mut out);
             // Y este QKC puede ser el vecino que otros llevaban esperando.
             changed |= t.close_declarations_pointing_at(&reg.id, &mut out);
+            // La tasa medida, tras cerrar aristas: una recién nacida la
+            // recibe en este mismo anuncio.
+            for (neighbor, kps) in &measured {
+                changed |= t.apply_measured_capacity(&reg.id, neighbor, *kps);
+            }
             changed
         });
+        for n in &out.edges_removed {
+            self.measured.forget_edge(&reg.id, n);
+        }
         out.changed = changed;
         out
     }
@@ -2017,6 +2169,9 @@ mod tests {
                 .iter()
                 .map(|n| QkcLinkAnnounce {
                     neighbor_id: (*n).into(),
+                    measured_rate_keys_per_s: None,
+                    measured_quality: None,
+                    measured_age_ms: None,
                     meta: EdgeMeta {
                         distance_km: 5,
                         r0_keys_per_second: r0,
@@ -2029,6 +2184,154 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Anuncio QKD con tasa medida por `who` sobre su enlace con `n`.
+    fn announce_measured(id: &str, neighbor: &str, kps: Option<f64>) -> QkcAnnounce {
+        QkcAnnounce {
+            id: id.into(),
+            host: dummy_host(id.parse().unwrap_or(0), 20002),
+            peer_addr: Some(format!("10.0.0.{id}:20000")),
+            links: vec![QkcLinkAnnounce {
+                neighbor_id: neighbor.into(),
+                measured_rate_keys_per_s: kps,
+                measured_quality: kps.map(|_| "measured".into()),
+                measured_age_ms: kps.map(|_| 1000),
+                meta: EdgeMeta {
+                    distance_km: 5,
+                    r0_keys_per_second: 2000.0,
+                    alpha: 0.2,
+                    ..EdgeMeta::default()
+                },
+            }],
+        }
+    }
+
+    /// La tasa medida manda sobre la fórmula de quditto en la capacidad
+    /// efectiva; `r0/α/d` quedan de prior hasta la primera medición.
+    #[test]
+    fn measured_rate_overrides_formula_capacity() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce_measured("1", "2", None));
+        store.announce_qkc(&announce_measured("2", "1", None));
+        let formula = store
+            .load()
+            .edge("1", "2")
+            .unwrap()
+            .capacity_keys_per_second();
+        assert!((formula - 2000.0 * 10f64.powf(-0.2 * 5.0 / 10.0)).abs() < 1e-6);
+
+        assert!(
+            store
+                .announce_qkc(&announce_measured("1", "2", Some(950.0)))
+                .changed
+        );
+        let cap = store
+            .load()
+            .edge("1", "2")
+            .unwrap()
+            .capacity_keys_per_second();
+        assert!((cap - 950.0).abs() < 1e-9, "cap={cap}");
+    }
+
+    /// El ruido de la medición NO bumpea la versión: la histéresis (5 % /
+    /// 0,5 kps) es la misma de `set_edge_capacity_kps`. Sin ella, cada
+    /// latido re-empuja forwarding y re-lanza el solver para siempre.
+    #[test]
+    fn measured_noise_within_band_does_not_bump_version() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce_measured("1", "2", None));
+        store.announce_qkc(&announce_measured("2", "1", None));
+        store.announce_qkc(&announce_measured("1", "2", Some(1000.0)));
+        store.announce_qkc(&announce_measured("2", "1", Some(1000.0)));
+        let settled = store.load().version;
+
+        for kps in [1010.0, 990.0, 1030.0, 969.0, 1000.5] {
+            let out = store.announce_qkc(&announce_measured("1", "2", Some(kps)));
+            assert!(!out.changed, "±{kps} dentro de banda bumpeó la versión");
+        }
+        assert_eq!(store.load().version, settled);
+
+        // Un cambio real sí pasa.
+        let out = store.announce_qkc(&announce_measured("1", "2", Some(700.0)));
+        assert!(out.changed);
+        assert_eq!(store.load().version, settled + 1);
+    }
+
+    /// Dos extremos midiendo el mismo enlace nunca coinciden al decimal: el
+    /// combinado es el MÍNIMO (el enlace no da más de lo que ve el extremo
+    /// lento) y jamás cuenta como conflicto de metadatos.
+    #[test]
+    fn measured_min_of_both_endpoints_wins_and_is_not_a_conflict() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce_measured("1", "2", None));
+        store.announce_qkc(&announce_measured("2", "1", None));
+
+        store.announce_qkc(&announce_measured("1", "2", Some(1500.0)));
+        let out = store.announce_qkc(&announce_measured("2", "1", Some(1400.0)));
+        assert!(out.edges_conflict.is_empty(), "medición ≠ conflicto");
+        let cap = store
+            .load()
+            .edge("1", "2")
+            .unwrap()
+            .capacity_keys_per_second();
+        assert!((cap - 1400.0).abs() < 1e-9, "cap={cap}, esperaba el mín");
+
+        // El extremo alto re-reporta: el mín sigue mandando.
+        store.announce_qkc(&announce_measured("1", "2", Some(1520.0)));
+        let cap = store
+            .load()
+            .edge("1", "2")
+            .unwrap()
+            .capacity_keys_per_second();
+        assert!(
+            (cap - 1400.0).abs() < 1e-9,
+            "cap={cap} tras re-reporte alto"
+        );
+    }
+
+    /// Un latido SIN tasa (p. ej. el QKC reinició y su estimador aún no tiene
+    /// ventana) no borra la medida aplicada: `recompute_edge` reconstruye la
+    /// arista desde las declaraciones, que no llevan la medición.
+    #[test]
+    fn heartbeat_without_measurement_preserves_the_applied_rate() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce_measured("1", "2", None));
+        store.announce_qkc(&announce_measured("2", "1", None));
+        store.announce_qkc(&announce_measured("1", "2", Some(950.0)));
+        let settled = store.load().version;
+
+        for _ in 0..5 {
+            let out = store.announce_qkc(&announce_measured("1", "2", None));
+            assert!(!out.changed);
+            let out = store.announce_qkc(&announce_measured("2", "1", None));
+            assert!(!out.changed);
+        }
+        let t = store.load();
+        assert_eq!(t.version, settled);
+        assert_eq!(t.edge("1", "2").unwrap().measured_keys_per_s, Some(950.0));
+    }
+
+    /// En una arista PQC no hay nada físico que medir: el campo se ignora.
+    #[test]
+    fn pqc_edge_ignores_measured_rate() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &["2"], 2000.0)); // helper: PQC
+        store.announce_qkc(&announce("2", &["1"], 2000.0));
+        let mut t = (*store.load()).clone();
+        assert!(!t.apply_measured_capacity("1", "2", 500.0));
+        let cap_before = store
+            .load()
+            .edge("1", "2")
+            .unwrap()
+            .capacity_keys_per_second();
+        let mut ann = announce("1", &["2"], 2000.0);
+        ann.links[0].measured_rate_keys_per_s = Some(500.0);
+        let out = store.announce_qkc(&ann);
+        assert!(!out.changed);
+        let e = store.load().edge("1", "2").unwrap().clone();
+        assert_eq!(e.measured_keys_per_s, None);
+        assert_eq!(e.capacity_keys_per_second(), cap_before);
     }
 
     #[test]

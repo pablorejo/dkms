@@ -76,7 +76,7 @@ fn default_key_size() -> u32 {
     256
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct LinkAnnounce {
     neighbor_id: String,
     link_type: &'static str,
@@ -90,12 +90,28 @@ struct LinkAnnounce {
     // `#[serde(flatten)]` en su parser de announce), no el de nuestro TOML.
     #[serde(skip_serializing_if = "Option::is_none")]
     pqc_capacity_keys_per_s: Option<f64>,
+    /// Tasa de generación **medida** in situ (claves/s) — `rate_estimator.rs`.
+    /// Se rellena en cada latido, no al construir: es lo único del anuncio
+    /// que cambia con el tiempo. En la SDN NO entra en `EdgeMeta` ni en la
+    /// regla de conflicto (dos extremos midiendo jamás coinciden al decimal):
+    /// tiene su propio camino con combinación `min` e histéresis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    measured_rate_keys_per_s: Option<f64>,
+    /// `measured` / `floor` / `unavailable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    measured_quality: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    measured_age_ms: Option<u64>,
 }
 
 pub struct SdnAnnouncer {
     http: reqwest::Client,
     url: String,
-    body: serde_json::Value,
+    /// Parte fija del anuncio (id, host, peer_addr). Los `links` se montan en
+    /// cada latido para llevar la tasa medida al día.
+    base_body: serde_json::Value,
+    /// Plantillas de anuncio por enlace declarado (la parte estática).
+    announce_links: Vec<(u32, LinkAnnounce)>,
     period: Duration,
     /// Donde se dan de alta y de baja los enlaces.
     svc: QkcService,
@@ -159,18 +175,22 @@ impl SdnAnnouncer {
             }
         };
 
-        let links: Vec<LinkAnnounce> = cfg
+        let links: Vec<(u32, LinkAnnounce)> = cfg
             .links
             .iter()
             .map(|l| {
                 if l.link_type == LinkType::Qkd && l.r0.is_none() {
+                    // El estimador in situ acabará midiendo la tasa real y
+                    // anunciándola (rate_estimator.rs), pero hasta la primera
+                    // ventana válida la SDN dimensiona con su default.
                     warn!(
                         neighbor = l.neighbor_id,
-                        "enlace QKD sin `r0`: la SDN dimensionará la arista con su default, que \
-                         es mucho más bajo que cualquier enlace real. Declara r0/alpha/distance_km",
+                        "enlace QKD sin `r0`: la SDN dimensionará la arista con su default hasta \
+                         que el estimador mida la tasa real. Declara r0/alpha/distance_km como \
+                         prior de arranque si lo conoces",
                     );
                 }
-                LinkAnnounce {
+                let ann = LinkAnnounce {
                     neighbor_id: l.neighbor_id.to_string(),
                     link_type: match l.link_type {
                         LinkType::Qkd => "qkd",
@@ -180,7 +200,11 @@ impl SdnAnnouncer {
                     alpha: l.alpha,
                     distance_km: l.distance_km,
                     pqc_capacity_keys_per_s: l.capacity_keys_per_s,
-                }
+                    measured_rate_keys_per_s: None,
+                    measured_quality: None,
+                    measured_age_ms: None,
+                };
+                (l.neighbor_id, ann)
             })
             .collect();
 
@@ -199,15 +223,15 @@ impl SdnAnnouncer {
         Some(Self {
             http,
             url: format!("{sdn_url}/register/qkc"),
-            body: json!({
+            base_body: json!({
                 "id": cfg.qkc_id.to_string(),
                 "host": { "id": cfg.qkc_id as i64, "ip": ip, "port": port },
                 // Los vecinos se conectan al listener de peers, no al admin:
                 // la SDN necesita esta dirección para poder decirle a otro QKC
                 // dónde estoy.
                 "peer_addr": format!("{ip}:{}", peer_port(&cfg.peer_listen)),
-                "links": links,
             }),
+            announce_links: links,
             period: Duration::from_secs(cfg.sdn_announce_secs.max(1)),
             svc,
             local_links: cfg.links.iter().map(|l| l.neighbor_id).collect(),
@@ -246,10 +270,28 @@ impl SdnAnnouncer {
 
     /// Anuncia una vez. `Ok(outcome)` incluso si quedan aristas pendientes:
     /// eso no es un fallo, es que el vecino aún no ha arrancado.
+    ///
+    /// Los `links` se montan aquí y no en `from_config`: cada latido lleva la
+    /// tasa medida al día del estimador de cada enlace (si la hay).
     async fn announce_once(&self) -> Result<AnnounceOutcome, reqwest::Error> {
+        let links: Vec<LinkAnnounce> = self
+            .announce_links
+            .iter()
+            .map(|(id, tpl)| {
+                let mut l = tpl.clone();
+                if let Some(r) = self.svc.link_to(*id).and_then(|rt| rt.keys.rate_report()) {
+                    l.measured_rate_keys_per_s = Some(r.keys_per_s);
+                    l.measured_quality = Some(r.quality.as_str());
+                    l.measured_age_ms = Some(r.age.as_millis() as u64);
+                }
+                l
+            })
+            .collect();
+        let mut body = self.base_body.clone();
+        body["links"] = serde_json::to_value(&links).unwrap_or_default();
         self.http
             .post(&self.url)
-            .json(&self.body)
+            .json(&body)
             .send()
             .await?
             .error_for_status()?

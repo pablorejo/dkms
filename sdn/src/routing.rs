@@ -71,7 +71,8 @@ pub fn compute(
             if meta.is_pqc() {
                 continue;
             }
-            bottleneck = bottleneck.min(meta.quditto_capacity_keys_per_second());
+            // Punto único de capacidad: tasa medida si la hay, fórmula si no.
+            bottleneck = bottleneck.min(meta.capacity_keys_per_second());
         }
     }
     let bottleneck_bps = if bottleneck.is_finite() {
