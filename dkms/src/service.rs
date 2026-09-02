@@ -97,7 +97,13 @@ const TRANSPORT_KEY_BYTES: usize = 32;
 // Límites ETSI-014 de este KME. Son a la vez lo que `/status` publica y lo que
 // `check_request_limits` exige: un solo sitio, para que no puedan divergir.
 const MAX_KEY_PER_REQUEST: u32 = 64;
-const MAX_KEY_SIZE_BITS: u32 = 4096;
+// La clave de sesión se envuelve OTP con UNA clave de transporte (32 B), así
+// que su tamaño no puede superar el de la clave de transporte: anunciar 4096 y
+// aceptarlo hacía que un `enc_keys` con size ∈ (256,4096] hacia un slave remoto
+// fallara con 500 DESPUÉS de gastar tokens y sacar la clave (auditoría 2026-09b
+// H3). Ahora `/status` anuncia la verdad y `check_request_limits` rechaza con
+// 400 antes de gastar.
+const MAX_KEY_SIZE_BITS: u32 = TRANSPORT_KEY_BYTES as u32 * 8;
 const MIN_KEY_SIZE_BITS: u32 = 64;
 const MAX_SAE_ID_COUNT: usize = 16;
 
@@ -1451,6 +1457,18 @@ mod tests {
                 "size {size} debería rechazarse"
             );
         }
+
+        // H3: un size mayor que la clave de transporte (p. ej. 512) se rechaza
+        // — antes se aceptaba y moría en 500 tras gastar una clave de transporte.
+        assert_eq!(MAX_KEY_SIZE_BITS, TRANSPORT_KEY_BYTES as u32 * 8);
+        assert!(check_request_limits(
+            &Etsi014KeyRequest {
+                size: 512,
+                ..ok.clone()
+            },
+            1
+        )
+        .is_err());
 
         // Y el recuento de destinos, que se mide tras deduplicar.
         assert!(check_request_limits(&ok, MAX_SAE_ID_COUNT).is_ok());
