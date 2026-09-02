@@ -533,10 +533,18 @@ struct LinkCapacityPayload {
 
 async fn update_link_capacity(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(p): Json<LinkCapacityPayload>,
 ) -> impl IntoResponse {
     if p.qkc_a.is_empty() || p.qkc_b.is_empty() {
         return err_response(SdnError::BadRequest("qkc_a and qkc_b are required".into()));
+    }
+    // Autorización (auditoría 2026-09b A2): bajo mTLS solo un extremo del enlace
+    // o la SDN puede fijar su capacidad; antes cualquier cert ponía a 0 la
+    // capacidad de cualquier arista (la sacaba del solver). La tasa medida ya
+    // viaja en el anuncio del QKC.
+    if let Err(resp) = link_capacity_authorized(identity.as_deref(), &p.qkc_a, &p.qkc_b) {
+        return resp;
     }
     match svc
         .topology
@@ -616,6 +624,7 @@ async fn compute_path(
 /// up these reports. The legacy MCF solver is unaffected.
 async fn post_demand(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(report): Json<DemandReport>,
 ) -> impl IntoResponse {
     // Observes on Drop, so it covers both the bad-request early-return
@@ -627,6 +636,12 @@ async fn post_demand(
             .with_label_values(&["bad_request"])
             .inc();
         return err_response(SdnError::BadRequest("dkms_id is required".into()));
+    }
+    // Autorización (auditoría 2026-09b A2): bajo mTLS un DKMS solo reporta su
+    // PROPIA demanda; antes no tomaba identidad y cualquier cert inyectaba
+    // demanda por cualquier `dkms_id`, sesgando el reparto alfa-fair.
+    if let Err(resp) = require_identity(identity.as_deref(), &report.dkms_id, "demand") {
+        return resp;
     }
     let summary = svc.demand_registry.ingest(report);
     let outcome = if summary.errors.is_empty() {
@@ -772,6 +787,29 @@ fn sae_mutation_authorized(
         None => Ok(()),
         Some(owner) => require_identity(identity, owner, "sae-mutation"),
     }
+}
+
+/// Autoriza `POST /link-capacity` (auditoría 2026-09b A2): bajo mTLS solo un
+/// extremo del enlace (`qkc-<a>`/`qkc-<b>`) o la SDN. En claro se permite.
+fn link_capacity_authorized(
+    identity: Option<&PeerCertIdentity>,
+    qkc_a: &str,
+    qkc_b: &str,
+) -> std::result::Result<(), axum::response::Response> {
+    if identity.is_none()
+        || identity_authorizes(identity, "sdn")
+        || identity_authorizes(identity, &format!("qkc-{qkc_a}"))
+        || identity_authorizes(identity, &format!("qkc-{qkc_b}"))
+    {
+        return Ok(());
+    }
+    let san = identity.and_then(|i| i.san.clone());
+    warn!(qkc_a, qkc_b, cert_san = ?san, "sdn: link-capacity no autorizada");
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({"detail": "cert identity does not authorize link-capacity"})),
+    )
+        .into_response())
 }
 
 // ---------------- server -----------------------------------------------------
@@ -930,6 +968,19 @@ mod tests {
         // Un cert AJENO no puede robar el binding, aunque el cuerpo pidiera
         // rebindear el SAE a su propio dkms_id: aquí solo cuenta el dueño ACTUAL.
         assert!(sae_mutation_authorized(Some(&ident("dkms://dkms-2")), Some("dkms-1")).is_err());
+    }
+
+    #[test]
+    fn link_capacity_only_endpoints_or_sdn() {
+        // En claro: pasa (histórico).
+        assert!(link_capacity_authorized(None, "1", "2").is_ok());
+        // La SDN: ok.
+        assert!(link_capacity_authorized(Some(&ident("dkms://sdn")), "1", "2").is_ok());
+        // Un extremo del enlace: ok.
+        assert!(link_capacity_authorized(Some(&ident("dkms://qkc-1")), "1", "2").is_ok());
+        assert!(link_capacity_authorized(Some(&ident("dkms://qkc-2")), "1", "2").is_ok());
+        // Un QKC ajeno al enlace: denegado.
+        assert!(link_capacity_authorized(Some(&ident("dkms://qkc-9")), "1", "2").is_err());
     }
 
     /// Bind a minimal SDN HTTP router (just the demand endpoints) to
