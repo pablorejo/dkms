@@ -123,6 +123,9 @@ pub async fn serve_mtls(
         });
     }
 
+    // Cota de conexiones concurrentes (B7): junto al timeout de handshake evita
+    // que N conexiones a medio handshake fijen fd+task indefinidamente.
+    let conns = Arc::new(tokio::sync::Semaphore::new(4096));
     loop {
         let (tcp, peer_addr) = match listener.accept().await {
             Ok(p) => p,
@@ -131,20 +134,30 @@ pub async fn serve_mtls(
                 continue;
             }
         };
+        let Ok(permit) = conns.clone().try_acquire_owned() else {
+            debug!(%peer_addr, "tls: tope de conexiones, rechazo la nueva (B7)");
+            continue;
+        };
         let acceptor = acceptor.clone();
         let router = router.clone();
         let stats = stats.clone();
 
         tokio::spawn(async move {
+            let _permit = permit;
             // Cronometrar el handshake: es la métrica clave para comparar el
             // coste de certs clásicos vs ML-DSA (campañas de certs). El
             // fallo se loguea con el detalle de rustls (p.ej. BadSignature,
             // UnknownIssuer) — es lo que distingue "cert de otra CA" de
             // "el cliente no mandó cert" en un despliegue real.
             let t0 = std::time::Instant::now();
-            let tls_stream = match acceptor.accept(tcp).await {
-                Ok(s) => s,
-                Err(e) => {
+            let tls_stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                acceptor.accept(tcp),
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     stats.failed.fetch_add(1, Ordering::Relaxed);
                     warn!(
                         %peer_addr,
@@ -153,6 +166,11 @@ pub async fn serve_mtls(
                         handshake_ms = t0.elapsed().as_millis() as u64,
                         "tls handshake failed"
                     );
+                    return;
+                }
+                Err(_) => {
+                    stats.failed.fetch_add(1, Ordering::Relaxed);
+                    warn!(%peer_addr, plane = plane_label, "tls handshake timeout (B7)");
                     return;
                 }
             };

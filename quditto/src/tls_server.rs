@@ -49,12 +49,21 @@ pub async fn serve_mtls(
         let router = router.clone();
 
         tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(tcp).await {
-                Ok(s) => s,
-                Err(e) => {
+            let tls_stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                acceptor.accept(tcp),
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     // Un QKC con quditto_url http:// (o sin cert) acaba aquí:
                     // el desajuste es ruidoso en los dos lados.
                     warn!(%peer_addr, error = %e, "quditto tls handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    warn!(%peer_addr, "tls handshake timeout (B7)");
                     return;
                 }
             };
