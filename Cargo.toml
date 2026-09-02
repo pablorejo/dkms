@@ -72,7 +72,7 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-opentelemetry = "0.27"
 opentelemetry      = "0.26"
-prometheus         = "0.13"
+prometheus         = { version = "0.13", default-features = false }
 
 # TLS / mTLS
 rustls       = "0.23"
