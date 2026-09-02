@@ -1140,7 +1140,15 @@ impl Generator {
                         "generator.demand POST failed after retries"
                     );
                 }
-                (None, None) => unreachable!("loop guarantees one branch"),
+                (None, None) => {
+                    // MAX_ATTEMPTS >= 1 garantiza `applied_ok` o `last_err`, así
+                    // que esto es inalcanzable hoy; se avisa en vez de
+                    // `unreachable!` para no abortar el proceso (panic=abort) si
+                    // el invariante se rompiera al tocar MAX_ATTEMPTS (E3).
+                    warn!(
+                        "generator.demand: sin resultado ni error tras el bucle (invariante roto)"
+                    );
+                }
             }
         }
     }
