@@ -104,9 +104,18 @@ impl SaeResolver for SdnSaeResolver {
     }
 }
 
+/// TTL de la caché negativa (H5).
+const NEGATIVE_TTL: Duration = Duration::from_secs(5);
+
 /// Caché con TTL y *single-flight* delante de cualquier [`SaeResolver`].
 pub struct SaeBindingCache {
     cache: Cache<SaeId, NodeId>,
+    /// Caché NEGATIVA corta (auditoría 2026-09b H5): un SAE que no resuelve
+    /// no se memoriza en la positiva (para no bloquear la carrera de
+    /// aprovisionamiento), pero sin nada un `enc_keys` con SAEs fantasma pegaba
+    /// a la SDN hasta 16 veces POR petición. 5 s acota la amplificación a 1
+    /// consulta por SAE cada 5 s sin frenar los reintentos legítimos.
+    negatives: Cache<SaeId, ()>,
     upstream: Arc<dyn SaeResolver>,
 }
 
@@ -116,10 +125,23 @@ impl SaeBindingCache {
             .max_capacity(max_entries)
             .time_to_live(Duration::from_secs(ttl_secs.max(1)))
             .build();
-        Self { cache, upstream }
+        let negatives = Cache::builder()
+            .max_capacity(max_entries)
+            .time_to_live(NEGATIVE_TTL)
+            .build();
+        Self {
+            cache,
+            negatives,
+            upstream,
+        }
     }
 
     pub async fn resolve(&self, sae: &SaeId) -> Result<NodeId> {
+        // Fallo reciente: cae rápido sin pegar a la SDN (H5). La TTL corta deja
+        // reintentar en 5 s (la carrera de aprovisionamiento se resuelve así).
+        if self.negatives.get(sae).await.is_some() {
+            return Err(DkmsError::SaeBindingLookupFailed(sae.clone()));
+        }
         let upstream = self.upstream.clone();
         let sae_clone = sae.clone();
         let res = self
@@ -138,6 +160,7 @@ impl SaeBindingCache {
         // SDN; solo cacheamos resultados positivos.
         if res.is_err() {
             self.cache.invalidate(sae).await;
+            self.negatives.insert(sae.clone(), ()).await; // H5: bloquea 5 s
         }
         // moka envuelve nuestro error en Arc<DkmsError>. Lo desenvolvemos
         // exponiendo solo el `SaeBindingLookupFailed` que es el caso útil.
@@ -151,10 +174,12 @@ impl SaeBindingCache {
     /// cambia de DKMS.
     pub async fn invalidate(&self, sae: &SaeId) {
         self.cache.invalidate(sae).await;
+        self.negatives.invalidate(sae).await; // un push de la SDN deja reintentar ya
     }
 
     pub async fn invalidate_all(&self) {
         self.cache.invalidate_all();
+        self.negatives.invalidate_all();
     }
 }
 
@@ -174,6 +199,32 @@ mod tests {
         // Segunda llamada debe seguir devolviendo el mismo valor.
         let n2 = cache.resolve(&SaeId::new("alice")).await.unwrap();
         assert_eq!(n2.as_str(), "dkms-a");
+    }
+
+    struct CountingResolver {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl SaeResolver for CountingResolver {
+        async fn resolve(&self, sae: &SaeId) -> Result<NodeId> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(DkmsError::SaeBindingLookupFailed(sae.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_cache_bounds_upstream_calls_for_a_failing_sae() {
+        let r = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let cache = SaeBindingCache::new(r.clone(), 60, 100);
+        // Varias resoluciones seguidas del mismo SAE fallido: solo la primera
+        // pega al upstream; el resto caen por la caché negativa (H5).
+        for _ in 0..5 {
+            assert!(cache.resolve(&SaeId::new("ghost")).await.is_err());
+        }
+        assert_eq!(r.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
