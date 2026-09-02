@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version      = "0.1.0"
 edition      = "2021"
-rust-version = "1.78"
+rust-version = "1.88"
 license      = "Apache-2.0"
 authors      = ["Pablo Pío Rejo Iglesias"]
 repository   = "https://github.com/pabloprejo/dkms_rust"
