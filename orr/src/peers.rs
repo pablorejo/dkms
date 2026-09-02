@@ -144,6 +144,12 @@ pub enum PubkeyVerdict {
     Reject,
 }
 
+/// Tope de `esk` pendientes por par en el lado responder (B9): un peer que
+/// manda `RequestEphemeralKey` con `epoch_id` crecientes hacía crecer
+/// `ephemeral_sks[peer]` sin límite (+ un keygen ML-KEM por REQ). Una rotación
+/// legítima usa una a la vez; 64 deja margen de solape.
+const MAX_EPHEMERAL_PER_PEER: usize = 64;
+
 impl PeerRegistry {
     pub fn new(seed_qkc: HashMap<String, u32>, local_orr_id: String, local_qkc_id: u32) -> Self {
         Self::with_pubkeys(seed_qkc, HashMap::new(), local_orr_id, local_qkc_id)
@@ -517,11 +523,16 @@ impl PeerRegistry {
     /// hasta que `take_ephemeral_sk` la consuma al recibir el
     /// `EstablishEphemeralSecret` correspondiente.
     pub fn store_ephemeral_sk(&self, orr_id: String, epoch_id: u32, esk: Vec<u8>) {
-        self.ephemeral_sks
-            .write()
-            .entry(orr_id)
-            .or_default()
-            .insert(epoch_id, Zeroizing::new(esk));
+        let mut esks = self.ephemeral_sks.write();
+        let m = esks.entry(orr_id).or_default();
+        m.insert(epoch_id, Zeroizing::new(esk));
+        // Cota por par (B9): conserva solo las últimas MAX_EPHEMERAL_PER_PEER
+        // épocas; las más viejas se dropean (los `Zeroizing` se zeroizan). Sin
+        // esto, un peer que inunda REQ con épocas crecientes crecía sin límite.
+        while m.len() > MAX_EPHEMERAL_PER_PEER {
+            let oldest = *m.keys().next().expect("len > cap ⇒ no vacío");
+            m.remove(&oldest);
+        }
     }
 
     /// **Consume y devuelve** la esk para `(peer, epoch_id)` — la
@@ -962,6 +973,18 @@ mod tests {
         assert!(reg.take_ephemeral_sk("orr_2", 1).is_none());
         // Al dropear `taken`, Zeroizing borra los bytes.
         drop(taken);
+    }
+
+    #[test]
+    fn store_ephemeral_sk_is_capped_per_peer() {
+        let reg = PeerRegistry::new(HashMap::new(), "orr_1".into(), 1);
+        // Un flood de épocas crecientes: solo sobreviven las últimas del cap.
+        for e in 1..=(MAX_EPHEMERAL_PER_PEER as u32 + 50) {
+            reg.store_ephemeral_sk("orr_2".into(), e, vec![0u8; 8]);
+        }
+        // La más vieja (época 1) fue evictada; la última sigue.
+        assert!(!reg.has_ephemeral_sk("orr_2", 1));
+        assert!(reg.has_ephemeral_sk("orr_2", MAX_EPHEMERAL_PER_PEER as u32 + 50));
     }
 
     #[test]
