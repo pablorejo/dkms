@@ -274,9 +274,11 @@ impl OrrControl for OrrGrpc {
         // sigue siendo idempotente porque decap(ct) es determinista —
         // sobreescribir con el mismo valor no cambia nada.
 
-        // Decapsular con nuestra sk.
+        // Decapsular con nuestra sk. `ss` es la raíz HMAC de las rotaciones:
+        // se zeroiza al soltarse (auditoría 2026-09b C2), antes se copiaba a
+        // `secret` y el Vec quedaba en el heap.
         let ss = match self.svc.identity.decap(&m.ciphertext) {
-            Ok(ss) => ss,
+            Ok(ss) => zeroize::Zeroizing::new(ss),
             Err(e) => {
                 warn!(peer = %from, error = %e, "orr.establish_secret decap_failed");
                 return Ok(Response::new(EstablishSecretResponse {
