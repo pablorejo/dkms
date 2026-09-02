@@ -17,6 +17,7 @@
 //! pooling o un cliente persistente per-peer.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +40,19 @@ pub struct AckFrame {
 /// Tope de una línea de ACK (B3): sin él, `read_line` crecía un `String` sin
 /// límite pre-auth. Un batch de ~1500 uuids son ~55 KB; 64 KiB va holgado.
 const MAX_ACK_LINE: u64 = 64 * 1024;
+/// Tope de longitud del campo `from` de un ACK (B5): un `from` de varios MB
+/// multiplicaba el tamaño de cada línea de log.
+const MAX_ACK_FROM: usize = 128;
+
+/// ACKs con `from` desconocido o absurdo, descartados sin crear estado por-peer.
+/// Global (una sola entrada), no por `from` — ahí estaba la fuga (B5).
+static UNKNOWN_ACK_FROM: AtomicU64 = AtomicU64::new(0);
+
+/// ¿Se procesa este ACK? `from` acotado y perteneciente al registro de peers.
+/// Aislado para poder testearlo sin un `Generator`.
+fn ack_from_is_processable(from: &str, is_known_peer: bool) -> bool {
+    from.len() <= MAX_ACK_FROM && is_known_peer
+}
 /// Conexiones concurrentes al socket de ACK (B3): sin cota, N sockets ociosos
 /// vivían para siempre.
 const MAX_ACK_CONNS: usize = 128;
@@ -145,6 +159,17 @@ async fn handle_conn(
                 continue;
             }
         };
+        // Descartar `from` desconocido/absurdo ANTES de tocar estado (B5): sin
+        // esto, cada `from` inventado creaba un PeerFlow permanente y una línea
+        // de log cada 5 s (la clase "752 MB/10 min"). Contador global.
+        if !ack_from_is_processable(&frame.from, generator.is_known_ack_peer(&frame.from)) {
+            let n = UNKNOWN_ACK_FROM.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_power_of_two() {
+                warn!(from = %frame.from, %remote, total = n,
+                    "dkms.ack_socket: ACK de un `from` desconocido, descartado (B5)");
+            }
+            continue;
+        }
         let mut ok = 0;
         let mut miss = 0;
         for kid in &frame.key_ids {
@@ -468,6 +493,16 @@ mod tests {
         let back: AckFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(back.from, "dkms-11");
         assert_eq!(back.key_ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn ack_from_gate_rejects_unknown_or_overlong() {
+        assert!(ack_from_is_processable("dkms-2", true));
+        // Peer desconocido: descartado (no crea estado).
+        assert!(!ack_from_is_processable("dkms-9", false));
+        // `from` absurdamente largo: descartado aunque fuera "conocido".
+        let huge = "x".repeat(MAX_ACK_FROM + 1);
+        assert!(!ack_from_is_processable(&huge, true));
     }
 
     #[tokio::test]

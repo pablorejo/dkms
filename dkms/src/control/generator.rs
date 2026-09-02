@@ -498,6 +498,12 @@ impl Generator {
     /// Punto de entrada del ACK socket: el peer confirma que recibió la
     /// clave `key_id`. Movemos la entrada de `ack_pending[peer]` a
     /// `BufferPool.enc[peer]`. Devuelve `true` si se movió.
+    /// ¿`from` es un peer del que legítimamente esperamos ACKs? Solo emitimos
+    /// (y por tanto solo esperamos ACK) hacia peers del registro (B5).
+    pub fn is_known_ack_peer(&self, from: &str) -> bool {
+        self.peers.get(from).is_some()
+    }
+
     pub fn on_ack(&self, peer_dkms_id: &str, key_id: &KeyId) -> bool {
         let entry = match self.ack_pending.take_diagnosed(peer_dkms_id, key_id) {
             TakeOutcome::Hit(e) => e,
