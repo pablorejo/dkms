@@ -53,6 +53,9 @@ pub const REFILL_THRESHOLD: usize = 256;
 /// para que cada request HTTP se sirva COMPLETA en el tick siguiente
 /// (200 keys/100 ms a R0=2000) sin partials → menos overhead.
 pub const REFILL_BATCH: u32 = 128;
+/// Timeout por ronda de banca (D1): corto, para no bloquear el sondeo de stock
+/// con un KME lento (el timeout de lote del cliente KME es de 30 s).
+const BANK_ENC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Tope de IDs pendientes de `dec_keys` antes de aplastar. Si el peer
 /// notifica más rápido de lo que podemos absorber, el remanente queda
@@ -574,8 +577,13 @@ impl KeyStore {
             else {
                 return;
             };
-            match self.kme.enc_keys(batch).await {
-                Ok(keys) => {
+            // Timeout corto por ronda (auditoría 2026-09b D1): `enc_keys` lleva
+            // el timeout de lote del cliente KME (30 s); banca hasta
+            // MAX_BANK_ROUNDS, así que un KME lento congelaba el sondeo de
+            // stock (y con él el estimador) hasta 16×30 s. La banca es
+            // oportunista: si tarda, se abandona la ronda.
+            match tokio::time::timeout(BANK_ENC_TIMEOUT, self.kme.enc_keys(batch)).await {
+                Ok(Ok(keys)) => {
                     let n = keys.len() as u64;
                     self.absorb_enc_keys(keys);
                     debug!(
@@ -590,7 +598,8 @@ impl KeyStore {
                         return; // el KME dio menos de lo pedido: no insistas
                     }
                 }
-                Err(_) => return, // el error ya lo cuenta/loguea el refill normal
+                Ok(Err(_)) => return, // el error ya lo cuenta/loguea el refill normal
+                Err(_) => return,     // timeout: no bloquees el sondeo de stock (D1)
             }
         }
     }
