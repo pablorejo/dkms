@@ -219,6 +219,9 @@ pub struct DkmsService {
     pub e2e: Arc<crate::e2e::E2e>,
 }
 
+/// Múltiplo de `capacity_per_peer` que fija el techo duro del buffer DEC (B6).
+const DEC_HARD_CEILING_MULT: usize = 64;
+
 impl DkmsService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1109,19 +1112,20 @@ impl DkmsService {
             id: key_id.clone(),
             bytes: zeroize::Zeroizing::new(plaintext),
         };
-        // `try_push` ahora es soft-hint en capacidad (nunca rechaza).
-        // El cap antiguo provocaba un deadlock cuando el dec se llenaba:
-        // se dropeaba la key, no se enviaba ACK, el `ack_pending` del
-        // source expiraba, y como su métrica de fill incluía
-        // `enc + ack_pending` quedaba atascado en `Saturated` con
-        // SDN-rate=0. Ahora siempre push + siempre ACK; el RAM se
-        // acota por la rate del SDN y los SAEs drenan vía pop. Si algún día
-        // vuelve a rechazar, que se vea en `generator.state`.
-        if buf.dec.try_push(key).is_err() {
+        // Techo DURO muy por encima del backlog honesto (auditoría 2026-09b B6):
+        // el receptor acusa recibo AL RECIBIR, no al drenar, así que `dec`
+        // honesto puede crecer por encima de `capacity` con SAEs lentos —
+        // cortar en `capacity` reabriría el deadlock medido en 2026-05 (dec
+        // lleno + sin ACK → el `ack_pending` del emisor expiraba y su fill
+        // quedaba atascado en Saturated). A 64× ya no es honesto: un peer que
+        // inunda se auto-limita, y aquí se dropea SIN ACK (no es una entrega).
+        let ceiling = buf.dec.capacity().saturating_mul(DEC_HARD_CEILING_MULT);
+        if buf.dec.try_push_capped(key, ceiling).is_err() {
             self.flow
                 .peer(&source_dkms)
                 .dec_dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
         }
 
         // Contadores del camino de claves. `recv` es la mitad del

@@ -103,6 +103,25 @@ impl SecureKeyBuffer {
         Ok(())
     }
 
+    /// Como `try_push` pero rechaza (devuelve la clave) si el buffer ya tiene
+    /// `ceiling` o más elementos (B6). Se usa en el camino DEC con un techo muy
+    /// por encima del backlog honesto: el receptor acusa AL RECIBIR (no al
+    /// drenar), así que `dec` honesto puede superar `capacity` con SAEs lentos
+    /// — cortar en `capacity` reabriría el deadlock medido en 2026-05. El techo
+    /// solo lo alcanza un flood.
+    pub fn try_push_capped(
+        &self,
+        key: TransportKey,
+        ceiling: usize,
+    ) -> std::result::Result<(), TransportKey> {
+        let mut q = self.inner.lock();
+        if q.len() >= ceiling {
+            return Err(key);
+        }
+        q.push_back(key);
+        Ok(())
+    }
+
     /// Consume **la siguiente** clave en orden FIFO (rol ENC).
     pub fn pop_oldest(&self) -> Option<TransportKey> {
         self.inner.lock().pop_front()
@@ -157,6 +176,16 @@ mod tests {
         // a y c siguen en orden
         assert_eq!(b.pop_oldest().unwrap().id.as_str(), "a");
         assert_eq!(b.pop_oldest().unwrap().id.as_str(), "c");
+    }
+
+    #[test]
+    fn try_push_capped_rejects_at_ceiling() {
+        let b = SecureKeyBuffer::new(4);
+        assert!(b.try_push_capped(k("a", 32), 2).is_ok());
+        assert!(b.try_push_capped(k("b", 32), 2).is_ok());
+        // Al alcanzar el techo, rechaza y devuelve la clave (B6).
+        assert!(b.try_push_capped(k("c", 32), 2).is_err());
+        assert_eq!(b.len(), 2);
     }
 
     #[test]
