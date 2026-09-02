@@ -69,6 +69,16 @@ const INIT_RETRY: Duration = Duration::from_millis(300);
 /// ML-KEM por cada rebote del socket.
 const RELINK_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Tope del salto de época en un re-enlace respecto a NUESTRA ventana
+/// (auditoría 2026-09b B2). `peer_epoch` puede venir de un frame de datos
+/// FORJADO: `frame_auth.open` dispara el resync con la época del trailer ANTES
+/// de verificar el MAC, así que un atacante en :20000 (sin credencial) pedía
+/// saltar a u32::MAX — el iniciador podaba todas las épocas vivas y, al
+/// envolver `highest+1`, reusaba la época 0. Un reinicio real deja una brecha
+/// modesta (unas pocas por hora de caída); 1024 la cubre de sobra y queda muy
+/// lejos del desbordamiento.
+const MAX_RESYNC_JUMP: u32 = 1024;
+
 /// Tope de un `establish`: pasado esto sin RESP se devuelve el control al
 /// bucle de rotación, que es el mismo que atiende reconexiones y resyncs.
 /// Sin tope, un peer mudo congelaba las tres cosas y el enlace parecía sano.
@@ -766,6 +776,19 @@ impl PqcHandshake {
     /// ventana está más alta— seguiría cifrando con las suyas y el enlace
     /// no convergería nunca. Es exactamente lo que se vio en el testbed el
     /// 2026-08-03: `dec_misses == dec_lookups` de forma permanente.
+    /// (base, aim) de un re-enlace, acotando el salto respecto a NUESTRA
+    /// ventana a `MAX_RESYNC_JUMP` (B2): un `peer_epoch` forjado (p. ej.
+    /// u32::MAX) no puede empujar la época al desbordamiento ni matar el
+    /// enlace de un golpe; un reinicio real (brecha < 1024) converge en un
+    /// solo re-enlace. `highest+1` es `saturating` para no envolver.
+    fn resync_base(highest: Option<u32>, peer_epoch: u32, lookahead: u32) -> (u32, u32) {
+        let mine = highest.map(|h| h.saturating_add(1)).unwrap_or(0);
+        let ceiling = mine.saturating_add(MAX_RESYNC_JUMP);
+        let base = mine.max(peer_epoch.saturating_add(1)).min(ceiling);
+        let aim = base.saturating_add(lookahead);
+        (base, aim)
+    }
+
     async fn relink(&self, peer_epoch: u32) -> Option<(u32, bool)> {
         let now = Instant::now();
         {
@@ -781,9 +804,7 @@ impl PqcHandshake {
             }
             *last = Some(now);
         }
-        let mine = self.store.highest().map(|h| h + 1).unwrap_or(0);
-        let base = mine.max(peer_epoch.saturating_add(1));
-        let aim = base.saturating_add(self.lookahead);
+        let (base, aim) = Self::resync_base(self.store.highest(), peer_epoch, self.lookahead);
         warn!(
             me = self.my_id,
             peer = self.peer_id,
@@ -1059,6 +1080,21 @@ impl PqcHandshake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resync_base_caps_a_forged_peer_epoch() {
+        // Reinicio real: brecha de 400 cabe holgada → converge en un re-enlace.
+        let (base, _) = PqcHandshake::resync_base(Some(2), 400, 8);
+        assert_eq!(base, 401);
+        // Forjado: u32::MAX no empuja la época más allá de mine+MAX_RESYNC_JUMP
+        // y `aim` nunca satura a MAX (no habría poda ni envoltura de época 0).
+        let (base, aim) = PqcHandshake::resync_base(Some(2), u32::MAX, 8);
+        assert_eq!(base, 3 + MAX_RESYNC_JUMP);
+        assert!(aim < u32::MAX, "aim no debe saturar a u32::MAX: {aim}");
+        // Sin épocas aún: no panica y queda acotado.
+        let (base, _) = PqcHandshake::resync_base(None, u32::MAX, 8);
+        assert_eq!(base, MAX_RESYNC_JUMP);
+    }
     use crate::pqc_source::epoch_of;
 
     fn handshake(my_id: u32, peer_id: u32) -> Arc<PqcHandshake> {
