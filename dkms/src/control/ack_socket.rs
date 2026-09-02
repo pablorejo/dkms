@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use common::ids::KeyId;
@@ -33,6 +34,34 @@ use crate::control::{flow_stats::FlowStats, Generator};
 pub struct AckFrame {
     pub from: String,
     pub key_ids: Vec<String>,
+}
+
+/// Tope de una línea de ACK (B3): sin él, `read_line` crecía un `String` sin
+/// límite pre-auth. Un batch de ~1500 uuids son ~55 KB; 64 KiB va holgado.
+const MAX_ACK_LINE: u64 = 64 * 1024;
+/// Conexiones concurrentes al socket de ACK (B3): sin cota, N sockets ociosos
+/// vivían para siempre.
+const MAX_ACK_CONNS: usize = 128;
+/// Una conexión sin actividad más de esto se cierra (B3).
+const ACK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Lee una línea acotada a `max` bytes. `Ok(Some(0))` = EOF; `Ok(None)` = la
+/// línea superó el tope sin cerrar (conexión abusiva → el llamador cierra).
+/// Sustituye a `read_line`, que no acota (B3).
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+    max: u64,
+) -> std::io::Result<Option<usize>> {
+    buf.clear();
+    let n = (&mut *reader).take(max).read_line(buf).await?;
+    if n == 0 {
+        return Ok(Some(0));
+    }
+    if !buf.ends_with('\n') {
+        return Ok(None);
+    }
+    Ok(Some(n))
 }
 
 /// Arranca el servidor TCP de ACKs. Cada conexión entrante se atiende en
@@ -46,6 +75,7 @@ pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> any
     // casan" son indistinguibles sin activar debug.
     let seen: Arc<parking_lot::Mutex<std::collections::HashSet<std::net::IpAddr>>> =
         Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+    let conns = Arc::new(Semaphore::new(MAX_ACK_CONNS));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(p) => p,
@@ -54,6 +84,13 @@ pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> any
                 continue;
             }
         };
+        // Cota de conexiones concurrentes (B3): a tope, cerramos la nueva en
+        // vez de encolar una task por socket ocioso.
+        let Ok(permit) = conns.clone().try_acquire_owned() else {
+            debug!(%peer, "dkms.ack_socket: tope de conexiones, rechazo");
+            drop(stream);
+            continue;
+        };
         let _ = stream.set_nodelay(true);
         if seen.lock().insert(peer.ip()) {
             info!(from_ip = %peer.ip(), "dkms.ack_socket: primera conexión de ACK desde esta IP");
@@ -61,6 +98,7 @@ pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> any
         debug!(%peer, "dkms.ack_socket accept");
         let gen = generator.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_conn(gen, stream, peer).await {
                 debug!(error = %e, %peer, "dkms.ack_socket conn ended");
             }
@@ -76,11 +114,26 @@ async fn handle_conn(
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            return Ok(()); // EOF
-        }
+        // Lectura acotada + timeout de inactividad (B3).
+        let n = match tokio::time::timeout(
+            ACK_IDLE_TIMEOUT,
+            read_bounded_line(&mut reader, &mut line, MAX_ACK_LINE),
+        )
+        .await
+        {
+            Err(_) => {
+                debug!(%remote, "dkms.ack_socket: conexión ociosa, cierro");
+                return Ok(());
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Ok(Ok(None)) => {
+                warn!(%remote, "dkms.ack_socket: línea > tope, cierro la conexión");
+                return Ok(());
+            }
+            Ok(Ok(Some(0))) => return Ok(()), // EOF
+            Ok(Ok(Some(n))) => n,
+        };
+        let _ = n;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -415,5 +468,22 @@ mod tests {
         let back: AckFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(back.from, "dkms-11");
         assert_eq!(back.key_ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_rejects_an_overlong_line() {
+        // Línea normal terminada en '\n': aceptada.
+        let data = b"{\"from\":\"d\",\"key_ids\":[]}\n".to_vec();
+        let mut r = BufReader::new(&data[..]);
+        let mut buf = String::new();
+        let out = read_bounded_line(&mut r, &mut buf, 1024).await.unwrap();
+        assert_eq!(out, Some(buf.len()));
+        // Línea de 5000 B sin '\n' con tope 1024: rechazada (None) — sin esto
+        // crecería un String sin límite pre-auth (B3).
+        let big = vec![b'A'; 5000];
+        let mut r = BufReader::new(&big[..]);
+        let mut buf = String::new();
+        let out = read_bounded_line(&mut r, &mut buf, 1024).await.unwrap();
+        assert!(out.is_none(), "una línea > tope debe rechazarse");
     }
 }
