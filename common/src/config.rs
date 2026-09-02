@@ -120,6 +120,15 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
+// Zeroiza el valor al soltarlo (auditoría 2026-09b C4): antes el `String`
+// interno se liberaba sin borrar, dejando el secreto en el heap.
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
