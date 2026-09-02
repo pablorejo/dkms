@@ -9,8 +9,8 @@ Referencia y parcialmente sustituye a `audit_2026_05.md` (findings H-5, H-6,
 M-1) y `orr/TODO_SECURITY.md` (P2). Todo lo citado con `file:line` fue
 verificado el 2026-08-27.
 
-Estado global: **Fases 1, 2, 3, 5, 7, 8 y 9 completas; 4 y 6 hechas en código, con los flips de default (etsi020 / strict) y el borrado del socket de ACK pendientes de la validación en testbed**
-(2026-08-27). Todas las fases recorridas. Quedan diferidos, con requisitos
+Estado global: **Fases 1, 2, 3, 5, 7, 8, 9 y 10 completas; 4 y 6 hechas en código; los flips de default (etsi020 / strict / control_tls) validados en el testbed Proxmox (2026-09-01) pero SIN cambiar en el binario — decisión del operador**
+(actualizado 2026-09-02; ver `audit_2026_09b.md`). Todas las fases recorridas. Quedan diferidos, con requisitos
 claros: en 4, eliminar el socket de ACK (necesita testbed); en 6, pinning
 estable (necesita persistir la identidad ORR — decisión del usuario) y auth
 del caller de EstablishSecret (necesita testbed + separar puertos gRPC). Todo

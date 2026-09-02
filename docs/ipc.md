@@ -29,7 +29,7 @@ Each crate generates client + server stubs into `common::proto::*` via
 | keepalive_interval| 15 s              |
 | keepalive_timeout | 5 s               |
 | TCP_NODELAY       | true              |
-| TLS               | off (opt-in)      |
+| TLS               | ORR gRPC: mTLS por defecto (2026-08-28); SDN admin: opt-in (`control_tls`) |
 
 ### TLS / mTLS
 
@@ -66,7 +66,7 @@ Variable payload:
   PAYLOAD       PAYLOAD_LEN B (ciphertext, no base64)
 ```
 
-Implementation: [`common/src/ipc/binary_tcp.rs`](../common/src/ipc/binary_tcp.rs).
+Implementation: crate [`wire`](../wire/src/lib.rs) (`common::ipc::binary_tcp` es un re-export de `wire`; el fichero `binary_tcp.rs` no existe).
 
 ### Why not gRPC for the hot path too?
 

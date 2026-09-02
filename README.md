@@ -65,11 +65,6 @@ cp .env.example .env
 make images
 ```
 
-## Web
-
-The Next.js web frontend from the Python project is reused unchanged. See
-[`web/README.md`](web/README.md) for the pointer.
-
 ## Layout
 
 ```
@@ -82,7 +77,6 @@ The Next.js web frontend from the Python project is reused unchanged. See
 ├── sdn/                # binary crate
 ├── dkms/               # binary crate
 ├── quditto/            # binary crate
-├── web/                # pointer to Next.js web (unchanged)
 ├── docker/             # deployable images + compose + node.yml renderer
 ├── scripts/            # build/run helpers
 └── docs/               # architecture, IPC, deployment
