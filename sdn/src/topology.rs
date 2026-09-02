@@ -1099,8 +1099,14 @@ impl MeasuredRates {
                 quality: quality.unwrap_or("measured").to_string(),
             },
         );
+        // Un reporte `unavailable` (KME caído, estimador frío) no vota en el
+        // mínimo (auditoría 2026-09b D2): si no, un extremo caído pinaba la
+        // capacidad de la arista con su última medida rancia. Si TODOS están
+        // `unavailable`, devuelve INFINITY → `apply_measured_capacity` lo
+        // ignora (no es finito) y la fórmula/valor previo se conserva.
         per_end
             .values()
+            .filter(|e| e.quality != "unavailable")
             .map(|e| e.keys_per_s)
             .fold(f64::INFINITY, f64::min)
     }
@@ -1113,6 +1119,16 @@ impl MeasuredRates {
     /// Olvida los reportes de una arista (cuando muere su declaración).
     pub fn forget_edge(&self, a: &str, b: &str) {
         self.by_edge.lock().remove(&edge_key(a, b));
+    }
+
+    /// Olvida TODOS los reportes de un extremo (cuando el QKC expira o se
+    /// borra), en cualquier arista que toque (auditoría 2026-09b D2). Sin esto,
+    /// un QKC que reinicia/expira dejaba su tasa rancia contaminando el `min`.
+    pub fn forget_reporter(&self, id: &str) {
+        self.by_edge.lock().retain(|_, per_end| {
+            per_end.remove(id);
+            !per_end.is_empty()
+        });
     }
 }
 
@@ -1600,27 +1616,33 @@ impl TopologyStore {
     }
 
     pub fn delete_qkc(&self, qkc_id: &str) -> Result<()> {
-        self.try_mutate(|t| {
-            if t.qkcs.remove(qkc_id).is_none() {
-                return Err(SdnError::UnknownNode(qkc_id.into()));
-            }
-            // Cascade: drop the node from the graph and any edge that
-            // touched it. ORR/DKMS bound to this QKC are left dangling
-            // (matching Python behaviour — caller is responsible for
-            // cleaning up dependents).
-            t.graph.remove(qkc_id);
-            for adj in t.graph.values_mut() {
-                adj.remove(qkc_id);
-            }
-            t.edges.retain(|(a, b), _| a != qkc_id && b != qkc_id);
-            // Deja de declarar: se ha ido. Lo que otros declaren HACIA él se
-            // conserva —sigue siendo verdad que tienen fibra hacia allí—, así
-            // que si vuelve, la arista se rehace sola con su anuncio.
-            t.declared.remove(qkc_id);
-            t.orr_by_qkc.remove(qkc_id);
-            t.dkms_by_qkc.remove(qkc_id);
-            Ok(())
-        })
+        let r = {
+            self.try_mutate(|t| {
+                if t.qkcs.remove(qkc_id).is_none() {
+                    return Err(SdnError::UnknownNode(qkc_id.into()));
+                }
+                // Cascade: drop the node from the graph and any edge that
+                // touched it. ORR/DKMS bound to this QKC are left dangling
+                // (matching Python behaviour — caller is responsible for
+                // cleaning up dependents).
+                t.graph.remove(qkc_id);
+                for adj in t.graph.values_mut() {
+                    adj.remove(qkc_id);
+                }
+                t.edges.retain(|(a, b), _| a != qkc_id && b != qkc_id);
+                // Deja de declarar: se ha ido. Lo que otros declaren HACIA él se
+                // conserva —sigue siendo verdad que tienen fibra hacia allí—, así
+                // que si vuelve, la arista se rehace sola con su anuncio.
+                t.declared.remove(qkc_id);
+                t.orr_by_qkc.remove(qkc_id);
+                t.dkms_by_qkc.remove(qkc_id);
+                Ok(())
+            })
+        };
+        // Olvida sus reportes de tasa medida (D2): fuera del snapshot, así que
+        // el mutate no los toca.
+        self.measured.forget_reporter(qkc_id);
+        r
     }
 
     pub fn register_orr(&self, orr: Orr) -> Result<Orr> {
@@ -2310,6 +2332,25 @@ mod tests {
         let t = store.load();
         assert_eq!(t.version, settled);
         assert_eq!(t.edge("1", "2").unwrap().measured_keys_per_s, Some(950.0));
+    }
+
+    /// Al expirar/borrarse un QKC, sus reportes de tasa medida se olvidan y
+    /// dejan de contaminar el `min` de la arista (auditoría 2026-09b D2).
+    #[test]
+    fn measured_reports_of_an_expired_qkc_are_forgotten() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce_measured("1", "2", None));
+        store.announce_qkc(&announce_measured("2", "1", None));
+        store.announce_qkc(&announce_measured("1", "2", Some(100.0)));
+        store.announce_qkc(&announce_measured("2", "1", Some(1000.0)));
+        assert!(store.measured.reports("1", "2").is_some());
+        store.delete_qkc("1").expect("delete");
+        // El extremo 1 ya no reporta; su tasa rancia no puede pinar el min.
+        let after = store.measured.reports("1", "2");
+        assert!(
+            after.as_ref().is_none_or(|m| !m.contains_key("1")),
+            "el reporte del QKC borrado debe olvidarse"
+        );
     }
 
     /// En una arista PQC no hay nada físico que medir: el campo se ignora.
