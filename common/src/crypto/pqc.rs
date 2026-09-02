@@ -59,19 +59,41 @@ pub mod suite {
 /// almacenamiento (qkc `pending_sk`, orr `ephemeral_sks`, `OrrIdentity`). No se
 /// pone `Drop` aquí porque impediría mover los campos fuera del struct (varios
 /// callers destructuran `public`/`ciphertext`, que son públicos).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct KemKeypair {
     pub public: Vec<u8>,
     pub secret: Vec<u8>,
     pub suite: String,
 }
 
+// `Debug` manual (auditoría 2026-09b C3): el derivado imprimía `secret` en
+// claro si algún `{:?}` alcanzaba el struct. Se redacta.
+impl std::fmt::Debug for KemKeypair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KemKeypair")
+            .field("public_len", &self.public.len())
+            .field("secret", &"<redacted>")
+            .field("suite", &self.suite)
+            .finish()
+    }
+}
+
 /// Salida de encapsulación. `ciphertext` es público; el `shared_secret` lo
 /// zeroiza el consumidor donde lo persiste (ver nota M-1 en [`KemKeypair`]).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct KemEncap {
     pub ciphertext: Vec<u8>,
     pub shared_secret: Vec<u8>, // 32 bytes (B32)
+}
+
+// `Debug` manual (C3): redacta `shared_secret`.
+impl std::fmt::Debug for KemEncap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KemEncap")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("shared_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Trait dyn-friendly para los KEMs. La indirección permite seleccionar
