@@ -21,6 +21,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use std::time::Duration;
 use tokio::{net::TcpStream, sync::Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -49,6 +50,13 @@ const MAX_INFLIGHT_PEER: usize = 8192;
 /// semáforo lleno el dispatcher deja de consumir, la cola se llena y el
 /// reader descarta contado — memoria acotada por construcción.
 const INTAKE_QUEUE: usize = 8192;
+/// Conexiones entrantes concurrentes al plano peer (B8). Una malla real tiene
+/// decenas de peers; 4096 deja margen y acota un flood de conexiones.
+const MAX_PEER_CONNS: usize = 4096;
+/// Una conexión que no manda su primer frame en este tiempo se cierra (B8):
+/// reap del slowloris sin cerrar enlaces persistentes legítimamente ociosos
+/// (a esos solo se les aplica el timeout en el PRIMER frame).
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = addr.parse()?;
@@ -89,13 +97,19 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
             }
         });
     }
+    let conns = Arc::new(Semaphore::new(MAX_PEER_CONNS));
     loop {
         let (stream, peer) = listener.accept().await?;
+        let Ok(permit) = conns.clone().try_acquire_owned() else {
+            debug!(%peer, "qkc.peer_server: tope de conexiones, rechazo (B8)");
+            continue;
+        };
         let _ = stream.set_nodelay(true);
         debug!(%peer, "qkc.peer_server.accept");
         let svc = svc.clone();
         let intake = intake_tx.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_conn(svc, stream, intake).await {
                 debug!(error = %e, "qkc.peer_server.conn_ended");
             }
@@ -108,8 +122,22 @@ async fn handle_conn(
     mut stream: TcpStream,
     intake: tokio::sync::mpsc::Sender<wire::Frame>,
 ) -> anyhow::Result<()> {
+    let mut first = true;
     loop {
-        let frame = match read_frame(&mut stream).await {
+        // Solo el PRIMER frame lleva timeout (B8): reap del slowloris sin cerrar
+        // enlaces persistentes ociosos, que entre ráfagas no mandan nada.
+        let read = if first {
+            match tokio::time::timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut stream)).await {
+                Ok(r) => r,
+                Err(_) => {
+                    debug!("qkc.peer_server: sin primer frame en plazo, cierro (B8)");
+                    return Ok(());
+                }
+            }
+        } else {
+            read_frame(&mut stream).await
+        };
+        let frame = match read {
             Ok(f) => f,
             Err(wire::WireError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(());
@@ -119,6 +147,7 @@ async fn handle_conn(
                 return Err(e.into());
             }
         };
+        first = false;
 
         match frame.kind {
             // Las variantes `_AUTH` siguen exactamente el mismo camino: el MAC
