@@ -17,6 +17,10 @@
 //! * Si llega un SAE no autorizado, devolvemos `KeyNotAuthorized` (el
 //!   handler convierte a 404 para no filtrar la existencia).
 
+/// Cota dura del TTL de una entrada de `PendingStore`. Un `ttl_seconds`
+/// elegido por el peer no puede empujar `expires_at` al overflow (B1).
+const MAX_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
 use std::{
     collections::HashSet,
     sync::Arc,
@@ -80,13 +84,21 @@ impl PendingStore {
         material: Vec<u8>,
         ttl: Option<Duration>,
     ) {
-        let ttl = ttl.unwrap_or(self.default_ttl);
+        // Cota dura + suma comprobada (auditoría 2026-09b B1): el
+        // `ttl_seconds` de `extension_mandatory` lo elige el peer por ETSI-020
+        // y llegaba a `Instant::now() + Duration` sin comprobar; un valor
+        // cercano a u64::MAX hacía overflow → panic → con `panic = "abort"`
+        // caía el DKMS entero. 7 días cubre cualquier TTL legítimo.
+        let ttl = ttl.unwrap_or(self.default_ttl).min(MAX_TTL);
+        let expires_at = Instant::now()
+            .checked_add(ttl)
+            .unwrap_or_else(|| Instant::now() + MAX_TTL);
         let entry = PendingEntry {
             initiator,
             authorized,
             retrieved: HashSet::new(),
             material: Zeroizing::new(material),
-            expires_at: Instant::now() + ttl,
+            expires_at,
         };
         self.inner.insert(key_id, entry);
     }
@@ -271,5 +283,26 @@ mod tests {
         assert!(matches!(err, DkmsError::KeyExpired));
         // se eliminó al detectar la expiración
         assert_eq!(s.len(), 0);
+    }
+
+    /// Un `ttl_seconds` absurdo (cercano a u64::MAX) elegido por el peer NO
+    /// debe hacer panic al calcular `expires_at` (auditoría 2026-09b B1): con
+    /// `panic = "abort"` un solo POST tumbaría el DKMS entero. La entrada se
+    /// guarda (recortada a MAX_TTL) y no está vencida.
+    #[test]
+    fn insert_with_absurd_ttl_does_not_panic_and_is_capped() {
+        let s = PendingStore::new(60);
+        s.insert(
+            KeyId::new("k-huge"),
+            SaeId::new("m"),
+            saes(&["alice"]),
+            vec![0u8; 32],
+            Some(Duration::from_secs(u64::MAX)),
+        );
+        assert_eq!(s.len(), 1);
+        // No está vencida: se puede recuperar.
+        assert!(s
+            .take_for_sae(&KeyId::new("k-huge"), &SaeId::new("alice"))
+            .is_ok());
     }
 }
