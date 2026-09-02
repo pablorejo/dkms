@@ -28,7 +28,7 @@ IMMUTABLE_TAG   ?= $(TAG)-$(GIT_SHA)
 
 ALL_RUST        := dkms orr qkc sdn quditto
 
-.PHONY: help check fmt clippy test rendercheck images push
+.PHONY: help check fmt clippy test rendercheck deny images push
 
 # ──────────────────────────────────────────────────────────────────────
 # help
@@ -59,6 +59,10 @@ clippy: ## cargo clippy --workspace --all-targets -- -D warnings
 
 test: ## cargo test --workspace
 	@cargo test --workspace
+
+deny: ## cargo audit + cargo deny (cadena de suministro; NECESITA RED, fuera de `check`)
+	@cargo audit
+	@cargo deny check advisories bans sources licenses
 
 rendercheck: ## tests of the node.yml -> TOML renderer (docker/render_config.py)
 	@python3 -m unittest discover -s docker -p "test_*.py"

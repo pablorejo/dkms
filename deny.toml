@@ -1,0 +1,46 @@
+# cargo-deny — puerta de cadena de suministro (auditoría 2026-09b G8).
+#
+# Se ejecuta con `make deny` (NECESITA RED: baja la advisory-db de RustSec) —
+# a propósito FUERA de `make check`, que debe correr sin red. En CI va en su
+# propio job. Revisar las excepciones aquí periódicamente.
+
+[advisories]
+version = 2
+yanked = "deny"
+# Sin advisories abiertas tras la actualización del 2026-09-02
+# (h2>=0.4.19, crossbeam-epoch>=0.9.20, anyhow>=1.0.104, quinn-proto>=0.11.17;
+# bincode retirado). Si aparece una nueva y se acepta conscientemente, añadir
+# su id a `ignore` con un comentario y fecha.
+ignore = []
+
+[bans]
+# Duplicados: aviso, no error — quedan árboles transitivos (rand 0.8/0.9,
+# webpki-roots) que no controlamos del todo. Revisar con `cargo tree -d`.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Solo crates.io; nada de git ni registries desconocidos.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+version = 2
+# Permisivas habituales del ecosistema Rust + las que usan nuestras deps
+# cripto/TLS. `make deny` avisa si una dep trae una licencia fuera de aquí;
+# ampliar con criterio (no meter copyleft fuerte sin revisar).
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
