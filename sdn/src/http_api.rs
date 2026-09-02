@@ -825,6 +825,10 @@ fn mutating_routes() -> Router<SdnService> {
         .route("/sae/:sae_id", put(update_sae).delete(delete_sae))
         .route("/link-capacity", post(update_link_capacity))
         .route("/demand", post(post_demand))
+        // Cota de tamaño de cuerpo (auditoría 2026-09b B11): 1 MiB cubre un
+        // anuncio legítimo con miles de SAE/enlaces; frena el abuso de
+        // `/sae-bulk` (por defecto axum permite 2 MiB).
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
 }
 
 /// Rutas de solo lectura (web UI / inspección). También servidas en claro

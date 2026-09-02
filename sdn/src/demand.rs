@@ -70,6 +70,14 @@ pub struct CommodityDemand {
     pub grade: KeyGrade,
 }
 
+/// Reloj de pared en ms desde epoch (para clamp de timestamps de demanda).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 impl CommodityDemand {
     /// Remaining buffer space `R_k = B_k − L_k`. Always non-negative;
     /// clamped to 0 if a stale report has `level > capacity`.
@@ -152,6 +160,14 @@ impl DemandRegistry {
                     entry.src_dkms, entry.dst_dkms
                 ));
                 continue;
+            }
+            // Clamp del timestamp al reloj local (auditoría 2026-09b B11): un
+            // `timestamp_ms` futuro elegido por el reportero hacía la entrada
+            // inmortal (`evict_older_than` compara contra `now - max_age`).
+            let mut entry = entry;
+            let now = now_ms();
+            if entry.timestamp_ms > now {
+                entry.timestamp_ms = now;
             }
             let key = (entry.src_dkms.clone(), entry.dst_dkms.clone(), entry.grade);
             self.inner.insert(key, entry);
@@ -287,6 +303,23 @@ mod tests {
         assert_eq!(got.level, 100.0);
         assert_eq!(got.drain_rate, 30.0);
         assert!(reg.get("A", "Z", KeyGrade::Qkd).is_none());
+    }
+
+    #[test]
+    fn future_timestamp_is_clamped_so_it_can_expire() {
+        let reg = DemandRegistry::new();
+        let s = reg.ingest(DemandReport {
+            dkms_id: "A".into(),
+            entries: vec![demand("A", "B", 1.0, 10.0, 1.0, i64::MAX)],
+        });
+        assert_eq!(s.accepted, 1);
+        // Si el timestamp i64::MAX se hubiera guardado tal cual, no expiraría
+        // jamás. Clampeado a ~now, expira con un `now` posterior (B11).
+        let evicted = reg.evict_older_than(now_ms() + 10_000, 0);
+        assert_eq!(
+            evicted, 1,
+            "un timestamp futuro clampeado debe poder expirar"
+        );
     }
 
     #[test]
