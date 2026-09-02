@@ -442,8 +442,20 @@ struct SaeBulkPayloadItem {
 
 async fn register_sae_bulk(
     State(svc): State<SdnService>,
+    identity: Option<Extension<PeerCertIdentity>>,
     Json(items): Json<Vec<SaeBulkPayloadItem>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Autorización (auditoría 2026-09b A1): bajo mTLS solo puedes registrar en
+    // masa SAEs que residan en TI mismo — el cert debe casar con el `dkms_id`
+    // de CADA item. Antes este handler no tomaba identidad, así que era el
+    // segundo paso del robo de binding (DELETE ajeno + re-registro a mi nombre).
+    if identity.is_some() {
+        for it in &items {
+            if let Err(resp) = require_sae_owner(identity.as_deref(), it.dkms_id.as_deref()) {
+                return resp;
+            }
+        }
+    }
     let bulk: Vec<SaeBulkItem> = items
         .into_iter()
         .map(|p| SaeBulkItem {
@@ -464,7 +476,17 @@ async fn update_sae(
     identity: Option<Extension<PeerCertIdentity>>,
     Json(p): Json<SaeUpdatePayload>,
 ) -> axum::response::Response {
-    if let Err(resp) = require_sae_owner(identity.as_deref(), p.dkms_id.as_deref()) {
+    // Autorización (auditoría 2026-09b A1): solo el dueño ACTUAL puede
+    // rebindear/mover su SAE. Antes se comprobaba contra el `dkms_id` DESTINO
+    // del cuerpo, así que un cert ajeno robaba el binding con
+    // `PUT /sae/X {"dkms_id":"yo"}` y recibía la clave de sesión de X.
+    let owner = svc
+        .topology
+        .load()
+        .saes
+        .get(&sae_id)
+        .map(|s| s.dkms_id.clone());
+    if let Err(resp) = sae_mutation_authorized(identity.as_deref(), owner.as_deref()) {
         return resp;
     }
     let target = p.dkms_target.as_ref().map(|t| (t.ip.as_str(), t.port));
@@ -480,7 +502,20 @@ async fn update_sae(
 async fn delete_sae(
     State(svc): State<SdnService>,
     AxumPath(sae_id): AxumPath<String>,
-) -> impl IntoResponse {
+    identity: Option<Extension<PeerCertIdentity>>,
+) -> axum::response::Response {
+    // Autorización (auditoría 2026-09b A1): solo el DKMS que ACTUALMENTE sirve
+    // el SAE puede borrarlo. Antes no tomaba identidad — cualquiera lo borraba,
+    // primer paso del robo de binding.
+    let owner = svc
+        .topology
+        .load()
+        .saes
+        .get(&sae_id)
+        .map(|s| s.dkms_id.clone());
+    if let Err(resp) = sae_mutation_authorized(identity.as_deref(), owner.as_deref()) {
+        return resp;
+    }
     match svc.topology.delete_sae(&sae_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_response(e),
@@ -725,6 +760,20 @@ fn require_sae_owner(
     }
 }
 
+/// Autoriza una MUTACIÓN (rebind/borrado) sobre un SAE existente contra su
+/// dueño ACTUAL, no contra el destino del cuerpo (auditoría 2026-09b A1). Un
+/// SAE inexistente (`None`) se deja pasar: el handler devuelve 404 aguas abajo.
+/// En claro (sin cert) se permite — comportamiento histórico.
+fn sae_mutation_authorized(
+    identity: Option<&PeerCertIdentity>,
+    current_owner: Option<&str>,
+) -> std::result::Result<(), axum::response::Response> {
+    match current_owner {
+        None => Ok(()),
+        Some(owner) => require_identity(identity, owner, "sae-mutation"),
+    }
+}
+
 // ---------------- server -----------------------------------------------------
 
 /// Rutas mutantes (registro de nodos, rebind de SAE): en mTLS exigen cert.
@@ -868,6 +917,19 @@ mod tests {
         assert!(require_sae_owner(Some(&id), Some("dkms-2")).is_err());
         // mTLS sin dueño nombrado: denegado.
         assert!(require_sae_owner(Some(&id), None).is_err());
+    }
+
+    #[test]
+    fn sae_mutation_checks_the_current_owner_not_the_body_target() {
+        // En claro: se permite (histórico).
+        assert!(sae_mutation_authorized(None, Some("dkms-1")).is_ok());
+        // SAE inexistente: pasa (el handler devuelve 404 aguas abajo).
+        assert!(sae_mutation_authorized(Some(&ident("dkms://dkms-2")), None).is_ok());
+        // El dueño ACTUAL puede mutarlo.
+        assert!(sae_mutation_authorized(Some(&ident("dkms://dkms-1")), Some("dkms-1")).is_ok());
+        // Un cert AJENO no puede robar el binding, aunque el cuerpo pidiera
+        // rebindear el SAE a su propio dkms_id: aquí solo cuenta el dueño ACTUAL.
+        assert!(sae_mutation_authorized(Some(&ident("dkms://dkms-2")), Some("dkms-1")).is_err());
     }
 
     /// Bind a minimal SDN HTTP router (just the demand endpoints) to
