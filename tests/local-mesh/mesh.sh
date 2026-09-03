@@ -440,6 +440,10 @@ generate() {        # generate <N>
         cat > "$DIR/yml/node$n.orr.yml" <<EOF
 orr_id: "orr_$n"
 qkc_id: $n
+# La reja de aplicación del ORR (B1): solo su DKMS puede pedirle SendMessage
+# y StreamDeliveries. Sin esto el renderer avisa y la reja queda abierta a
+# cualquier cert de la net-ca (auditoría 2026-09-03, D-16).
+served_dkms: ["dkms-$n"]
 qkc_addr: "127.0.0.1:$(local_port "$n")"
 sdn_url: "$SDN_SCHEME://127.0.0.1:$SDN_GRPC"
 advertise_ip: "127.0.0.1"
