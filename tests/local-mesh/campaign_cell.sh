@@ -197,6 +197,13 @@ log "############ $FAM N=$N · $(uname -n) · $(nproc) cpus · $(date '+%F %T') 
 T_UP0=$SECONDS
 if ! "$MESH" up "$N" custom > "$OUT/up.log" 2>&1; then
     tail -5 "$OUT/up.log" | tee -a "$OUT/cell.log"
+    # Los logs de arranque viven en el scratch del nodo, que muere con el job:
+    # sin esto un fallo de bring-up no se puede diagnosticar a posteriori.
+    mkdir -p "$OUT/boot-logs"
+    for f in sdn qkc1 orr1 dkms1 quditto0; do
+        [ -f "$MESH_DIR/logs/$f.log" ] && tail -c 200000 "$MESH_DIR/logs/$f.log" > "$OUT/boot-logs/$f.log"
+    done
+    cp "$MESH_DIR/cfg/sdn/default.toml" "$OUT/boot-logs/sdn.toml" 2>/dev/null
     die "mesh.sh up falló"
 fi
 T_UP=$(( SECONDS - T_UP0 ))
