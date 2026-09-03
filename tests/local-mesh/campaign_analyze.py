@@ -132,18 +132,28 @@ def read_persec(path):
 
 
 def keys_log_result(path):
-    """`mesh.sh keys` → (pares, idénticos, fallidos) de la última línea."""
+    """`mesh.sh keys` → (pares, idénticos, fallidos, throttled, mismatch).
+    Un «fallido» por 429/503 es contrapresión (bucket por SAE agotado, buffer
+    vacío): no es un fallo de integridad. Solo cuenta como tal lo que NO es
+    un rechazo HTTP (bytes distintos, error de protocolo)."""
     if not os.path.exists(path):
         return None
     last = ""
+    throttled = 0
+    other = 0
     with open(path, errors="replace") as fh:
         for line in fh:
             if "pares ordenados" in line:
                 last = line
+            elif line.lstrip().startswith("✗"):
+                if "429" in line or "503" in line:
+                    throttled += 1
+                else:
+                    other += 1
     m = re.search(r"pares ordenados:\s*(\d+)\s+idénticos:\s*(\d+)\s+fallidos:\s*(\d+)", last)
     if not m:
         return None
-    return tuple(int(x) for x in m.groups())
+    return tuple(int(x) for x in m.groups()) + (throttled, other)
 
 
 def analyze_cell(cdir):
@@ -293,7 +303,8 @@ def analyze_cell(cdir):
     for tag in ("L1", "final"):
         r = keys_log_result(os.path.join(cdir, "keys_%s.log" % tag))
         if r:
-            out["keys_" + tag] = {"pairs": r[0], "identical": r[1], "failed": r[2]}
+            out["keys_" + tag] = {"pairs": r[0], "identical": r[1], "failed": r[2],
+                                  "throttled": r[3], "mismatch_or_other": r[4]}
     out["l1_offered_total"] = meta.get("l1_offered_total")
     return out
 
@@ -375,7 +386,9 @@ def build_tables(cells):
     out.append(table("Salud · peel_failed + dropped_no_secret", lambda c: (c["health"].get("peel_failed", 0) + c["health"].get("dropped_no_secret", 0)) if c.get("health") else None))
     out.append(table("Salud · rechazos del sello por-frame (bad_mac+replayed+plain_rej)", g(["health", "frame_auth_rejects"])))
     out.append(table("Salud · procesos muertos + panics", lambda c: (c["health"].get("dead_processes", 0) + c["health"].get("panics", 0)) if c.get("health") else None))
-    out.append(table("Integridad · intercambios ETSI-014 fallidos (L1 + final)", lambda c: (c.get("keys_L1", {}).get("failed", 0) + c.get("keys_final", {}).get("failed", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None))
+    out.append(table("Integridad · intercambios ETSI-014 con bytes distintos u otro error (L1 + final)", lambda c: (c.get("keys_L1", {}).get("mismatch_or_other", 0) + c.get("keys_final", {}).get("mismatch_or_other", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None,
+                     note="Los 429/503 de una ronda (contrapresión, buffer vacío) van en la tabla siguiente: no son fallos de integridad."))
+    out.append(table("Integridad · intercambios rechazados por 429/503 en las rondas (L1 + final)", lambda c: (c.get("keys_L1", {}).get("throttled", 0) + c.get("keys_final", {}).get("throttled", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None))
     out.append(table("Bring-up (s)", g(["t_up_s"])))
     return "\n".join(out)
 

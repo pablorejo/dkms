@@ -93,7 +93,7 @@ TABLE_TITLES = {
            "l2_hops": "L2 effective hops per delivered key (vs uniform mean)", "l2_jain": "L2 Jain fairness index (keys per pair)",
            "l2_minshare": "L2 worst pair / uniform share", "l2_reject": "L2 rejected fraction (429/503)",
            "l2_p99": "L2 latency p99 (ms)", "t_recover_s": "Recovery to full after L2 (s; — = not within 180 s)",
-           "health": "recv_corrupt / peel_failed / frame-auth rejects / dead+panics / failed exchanges",
+           "health": "recv_corrupt / peel_failed / frame-auth rejects / dead+panics / exchanges with different bytes (429/503 in the rounds are backpressure, not counted here)",
            "cpu": "Modules CPU under L2 (% of 6400)", "rss": "Peak RSS under L2 (MB)"},
     "es": {"techo_fibra": "Techo de fibra Σcap/ħ (claves/s)", "mean_hops": "Saltos medios (pares ordenados)",
            "t_full_s": "Tiempo hasta todos los pares a tope (s; — = no en 600 s)",
@@ -103,7 +103,7 @@ TABLE_TITLES = {
            "l2_hops": "L2 saltos efectivos por clave entregada (vs media uniforme)", "l2_jain": "L2 índice de Jain (claves por par)",
            "l2_minshare": "L2 peor par / reparto uniforme", "l2_reject": "L2 fracción rechazada (429/503)",
            "l2_p99": "L2 latencia p99 (ms)", "t_recover_s": "Recuperación a tope tras L2 (s; — = no en 180 s)",
-           "health": "recv_corrupt / peel_failed / rechazos del sello / muertos+panics / intercambios fallidos",
+           "health": "recv_corrupt / peel_failed / rechazos del sello / muertos+panics / intercambios con bytes distintos (los 429/503 de las rondas son contrapresión y no cuentan aquí)",
            "cpu": "CPU de los módulos bajo L2 (% de 6400)", "rss": "RSS pico bajo L2 (MB)"},
 }
 
@@ -155,7 +155,7 @@ def cell_value(c, key):
     if key == "t_recover_s":
         return fmt(c.get("t_recover_s"))
     if key == "health":
-        failed = (c.get("keys_L1") or {}).get("failed", 0) + (c.get("keys_final") or {}).get("failed", 0)
+        failed = (c.get("keys_L1") or {}).get("mismatch_or_other", 0) + (c.get("keys_final") or {}).get("mismatch_or_other", 0)
         return "%d / %d / %d / %d / %d" % (h.get("recv_corrupt", 0), h.get("peel_failed", 0) + h.get("dropped_no_secret", 0),
                                           h.get("frame_auth_rejects", 0), h.get("dead_processes", 0) + h.get("panics", 0), failed)
     if key == "cpu":
