@@ -133,6 +133,13 @@ common = { path = "common" }
 opt-level     = 3
 lto           = "thin"
 codegen-units = 1
+# Aritmética comprobada también en release (auditoría 2026-09-02, E1): un
+# desbordamiento silencioso en una época, un contador o una longitud es
+# exactamente la clase de bug que este sistema no puede detectar aguas abajo
+# (la época de B2 envolvía a 0 y reusaba material). Con panic=abort el
+# proceso cae y se reinicia, que es la política de recuperación de todo el
+# sistema; el coste medido es despreciable frente al TLS y el AEAD.
+overflow-checks = true
 # Symbols stay, only DWARF goes: a `panicked at` in production must resolve
 # to a frame under RUST_BACKTRACE=1. `strip = true` left every abort as an
 # unattributable hex address.
