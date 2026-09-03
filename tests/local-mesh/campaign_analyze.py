@@ -224,13 +224,22 @@ def analyze_cell(cdir):
                 win = [s for s in ph if s["t"] >= w0 and s["D"]]
                 if len(win) >= 2:
                     stock0, stock1 = sum_enc(win[0]), sum_enc(win[-1])
+                    # Segundo almacén: los anillos ENC de los QKC (claves QKD ya
+                    # sacadas del KME, líneas Q). El tercero, el búfer del propio
+                    # quditto (8192 claves por arista), no se muestrea: se da su
+                    # cota como residuo (a 300 s de L2 es <10 % del techo).
+                    ring0 = sum(fnum(q, "enc") for q in win[0]["Q"])
+                    ring1 = sum(fnum(q, "enc") for q in win[-1]["Q"])
                     ta, tb = win[0]["t"], win[-1]["t"]
                     served_win = sum(r["ok_keys"] for r in persec if ta <= r["t_unix"] < tb)
                     dur = tb - ta
+                    drained = (stock0 - stock1) + (ring0 - ring1)
                     out[tag]["window_s"] = dur
                     out[tag]["served_window_keys_per_s"] = served_win / dur if dur else None
                     out[tag]["stock_drain_keys_per_s"] = (stock0 - stock1) / dur if dur else None
-                    out[tag]["sustained_corrected_keys_per_s"] = (served_win - (stock0 - stock1)) / dur if dur else None
+                    out[tag]["ring_drain_keys_per_s"] = (ring0 - ring1) / dur if dur else None
+                    out[tag]["sustained_corrected_keys_per_s"] = (served_win - drained) / dur if dur else None
+                    out[tag]["quditto_stock_bound_keys_per_s"] = (topo["edges"] * 8192.0) / dur if dur else None
                     out[tag]["stock_start_frac"] = stock0 / cap_stock if cap_stock else None
                     out[tag]["stock_end_frac"] = stock1 / cap_stock if cap_stock else None
     # ── REC ──
@@ -300,7 +309,8 @@ def build_tables(cells):
     out.append(table("L1 · latencia p99 (ms)", g(["L1", "lat_p99_ms"]), 1))
     out.append(table("L2 · servido bruto (claves/s, con stock)", g(["L2", "served_keys_per_s"])))
     out.append(table("L2 · SOSTENIDO corregido por stock (claves/s)", g(["L2", "sustained_corrected_keys_per_s"]),
-                     note="(servido − stock drenado) / ventana, sobre los últimos 2/3 de L2."))
+                     note="(servido − stock drenado de los DKMS − anillos ENC del QKC) / ventana, sobre los últimos 2/3 de L2. Residuo no muestreado: el búfer del quditto, ≤ E·8192/ventana (tabla siguiente)."))
+    out.append(table("L2 · cota del residuo no muestreado (quditto, claves/s)", g(["L2", "quditto_stock_bound_keys_per_s"])))
     out.append(table("L2 · sostenido / techo de fibra", lambda c: (c["L2"]["sustained_corrected_keys_per_s"] / c["techo_fibra"]) if c.get("L2", {}).get("sustained_corrected_keys_per_s") is not None and c["techo_fibra"] else None, 2))
     out.append(table("L2 · fracción rechazada (429/503)", g(["L2", "reject_frac"]), 3))
     out.append(table("L2 · latencia p50 (ms)", g(["L2", "lat_p50_ms"]), 1))
