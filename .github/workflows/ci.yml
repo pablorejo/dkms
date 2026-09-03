@@ -36,3 +36,14 @@ jobs:
 
       - name: make check
         run: make check
+
+  # Cadena de suministro (auditoría 2026-09-02 G8 / 2026-09-03 R12): lo que
+  # `make deny` corre en local, pero en CI, con red. Es un job aparte porque
+  # `check` es hermético a propósito.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources licenses
