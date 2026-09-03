@@ -198,6 +198,20 @@ def analyze_cell(cdir):
                     "lat_p50_ms": sm["lat_p50_ms"], "lat_p90_ms": sm["lat_p90_ms"], "lat_p99_ms": sm["lat_p99_ms"],
                     "pairs_zero": sm["pairs_zero"], "pair_keys_min": sm["pair_keys_min"],
                     "pair_keys_median": sm["pair_keys_median"], "pair_keys_max": sm["pair_keys_max"]}
+        # Equidad entre pares (claves servidas por par ordenado en la fase):
+        # índice de Jain y cuánto se lleva el peor par respecto al reparto
+        # uniforme. Es la otra cara del agregado α-fair.
+        pp = os.path.join(cdir, tag + ".pairs.csv")
+        if os.path.exists(pp):
+            vals = []
+            with open(pp) as fh:
+                for r in csv.DictReader(fh):
+                    vals.append(float(r["ok_keys"]))
+            if vals:
+                mean = sum(vals) / len(vals)
+                out[tag]["jain_index"] = (sum(vals) ** 2) / (len(vals) * sum(v * v for v in vals)) if sum(v * v for v in vals) > 0 else None
+                out[tag]["min_pair_share"] = (min(vals) / mean) if mean > 0 else None
+                out[tag]["p10_pair_share"] = (sorted(vals)[len(vals) // 10] / mean) if mean > 0 else None
         ph = phase_samples(samples, tag)
         if ph:
             enc_zero = [sum(fnum(d, "enc_zero") for d in s["D"]) / pairs for s in ph if s["D"]]
@@ -252,6 +266,23 @@ def analyze_cell(cdir):
                     out[tag]["quditto_stock_bound_keys_per_s"] = None if win[0]["K"] else ((topo["edges"] * 8192.0) / dur if dur else None)
                     out[tag]["stock_start_frac"] = stock0 / cap_stock if cap_stock else None
                     out[tag]["stock_end_frac"] = stock1 / cap_stock if cap_stock else None
+                    # Lo que de verdad gasta la fibra: claves QKD sacadas por los
+                    # QKC (Σtaken) frente a lo que producen los KME (Σcap), y
+                    # cuántas cuesta cada clave de transporte entregada
+                    # (saltos EFECTIVOS = Σtaken/Σemitted). El techo Σcap/ħ es
+                    # el de demanda UNIFORME; el asignador α-fair favorece a los
+                    # pares cortos y el agregado puede superarlo sin que la
+                    # fibra dé más de sí (canario N=10: 95 % de utilización,
+                    # 1,59 saltos efectivos frente a 2,78 de media).
+                    taken0 = sum(fnum(q, "taken") for q in win[0]["Q"])
+                    taken1 = sum(fnum(q, "taken") for q in win[-1]["Q"])
+                    em0 = sum(fnum(d, "emitted") for d in win[0]["D"])
+                    em1 = sum(fnum(d, "emitted") for d in win[-1]["D"])
+                    sum_cap = float(topo.get("sum_cap_keys_per_s") or 0.0)
+                    out[tag]["fibre_used_keys_per_s"] = (taken1 - taken0) / dur if dur else None
+                    out[tag]["fibre_utilisation"] = ((taken1 - taken0) / dur / sum_cap) if (dur and sum_cap) else None
+                    out[tag]["transport_emitted_keys_per_s"] = (em1 - em0) / dur if dur else None
+                    out[tag]["effective_hops"] = ((taken1 - taken0) / (em1 - em0)) if (em1 - em0) > 0 else None
     # ── REC ──
     rec = phase_samples(samples, "REC")
     if rec:
@@ -322,6 +353,13 @@ def build_tables(cells):
                      note="(servido − stock drenado en la ventana) / ventana, sobre los últimos 2/3 de L2; el stock son los tres almacenes: buffers ENC de los DKMS, anillos ENC de los QKC y búferes de los KME (quditto, muestreados)."))
     out.append(table("L2 · drenado del KME en la ventana (claves/s)", g(["L2", "kme_drain_keys_per_s"])))
     out.append(table("L2 · sostenido / techo de fibra", lambda c: (c["L2"]["sustained_corrected_keys_per_s"] / c["techo_fibra"]) if c.get("L2", {}).get("sustained_corrected_keys_per_s") is not None and c["techo_fibra"] else None, 2))
+    out.append(table("L2 · fibra consumida por los QKC (Σtaken, claves/s)", g(["L2", "fibre_used_keys_per_s"])))
+    out.append(table("L2 · utilización de la fibra (Σtaken / Σcap)", g(["L2", "fibre_utilisation"]), 2,
+                     note="Cerca de 1 = la fibra manda (el KME no da más); muy por debajo = manda el software o el asignador."))
+    out.append(table("L2 · saltos efectivos por clave entregada (Σtaken / Σemitted)", g(["L2", "effective_hops"]), 2,
+                     note="Comparar con los saltos medios uniformes: menor = el asignador α-fair favorece a los pares cortos."))
+    out.append(table("L2 · índice de Jain de las claves servidas por par", g(["L2", "jain_index"]), 3))
+    out.append(table("L2 · peor par / reparto uniforme", g(["L2", "min_pair_share"]), 2))
     out.append(table("L2 · fracción rechazada (429/503)", g(["L2", "reject_frac"]), 3))
     out.append(table("L2 · latencia p50 (ms)", g(["L2", "lat_p50_ms"]), 1))
     out.append(table("L2 · latencia p99 (ms)", g(["L2", "lat_p99_ms"]), 1))
@@ -406,6 +444,10 @@ def make_plots(cells, outdir):
     plot("l0_fill_time", "L0 · tiempo hasta todos los buffers a tope", "s", lambda c: c.get("t_full_s"))
     plot("l0_fill_slope", "L0 · pendiente de llenado (Σ todos los pares)", "claves/s", lambda c: c.get("l0_fill_slope_keys_per_s"))
     plot("l2_reject", "L2 · fracción de peticiones rechazadas (contrapresión)", "fracción", lambda c: c.get("L2", {}).get("reject_frac"))
+    plot("l2_fibre_utilisation", "L2 · utilización de la fibra (Σtaken/Σcap)", "fracción", lambda c: c.get("L2", {}).get("fibre_utilisation"))
+    plot("l2_effective_hops", "L2 · saltos efectivos por clave entregada", "saltos", lambda c: c.get("L2", {}).get("effective_hops"))
+    plot("l2_jain", "L2 · equidad entre pares (índice de Jain)", "Jain", lambda c: c.get("L2", {}).get("jain_index"))
+    plot("l2_min_pair_share", "L2 · peor par / reparto uniforme", "fracción", lambda c: c.get("L2", {}).get("min_pair_share"))
     plot("l2_cpu_modules", "L2 · CPU de los módulos (6400 % = nodo entero)", "% acumulado",
          lambda c: sum(v for k, v in c["L2"]["cpu_mean_pct"].items() if k != "sae_load") if c.get("L2", {}).get("cpu_mean_pct") else None)
     plot("rss_peak", "L2 · RSS pico total", "MB", lambda c: c.get("L2", {}).get("rss_total_peak_mb"))

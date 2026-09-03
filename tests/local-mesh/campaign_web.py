@@ -77,7 +77,8 @@ FIG_SECTIONS = [
     ("sec_theory", ["ceilings", "hops"], ["techo_fibra", "mean_hops"]),
     ("sec_l0", ["l0_fill_time", "l0_fill_slope"], ["t_full_s", "l0_fill_slope"]),
     ("sec_l1", ["l1_served_vs_offered", "l1_latency"], ["l1_served", "l1_p99"]),
-    ("sec_l2", ["l2_sustained", "l2_vs_ceiling", "l2_reject", "l2_latency_p99"], ["l2_sustained", "l2_ratio", "l2_reject", "l2_p99"]),
+    ("sec_l2", ["l2_sustained", "l2_fibre_utilisation", "l2_effective_hops", "l2_jain", "l2_min_pair_share", "l2_reject", "l2_latency_p99"],
+     ["l2_sustained", "l2_ratio", "l2_util", "l2_hops", "l2_jain", "l2_minshare", "l2_reject", "l2_p99"]),
     ("sec_rec", ["rec_time"], ["t_recover_s"]),
     ("sec_health", [], ["health"]),
     ("sec_res", ["l2_cpu_modules", "rss_peak"], ["cpu", "rss"]),
@@ -88,7 +89,9 @@ TABLE_TITLES = {
            "t_full_s": "Time until every pair is full (s; — = not within 600 s)",
            "l0_fill_slope": "Fill slope, all pairs (keys/s)", "l1_served": "L1 served (keys/s) / offered",
            "l1_p99": "L1 latency p99 (ms)", "l2_sustained": "L2 sustained, stock-corrected (keys/s)",
-           "l2_ratio": "L2 sustained / fibre ceiling", "l2_reject": "L2 rejected fraction (429/503)",
+           "l2_ratio": "L2 sustained / uniform-demand ceiling", "l2_util": "L2 fibre utilisation (Σtaken/Σcap)",
+           "l2_hops": "L2 effective hops per delivered key (vs uniform mean)", "l2_jain": "L2 Jain fairness index (keys per pair)",
+           "l2_minshare": "L2 worst pair / uniform share", "l2_reject": "L2 rejected fraction (429/503)",
            "l2_p99": "L2 latency p99 (ms)", "t_recover_s": "Recovery to full after L2 (s; — = not within 180 s)",
            "health": "recv_corrupt / peel_failed / frame-auth rejects / dead+panics / failed exchanges",
            "cpu": "Modules CPU under L2 (% of 6400)", "rss": "Peak RSS under L2 (MB)"},
@@ -96,7 +99,9 @@ TABLE_TITLES = {
            "t_full_s": "Tiempo hasta todos los pares a tope (s; — = no en 600 s)",
            "l0_fill_slope": "Pendiente de llenado, todos los pares (claves/s)", "l1_served": "L1 servido (claves/s) / ofrecido",
            "l1_p99": "L1 latencia p99 (ms)", "l2_sustained": "L2 sostenido corregido por stock (claves/s)",
-           "l2_ratio": "L2 sostenido / techo de fibra", "l2_reject": "L2 fracción rechazada (429/503)",
+           "l2_ratio": "L2 sostenido / techo de demanda uniforme", "l2_util": "L2 utilización de la fibra (Σtaken/Σcap)",
+           "l2_hops": "L2 saltos efectivos por clave entregada (vs media uniforme)", "l2_jain": "L2 índice de Jain (claves por par)",
+           "l2_minshare": "L2 peor par / reparto uniforme", "l2_reject": "L2 fracción rechazada (429/503)",
            "l2_p99": "L2 latencia p99 (ms)", "t_recover_s": "Recuperación a tope tras L2 (s; — = no en 180 s)",
            "health": "recv_corrupt / peel_failed / rechazos del sello / muertos+panics / intercambios fallidos",
            "cpu": "CPU de los módulos bajo L2 (% de 6400)", "rss": "RSS pico bajo L2 (MB)"},
@@ -134,6 +139,15 @@ def cell_value(c, key):
     if key == "l2_ratio":
         v = L2.get("sustained_corrected_keys_per_s") if L2 else None
         return fmt(v / c["techo_fibra"], 2) if v is not None and c["techo_fibra"] else "—"
+    if key == "l2_util":
+        return fmt(L2.get("fibre_utilisation"), 2) if L2 else "—"
+    if key == "l2_hops":
+        v = L2.get("effective_hops") if L2 else None
+        return ("%s / %s" % (fmt(v, 2), fmt(c["mean_hops"], 2))) if v is not None else "—"
+    if key == "l2_jain":
+        return fmt(L2.get("jain_index"), 3) if L2 else "—"
+    if key == "l2_minshare":
+        return fmt(L2.get("min_pair_share"), 2) if L2 else "—"
     if key == "l2_reject":
         return fmt(L2.get("reject_frac"), 3) if L2 else "—"
     if key == "l2_p99":
