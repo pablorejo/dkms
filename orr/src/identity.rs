@@ -48,6 +48,8 @@ pub struct OrrIdentity {
     /// diferencia de la clave ML-KEM (efímera), la de firma es estable: la del
     /// cert de nodo, o la semilla heredada de config.
     pub signer: Option<AnnouncementSigner>,
+    /// Firma del anuncio, calculada una vez (D-06).
+    pub announcement_cache: std::sync::OnceLock<(Vec<u8>, Vec<Vec<u8>>)>,
     /// Instancia `Kem` para esta suite. Se mantiene para reutilizar el
     /// dispatch (encap/decap) sin volver a llamar a `kem_for` en cada
     /// mensaje.
@@ -66,6 +68,7 @@ impl OrrIdentity {
             public_key: kp.public,
             secret_key: Zeroizing::new(kp.secret),
             signer: None,
+            announcement_cache: std::sync::OnceLock::new(),
             kem,
         })
     }
@@ -94,6 +97,18 @@ impl OrrIdentity {
     /// certs)` — la cadena va vacía con la semilla heredada. `None` si este
     /// ORR no firma.
     pub fn sign_pubkey_announcement(&self) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
+        // `(orr_id, suite, public_key)` no cambia en la vida del proceso: se
+        // firma una vez (D-06). Antes cada `GetPublicKey` costaba una firma
+        // ML-DSA-65, sin reja, para cualquier cert de red.
+        if let Some(c) = self.announcement_cache.get() {
+            return Some(c.clone());
+        }
+        let signed = self.sign_pubkey_announcement_uncached()?;
+        let _ = self.announcement_cache.set(signed.clone());
+        Some(signed)
+    }
+
+    fn sign_pubkey_announcement_uncached(&self) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
         match self.signer.as_ref()? {
             AnnouncementSigner::CertKey { key, chain } => Some((
                 common::crypto::pqc_sign::sign_orr_pubkey_with(

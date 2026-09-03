@@ -304,13 +304,24 @@ pub fn spawn_rotation_task(
                             Next::Wait
                         }
                         Err(RotationError::Remote(ref msg))
-                            if msg.contains("no bootstrap_secret") =>
+                            if msg.contains("no bootstrap_secret")
+                                || msg.contains("mac_req invalid")
+                                || msg.contains("mac_fin invalid") =>
                         {
+                            // «no bootstrap_secret» = el peer se reinició. Un
+                            // MAC inválido = los dos bootstrap_secret divergen
+                            // (basta con perder UNA respuesta de
+                            // EstablishSecret): antes iba a backoff eterno y
+                            // el par se quedaba en la época 0 de por vida,
+                            // sin forward secrecy (auditoría 2026-09-03,
+                            // D-05). Mismo remedio, mismo guard en vuelo y
+                            // mismo backoff si tampoco cuaja.
                             warn!(
                                 local = %local_orr_id,
                                 peer = %peer_id,
-                                "orr.rotation: el peer no tiene nuestro bootstrap_secret (se ha \
-                                 reiniciado); rehago el bootstrap y roto sobre el nuevo"
+                                error = %msg,
+                                "orr.rotation: el peer no reconoce nuestro bootstrap_secret (se ha \
+                                 reiniciado o diverge); rehago el bootstrap y roto sobre el nuevo"
                             );
                             match crate::bootstrap::rebootstrap(
                                 &identity,

@@ -8,13 +8,15 @@
 //! todavía. Eso no es un error, es orden de arranque, así que esto es un bucle
 //! con backoff igual que el del QKC. El reanuncio hace además de heartbeat.
 
+/// Pares ORR que la SDN puede darnos de alta (D-02).
+const MAX_PEERS_FROM_SDN: usize = 1024;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{bootstrap, config::OrrConfig, identity::OrrIdentity, peers::PeerRegistry};
 
@@ -163,6 +165,22 @@ impl SdnAnnouncer {
         let wanted: HashSet<String> = peers.iter().map(|p| p.orr_id.clone()).collect();
 
         for p in peers {
+            // Ids y URLs de la SDN (no confiable) validados y acotados
+            // (auditoría 2026-09-03, D-02): cada par es una task de
+            // bootstrap y estado de épocas.
+            if !common::ids::is_valid_id(&p.orr_id)
+                || p.grpc_url.len() > 256
+                || p.grpc_url
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control())
+            {
+                warn!(orr = ?p.orr_id, "par de la SDN con id o URL inválidos; lo ignoro");
+                continue;
+            }
+            if !self.spawned.contains(&p.orr_id) && self.spawned.len() >= MAX_PEERS_FROM_SDN {
+                warn!(orr = %p.orr_id, max = MAX_PEERS_FROM_SDN, "demasiados pares desde la SDN; lo ignoro");
+                continue;
+            }
             let Ok(qkc_id) = p.qkc_id.parse::<u32>() else {
                 warn!(orr = %p.orr_id, qkc = %p.qkc_id, "qkc_id no numérico; ignoro el par");
                 continue;
@@ -176,7 +194,19 @@ impl SdnAnnouncer {
             // La SDN entrega las URLs como `http://` porque no sabe (ni debe)
             // de TLS: el esquema lo pone `grpc_tls`, el mismo en todos los ORR.
             let url = crate::grpc_tls::peer_url(&p.grpc_url);
-            self.peers.put_grpc_addr(p.orr_id.clone(), url.clone());
+            // El node.yml es un SUELO también para la URL (D-01): la SDN
+            // añade pares y dice dónde están los suyos, pero un par declarado
+            // localmente conserva la dirección que escribió el operador — si
+            // no, una SDN comprometida redirigía el bootstrap de un par
+            // conocido a cualquier titular de cert de red.
+            if self.local_peers.contains(&p.orr_id) {
+                if self.peers.grpc_addr(&p.orr_id).as_deref() != Some(url.as_str()) {
+                    debug!(orr = %p.orr_id, sdn_url = %url,
+                           "la SDN da otra URL para un par del node.yml; se conserva la local");
+                }
+            } else {
+                self.peers.put_grpc_addr(p.orr_id.clone(), url.clone());
+            }
             if self.spawned.insert(p.orr_id.clone()) {
                 info!(orr = %p.orr_id, url = %url, "par nuevo: arranco su bootstrap");
                 bootstrap::spawn_one(

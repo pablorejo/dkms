@@ -160,7 +160,7 @@ impl InnerLayer {
 /// drop del struct, aun cuando esta vida sea transitoria (sólo dura
 /// la llamada a `build_onion`). Política CLAUDE.md "RAM-only +
 /// zeroize" + audit H-3 criterio #5.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PathHopSecret {
     pub orr_id: String,
     pub master_secret: Zeroizing<[u8; 32]>,
@@ -168,6 +168,18 @@ pub struct PathHopSecret {
     /// capa. Acompaña al `key_id` en el wire (capa externa) o en la
     /// `InnerLayer` previa (capas intermedias).
     pub epoch_id: u32,
+}
+
+impl std::fmt::Debug for PathHopSecret {
+    // Redactado (auditoría 2026-09-03, R11): un `{:?}` de un camino no
+    // puede volcar 32 B de secreto por salto.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathHopSecret")
+            .field("orr_id", &self.orr_id)
+            .field("master_secret", &"<redacted>")
+            .field("epoch_id", &self.epoch_id)
+            .finish()
+    }
 }
 
 /// Output de `build_onion`: lo que el caller necesita para armar el

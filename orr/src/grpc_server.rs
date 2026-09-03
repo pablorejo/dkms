@@ -196,7 +196,11 @@ impl OrrControl for OrrGrpc {
         tracing::Span::current().record("subscriber", tracing::field::display(&sub_id));
         info!(subscriber = %sub_id, "orr.stream_deliveries subscribed");
 
-        let mut rx = self.svc.subscribe_deliveries();
+        let Some(mut rx) = self.svc.subscribe_deliveries() else {
+            return Err(Status::resource_exhausted(
+                "too many delivery subscribers; close one first",
+            ));
+        };
         let (tx, out_rx) = mpsc::channel::<std::result::Result<DeliveredMessage, Status>>(
             self.svc.cfg.deliver_queue_capacity.max(1),
         );
@@ -263,6 +267,13 @@ impl OrrControl for OrrGrpc {
         }
         tracing::Span::current().record("from", tracing::field::display(&from));
         require_from_matches_peer(peer_certs, &from)?;
+        // Autenticado ≠ autorizado (D-04): un cert `qkc-*`/`sdn`/`dkms-*`
+        // también es de la net-ca, y sembraba `master_secrets[su_id]`.
+        if self.svc.peers.qkc_id(&from).is_none() {
+            return Err(Status::permission_denied(format!(
+                "{from} is not a known ORR peer of this node"
+            )));
+        }
 
         // NOTA passive re-bootstrap: anteriormente había aquí un early
         // return `if has_bootstrap → ok` por idempotencia. Eso rompía la
@@ -428,7 +439,17 @@ pub async fn serve(svc: OrrService, addr: &str, mtls: bool) -> anyhow::Result<()
     let addr: std::net::SocketAddr = addr.parse()?;
     let listener = common::net::bind_reuse_addr(addr).await?;
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let mut builder = Server::builder();
+    // Cotas del acceptor gRPC (auditoría 2026-09-03, D-03): este puerto
+    // cruza instituciones y B7 solo cubrió los acceptors axum. tonic no
+    // expone el timeout del handshake TLS, pero sí acota streams y peticiones
+    // por conexión y cierra conexiones mudas por keepalive HTTP/2.
+    let mut builder = Server::builder()
+        .concurrency_limit_per_connection(256)
+        .max_concurrent_streams(Some(256))
+        .timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)));
     if mtls {
         // Identidad de nodo + cert de cliente obligatorio de la CA de red:
         // cubre al DKMS que nos habla y a los ORR pares. Ver `grpc_tls`.

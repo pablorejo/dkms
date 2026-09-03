@@ -122,9 +122,20 @@ mod tests {
         assert!(r.check("orr_1", 7, 5).is_ok());
         // Sesión nueva: el origen reinició y vuelve a contar desde 1.
         assert!(r.check("orr_1", 8, 1).is_ok());
-        // Y lo capturado de la sesión vieja ya no cuela.
+        // Lo CAPTURADO de la sesión vieja (contador ya visto) no cuela...
         assert!(matches!(
-            r.check("orr_1", 7, 6),
+            r.check("orr_1", 7, 5),
+            Err(ReplayError::Replayed { .. })
+        ));
+        // ...pero un frame rezagado y fresco de esa sesión sí, una vez (C-08:
+        // la sesión anterior conserva su ventana; y no tira la nueva).
+        assert!(r.check("orr_1", 7, 6).is_ok());
+        assert!(r.check("orr_1", 7, 6).is_err());
+        assert!(r.check("orr_1", 8, 2).is_ok());
+        // Dos reinicios más tarde, la 7 está retirada del todo.
+        assert!(r.check("orr_1", 9, 1).is_ok());
+        assert!(matches!(
+            r.check("orr_1", 7, 7),
             Err(ReplayError::RetiredSession { .. })
         ));
     }

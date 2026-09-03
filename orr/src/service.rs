@@ -195,6 +195,22 @@ impl OrrService {
             ),
             None => None,
         };
+        // `strict` es el default (F3): sin CA de red con la que verificar la
+        // cadena del peer ni `peer_verify_keys`, ningún anuncio de pubkey
+        // pasará y el bootstrap ORR↔ORR quedará rechazado para siempre. Se
+        // dice aquí, al arrancar, y no se cae a `tofu` en silencio: un
+        // despliegue en claro tiene que pedirlo por escrito.
+        if cfg.bootstrap_trust == crate::config::BootstrapTrust::Strict
+            && trust_roots.is_none()
+            && cfg.peer_verify_keys.is_empty()
+        {
+            warn!(
+                "orr: bootstrap_trust = strict (default) sin [tls] (CA de red) ni \
+                 peer_verify_keys: no se puede verificar ningún anuncio de pubkey y el \
+                 bootstrap ORR↔ORR será rechazado. Pon grpc_tls = true con [tls], o \
+                 bootstrap_trust = \"tofu\" a sabiendas (solo en claro, red interna)"
+            );
+        }
         let mut identity = OrrIdentity::generate(cfg.orr_id.clone(), &cfg.default_pqc_suite)?;
         if let Some((key, chain)) = cert_signer {
             identity = identity.with_cert_key(key, chain);
@@ -359,8 +375,16 @@ impl OrrService {
     }
 
     /// Suscribirse al stream de mensajes entrantes locales.
-    pub fn subscribe_deliveries(&self) -> broadcast::Receiver<DeliveredMessage> {
-        self.deliveries_tx.subscribe()
+    pub fn subscribe_deliveries(&self) -> Option<broadcast::Receiver<DeliveredMessage>> {
+        // Cota (auditoría 2026-09-03, D-08): cada suscriptor es un canal con
+        // `deliver_queue_capacity` mensajes clonados; un DKMS sirve a pocos
+        // y `served_dkms` ya reja quién, pero un par autorizado que abra
+        // streams sin cerrarlos no debe multiplicar el broadcast sin fin.
+        const MAX_DELIVERY_SUBSCRIBERS: usize = 64;
+        if self.deliveries_tx.receiver_count() >= MAX_DELIVERY_SUBSCRIBERS {
+            return None;
+        }
+        Some(self.deliveries_tx.subscribe())
     }
 
     /// Public key ML-KEM de este ORR (para que se la pidan los peers).
