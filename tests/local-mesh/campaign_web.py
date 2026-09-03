@@ -80,7 +80,7 @@ FIG_SECTIONS = [
     ("sec_l2", ["l2_sustained", "l2_fibre_utilisation", "l2_effective_hops", "l2_jain", "l2_min_pair_share", "l2_reject", "l2_latency_p99"],
      ["l2_sustained", "l2_ratio", "l2_util", "l2_hops", "l2_jain", "l2_minshare", "l2_reject", "l2_p99"]),
     ("sec_rec", ["rec_time"], ["t_recover_s"]),
-    ("sec_health", [], ["health", "expired", "intake"]),
+    ("sec_health", [], ["health", "expired", "intake", "keys_client_err"]),
     ("sec_res", ["l2_cpu_modules", "rss_peak"], ["cpu", "rss"]),
 ]
 
@@ -94,6 +94,7 @@ TABLE_TITLES = {
            "l2_minshare": "L2 worst pair / uniform share", "l2_reject": "L2 rejected fraction (429/503)",
            "l2_p99": "L2 latency p99 (ms)", "t_recover_s": "Recovery to full after L2 (s; — = not within 180 s)",
            "health": "recv_corrupt / peel_failed / frame-auth rejects / dead+panics / exchanges with different bytes (429/503 in the rounds are backpressure, not counted here)",
+           "keys_client_err": "Integrity rounds the CLIENT could not run (its curl cannot load an ML-DSA certificate) — not a system result",
            "expired": "Keys expired at the sender (emitted, no ACK within 30 s — material discarded, never corrupt)",
            "intake": "Frames dropped by the QKC's bounded intake queue (≥; only nodes 1–2 keep logs; node 1 is the star's hub)",
            "cpu": "Modules CPU under L2 (% of 6400)", "rss": "Peak RSS under L2 (MB)"},
@@ -106,7 +107,8 @@ TABLE_TITLES = {
            "l2_minshare": "L2 peor par / reparto uniforme", "l2_reject": "L2 fracción rechazada (429/503)",
            "l2_p99": "L2 latencia p99 (ms)", "t_recover_s": "Recuperación a tope tras L2 (s; — = no en 180 s)",
            "health": "recv_corrupt / peel_failed / rechazos del sello / muertos+panics / intercambios con bytes distintos (los 429/503 de las rondas son contrapresión y no cuentan aquí)",
-                      "expired": "Claves expiradas en el emisor (emitidas sin ACK en 30 s: material descartado, nunca corrupto)",
+                      "keys_client_err": "Rondas de integridad que el CLIENTE no pudo ejecutar (su curl no carga un certificado ML-DSA): no es un resultado del sistema",
+           "expired": "Claves expiradas en el emisor (emitidas sin ACK en 30 s: material descartado, nunca corrupto)",
            "intake": "Frames descartados por la cola de entrada acotada del QKC (≥; solo los nodos 1–2 conservan log; el nodo 1 es el hub de la estrella)",
 "cpu": "CPU de los módulos bajo L2 (% de 6400)", "rss": "RSS pico bajo L2 (MB)"},
 }
@@ -159,6 +161,9 @@ def cell_value(c, key):
         return fmt(L2.get("lat_p99_ms"), 1) if L2 else "—"
     if key == "t_recover_s":
         return fmt(c.get("t_recover_s"))
+    if key == "keys_client_err":
+        v = (c.get("keys_L1") or {}).get("client_error", 0) + (c.get("keys_final") or {}).get("client_error", 0)
+        return fmt(v) if (c.get("keys_L1") or c.get("keys_final")) else "—"
     if key == "health":
         failed = (c.get("keys_L1") or {}).get("mismatch_or_other", 0) + (c.get("keys_final") or {}).get("mismatch_or_other", 0)
         return "%d / %d / %d / %d / %d" % (h.get("recv_corrupt", 0), h.get("peel_failed", 0) + h.get("dropped_no_secret", 0),
@@ -201,6 +206,15 @@ def svg_inline(path):
     s = re.sub(r"<svg([^>]*?)\sheight=\"[^\"]*\"", r"<svg\1", s, count=1)
     s = s.replace("<svg", "<svg style=\"width:100%;height:auto;display:block\"", 1)
     return s
+
+
+def all_zero(cells, key):
+    """Una tabla que solo dice «0» en las 60 celdas es ruido: se omite. Solo
+    se aplica a las columnas de incidencias (las métricas valen 0 de pleno
+    derecho)."""
+    if key not in ("keys_client_err",):
+        return False
+    return not any(cell_value(c, key) not in ("0", "\u2014") for c in cells)
 
 
 def fig_path(figs_dir, lang, name):
@@ -247,7 +261,7 @@ def build(lang, cells, figs_dir, narrative, style, date):
         parts.append("<section><h2>%s</h2><p class=\"reading\">%s</p>%s%s</section>"
                      % (html.escape(t[sec]), reading,
                         ("<div class=\"chart-row\">%s</div>" % fig_html) if fig_html else "",
-                        "".join(table(lang, cells, k) for k in tables)))
+                        "".join(table(lang, cells, k) for k in tables if not all_zero(cells, k))))
     parts.append("<section><h2>%s</h2><p class=\"reading\">%s</p></section>" % (html.escape(t["sec_method"]), t["method"]))
     parts.append("</div>")
     return ("<!doctype html>\n<html lang=\"%s\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"

@@ -134,16 +134,28 @@ def read_persec(path):
     return rows
 
 
+# Fallos del CLIENTE de la ronda, no del sistema: curl no arranca (en CESGA
+# su OpenSSL 1.1.1g no carga un cert cliente ML-DSA), no resuelve, no conecta.
+# Decir «bytes distintos» de esto sería mentir sobre la integridad.
+CLIENT_ERR = re.compile(
+    r"curl: \(\d+\)|could not load PEM|SSL certificate problem|Connection refused"
+    r"|Could not resolve|Failed to connect|Operation timed out|Empty reply",
+    re.I,
+)
+
+
 def keys_log_result(path):
-    """`mesh.sh keys` → (pares, idénticos, fallidos, throttled, mismatch).
-    Un «fallido» por 429/503 es contrapresión (bucket por SAE agotado, buffer
-    vacío): no es un fallo de integridad. Solo cuenta como tal lo que NO es
-    un rechazo HTTP (bytes distintos, error de protocolo)."""
+    """`mesh.sh keys` → (pares, idénticos, fallidos, throttled, mismatch,
+    client_error).  Un «fallido» por 429/503 es contrapresión (bucket por SAE
+    agotado, buffer vacío) y uno de `CLIENT_ERR` es del arnés: ninguno es un
+    fallo de integridad. Solo cuenta como tal lo que no es ni una cosa ni la
+    otra (bytes distintos, error de protocolo del servidor)."""
     if not os.path.exists(path):
         return None
     last = ""
     throttled = 0
     other = 0
+    client = 0
     with open(path, errors="replace") as fh:
         for line in fh:
             if "pares ordenados" in line:
@@ -151,12 +163,14 @@ def keys_log_result(path):
             elif line.lstrip().startswith("✗"):
                 if "429" in line or "503" in line:
                     throttled += 1
+                elif CLIENT_ERR.search(line):
+                    client += 1
                 else:
                     other += 1
     m = re.search(r"pares ordenados:\s*(\d+)\s+idénticos:\s*(\d+)\s+fallidos:\s*(\d+)", last)
     if not m:
         return None
-    return tuple(int(x) for x in m.groups()) + (throttled, other)
+    return tuple(int(x) for x in m.groups()) + (throttled, other, client)
 
 
 INCLUDE_PARTIAL = False
@@ -347,7 +361,8 @@ def analyze_cell(cdir):
         r = keys_log_result(os.path.join(cdir, "keys_%s.log" % tag))
         if r:
             out["keys_" + tag] = {"pairs": r[0], "identical": r[1], "failed": r[2],
-                                  "throttled": r[3], "mismatch_or_other": r[4]}
+                                  "throttled": r[3], "mismatch_or_other": r[4],
+                                  "client_error": r[5]}
     out["l1_offered_total"] = meta.get("l1_offered_total")
     return out
 
@@ -433,6 +448,8 @@ def build_tables(cells):
     out.append(table("Integridad · intercambios ETSI-014 con bytes distintos u otro error (L1 + final)", lambda c: (c.get("keys_L1", {}).get("mismatch_or_other", 0) + c.get("keys_final", {}).get("mismatch_or_other", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None,
                      note="Los 429/503 de una ronda (contrapresión, buffer vacío) van en la tabla siguiente: no son fallos de integridad."))
     out.append(table("Integridad · intercambios rechazados por 429/503 en las rondas (L1 + final)", lambda c: (c.get("keys_L1", {}).get("throttled", 0) + c.get("keys_final", {}).get("throttled", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None))
+    out.append(table("Integridad · rondas no ejecutadas por fallo del CLIENTE (curl sin ML-DSA, etc.)", lambda c: (c.get("keys_L1", {}).get("client_error", 0) + c.get("keys_final", {}).get("client_error", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None,
+                     note="No es un resultado del sistema: el cliente de la ronda no llegó a preguntar."))
     out.append(table("Salud · claves expiradas por ACK (emitidas sin ACK en 30 s; material descartado por el emisor)", g(["health", "expired"]),
                      note="En la estrella crece con N desde N≈40: la cola de entrada acotada del QKC del hub (8192 frames) desborda al arrancar L2 y los frames descartados nunca se ACKean."))
     out.append(table("Salud · frames descartados en la cola de entrada del QKC (≥; solo nodos 1-2 conservan log; hub = nodo 1 en la estrella)", g(["health", "intake_dropped_frames_min"])))
