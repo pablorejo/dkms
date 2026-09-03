@@ -164,12 +164,15 @@ impl PeerRegistry {
         local_orr_id: String,
         local_qkc_id: u32,
     ) -> Self {
+        // Tofu EXPLÍCITO: son los constructores heredados (tests y
+        // registros sin política); la de producción llega por `with_all`
+        // desde `cfg.bootstrap_trust`, cuyo default es `strict` (F3).
         Self::with_pubkeys_trust(
             seed_qkc,
             seed_pubkeys,
             local_orr_id,
             local_qkc_id,
-            crate::config::BootstrapTrust::default(),
+            crate::config::BootstrapTrust::Tofu,
         )
     }
 

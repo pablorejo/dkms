@@ -158,14 +158,16 @@ pub struct OrrConfig {
     #[serde(default)]
     pub peer_verify_keys: HashMap<String, String>,
 
-    /// Ancla de confianza del bootstrap (docs/SECURITY.md §Fase 6). `tofu`
-    /// (default): acepta la pubkey que el peer anuncia por `GetPublicKey`
-    /// (trust-on-first-use), avisando si difiere de un pin en `peer_pubkeys`.
-    /// `strict`: exige un anuncio **firmado** — con la clave del cert de nodo
-    /// del peer (cadena hasta la CA de red y SAN `dkms://<orr_id>`, lo normal
-    /// desde 2026-08-30) o, heredado, con una `peer_verify_keys` configurada.
-    /// Como el ancla es el certificado, `strict` no necesita config por par y
-    /// sobrevive a los reinicios de la identidad ML-KEM efímera.
+    /// Ancla de confianza del bootstrap (docs/SECURITY.md §Fase 6).
+    /// `strict` (default desde 2026-09-03, F3): exige un anuncio **firmado**
+    /// — con la clave del cert de nodo del peer (cadena hasta la CA de red y
+    /// SAN `dkms://<orr_id>`, lo normal desde 2026-08-30) o, heredado, con
+    /// una `peer_verify_keys` configurada. Como el ancla es el certificado,
+    /// `strict` no necesita config por par y sobrevive a los reinicios de la
+    /// identidad ML-KEM efímera; validado en el testbed Proxmox (t30, alta en
+    /// caliente, 2026-09-01). `tofu`: acepta la pubkey que el peer anuncia
+    /// (trust-on-first-use), avisando si difiere de un pin en `peer_pubkeys`
+    /// — solo para un despliegue en claro a sabiendas (`grpc_tls = false`).
     #[serde(default)]
     pub bootstrap_trust: BootstrapTrust,
 
@@ -205,9 +207,10 @@ pub struct OrrConfig {
 #[serde(rename_all = "lowercase")]
 pub enum BootstrapTrust {
     /// Trust-on-first-use: acepta la pubkey anunciada; avisa si difiere de un pin.
-    #[default]
     Tofu,
-    /// Exige que la pubkey case un pin de `peer_pubkeys`; rechaza si no.
+    /// Exige un anuncio firmado con el cert de nodo del peer (o casado con
+    /// `peer_verify_keys`); rechaza si no. Default.
+    #[default]
     Strict,
 }
 
