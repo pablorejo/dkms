@@ -120,28 +120,34 @@ PQC QKC↔QKC. El resto **depende de que estos puertos vivan en red confiable**:
   aunque `listen_ip` sea `0.0.0.0`; solo `control_addr: <ip>` en el `node.yml`
   lo abre, y entonces el DKMS lo avisa al arrancar y toca firewalearlo a la red
   interna. Nunca entre instituciones.
-- **`ack` del DKMS (20009)**: TCP plano sin auth. Ábrelo solo entre los DKMS
-  que se enlazan — o mejor, no lo uses: `ack_transport: etsi020` en el
-  `node.yml` manda los ACK por el ETSI-020 mTLS (20006, identidad = cert), y
-  con todos los peers así `ack_socket_listen: false` apaga el listener. Es
-  el último plano cross-institución sin autenticar; el default sigue en
-  `socket` hasta validar el cambio en el testbed, y después se retira.
+- **`ack` del DKMS (20009)**: TCP plano sin auth, **apagado de fábrica desde
+  2026-09-03**: los ACK salen por el ETSI-020 mTLS (20006, identidad = cert;
+  `ack_transport: etsi020`) y el listener del socket no escucha
+  (`ack_socket_listen: false`). Solo durante una migración con peers viejos
+  se vuelve a `socket` + `ack_socket_listen: true` en los DOS extremos, y
+  entonces el 20009 se abre únicamente entre los DKMS que se enlazan. Era el
+  último plano cross-institución sin autenticar (validado en Proxmox
+  2026-09-01: 950 claves/s sostenidas con el socket apagado).
 - **`local` del QKC**: intra-institución (mismo host que su ORR).
 - **`admin` del QKC (20002)**: por él entra el push de forwarding-tables —
   quien lo controle decide por dónde viaja cada frame OTP. Con `[tls]` en el
-  QKC (`control_tls: true`) sirve mTLS con cert de cliente OBLIGATORIO
-  (net-ca), y una SDN con `[tls]` empuja `https` con su cert: activa los dos a
-  la vez (un solo lado configurado falla ruidoso en ambos). En claro, solo red
-  interna de confianza. El `grpc` del ORR (20003) va
+  QKC (`control_tls`, **activo por defecto desde 2026-09-03**) sirve mTLS
+  con cert de cliente OBLIGATORIO (net-ca), y una SDN con `[tls]` empuja
+  `https` con su cert: los dos van juntos (un solo lado apagado falla ruidoso
+  en ambos). `control_tls: false` lo deja en claro — solo red interna de
+  confianza, y en TODOS los nodos a la vez. El `grpc` del ORR (20003) va
   con mTLS por defecto; sólo si lo apagas (`grpc_tls: false` en el ORR y
   `orr_tls: false` en el DKMS) DKMS↔ORR lleva material en claro, y entonces
   **deben compartir host o red L2 confiable**.
 - **`metrics` (todos)**: sin auth y responden a cualquier path — red interna.
-- **SDN `http`/`grpc` (19000/19002)**: en multi-host, actívales mTLS
-  (`control_tls: true` en su `node.yml` + certs de `net-ca`) — si no, cualquiera
-  con acceso de red puede registrar nodos o rebindear SAEs. Con `[tls]` la SDN
-  además empuja las forwarding-tables por https (ver `admin` del QKC), y los
-  módulos deben anunciarse con `https://` en su `sdn_url`.
+- **SDN `http`/`grpc` (19000/19002)**: mTLS **por defecto** (`control_tls`,
+  2026-09-03; necesita `sdn.crt`/`sdn.key` de `net-ca` en `certs_dir`) — en
+  claro (`control_tls: false`) cualquiera con acceso de red puede registrar
+  nodos o rebindear SAEs. Con `[tls]` la SDN además empuja las
+  forwarding-tables por https (ver `admin` del QKC), y los módulos se
+  anuncian por `https://`: un `sdn_url`/`sdn_endpoint` sin esquema sale
+  `https://` con `control_tls` activo y `http://` con `control_tls: false`;
+  un esquema escrito a mano manda siempre.
 
 ## Paso 0 (mantenedor): construir y publicar las imágenes
 
@@ -453,7 +459,7 @@ confianza:
 
 ```yaml
 # node.orr.yml
-grpc_tls: false            # en claro; [tls] sólo sale entonces con control_tls
+grpc_tls: false            # en claro; [tls] sólo sale entonces con control_tls (default on)
 # node.dkms.yml
 orr_tls: false             # dial http:// al ORR
 ```
@@ -512,7 +518,7 @@ peer_grpc_addrs:
 | `grpc_tls` | default `true`: mTLS en su gRPC con `certs/<orr_id>.crt/.key` + `net-ca.crt`. `false` sólo si DKMS y ORR comparten máquina o red interna (y entonces `orr_tls: false` en el DKMS). |
 | `certs_dir` | default `/config/certs` (donde el compose monta `./certs`). |
 | `cert_name` | nombre del cert de nodo en `certs_dir` (default el propio `orr_id`). |
-| `bootstrap_trust` | `tofu` (default) \| `strict`: con `strict` el ORR exige que el anuncio de pubkey del peer venga firmado con su cert de nodo (cadena a `net-ca` + SAN `dkms://<orr_id>`) o casado con `peer_verify_keys`; con `tofu` acepta el primero que llega. El flip a `strict` por defecto está gateado al testbed. |
+| `bootstrap_trust` | `strict` (default desde 2026-09-03) \| `tofu`: con `strict` el ORR exige que el anuncio de pubkey del peer venga firmado con su cert de nodo (cadena a `net-ca` + SAN `dkms://<orr_id>`) o casado con `peer_verify_keys`; con `tofu` acepta el primero que llega (solo para un ORR en claro, `grpc_tls: false`, a sabiendas — con `strict` y sin `[tls]` el ORR avisa al arrancar de que ningún bootstrap pasará). Validado en Proxmox (t30, alta en caliente). |
 | `rotation_period_ms` | rotación del `master_secret` ORR↔ORR (forward secrecy), default 3600000 (1 h). |
 | `extra` | mapa libre → TOML (ver arriba). |
 
@@ -609,8 +615,8 @@ peers:
 | `fill_rate` | suelo de llenado del generator en keys/s (default 0 = solo lo que asigne la SDN). |
 | `transport_e2e` | **no hace falta tocarlo**. El material de transporte sale sellado extremo a extremo para el DKMS destino (`dkms/src/e2e.rs`): ML-KEM-768 acordado por el mismo mTLS del ETSI-020 (20006), AES-256-GCM por clave, rotación cada 3600 s. Lo único que exige es lo que ya exigía el ETSI-020: que los DKMS se alcancen entre sí en 20006 con certs de `net-ca`. En `generator.state`, `e2e_epoch=none` sostenido es que ese acuerdo no llega. Ajustable si hace falta (`transport_e2e: {rekey_secs: ..., replay_window: ..., epoch_history_keep: ..., suite: ...}` — la `suite` debe ser idéntica en todo el despliegue). |
 | `capacity_per_peer` | tamaño del buffer de claves de transporte por peer (default 4096) — el `B_k` que ve el solver de la SDN y el knob que las campañas suben. |
-| `ack_transport` | `socket` (default, TCP plano heredado) \| `etsi020` (ACK saliente por el POST mTLS del 20006, identidad = cert). El flip de default está gateado al testbed. |
-| `ack_socket_listen` | default `true`. `false` apaga el listener del socket de ACK (20009) — solo cuando TODOS los peers acusan por `etsi020`; sin listener el `ack_endpoint` deja de anunciarse. |
+| `ack_transport` | `etsi020` (default desde 2026-09-03: ACK saliente por el POST mTLS del 20006, identidad = cert) \| `socket` (TCP plano heredado, solo migración mixta; ponerlo igual en los dos extremos). |
+| `ack_socket_listen` | default `false` (el socket 20009 no escucha; el `ack_endpoint` no se anuncia). `true` solo mientras queden peers que acusen por `socket`. |
 | `control_addr` | **no lo pongas** salvo que sepas por qué: abre el gRPC de operador `DkmsControl` (20007, `Drain` borra todos los buffers, sin auth) en esa IP en vez de `127.0.0.1`. |
 | `extra` | mapa libre → TOML (ver arriba). |
 | `sae_bindings` | **obligatorio**: los SAE que este nodo sirve (`sae_id: <node_id>`). Es la lista contra la que se autoriza cada petición ETSI-014 (fail-closed) y la que se anuncia a la SDN. Sin ella toda petición SAE recibe 404 `UnknownSae`; el render y el arranque lo avisan. |

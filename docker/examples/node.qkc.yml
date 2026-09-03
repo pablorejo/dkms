@@ -4,7 +4,10 @@ qkc_id: 1
 
 # La SDN se entera sola de este nodo y de sus enlaces: no hay que darlo de alta
 # en ningún sitio. Omite sdn_url solo si prefieres gestionar la topología a mano.
-sdn_url: "10.0.0.100"          # HTTP admin de la SDN; puerto por defecto 19002
+sdn_url: "10.0.0.100"          # HTTP admin de la SDN; puerto por defecto 19002.
+                               # Sin esquema sale https:// (control_tls, default
+                               # on): necesita qkc-<id>.crt/.key + net-ca.crt en
+                               # certs_dir. `control_tls: false` = en claro.
 advertise_ip: "10.0.0.11"      # IP por la que la SDN puede alcanzar a ESTE QKC
 # sdn_announce_secs: 30        # cada cuánto reanuncio (es también el heartbeat)
 

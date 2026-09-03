@@ -53,26 +53,46 @@ def with_port(addr, default_port):
     return addr if ":" in addr else (addr + ":" + str(default_port))
 
 
-def sdn_http_from(grpc_url):
+def control_tls_on(n):
+    """`control_tls` en node.yml: mTLS en el plano de control (SDN admin/gRPC,
+    QKC admin, anuncios). ACTIVADO por defecto desde 2026-09-03 (auditoría
+    2026-09-02, F1): validado en el testbed Proxmox multi-host y en la malla
+    local (brazo CONTROL_TLS=1). `control_tls: false` lo deja en claro — a
+    sabiendas, y solo en una red interna de confianza."""
+    return bool(n.get("control_tls", True))
+
+
+def default_scheme(n):
+    return "https://" if control_tls_on(n) else "http://"
+
+
+def sdn_http_from(grpc_url, n=None):
     """The ORR/DKMS point at the SDN's gRPC; registration lives on its HTTP
     admin. Same host, the HTTP port from PORTS. El ESQUEMA se hereda del
-    sdn_url: una SDN con control_tls se escribe `https://...` en el node.yml
-    de cada módulo y el anuncio sale mTLS — antes esto emitía http:// SIEMPRE,
-    con lo que un despliegue con la SDN en mTLS anunciaba en claro contra un
-    puerto TLS para siempre, sin forma de decirlo en node.yml."""
+    sdn_url si lo trae; sin esquema sigue a `control_tls` (https por
+    defecto). Una SDN con control_tls sirve mTLS: un anuncio en claro contra
+    ese puerto falla para siempre — antes esto emitía http:// SIEMPRE."""
     u = str(grpc_url)
-    scheme = "https://" if u.strip().lower().startswith("https://") else "http://"
+    low = u.strip().lower()
+    if low.startswith("https://"):
+        scheme = "https://"
+    elif low.startswith("http://"):
+        scheme = "http://"
+    else:
+        scheme = default_scheme(n) if n is not None else "http://"
     rest = u.partition("//")[2] or u
     host = rest.rstrip("/").rsplit(":", 1)[0]
     return scheme + host + ":" + str(PORTS["sdn"]["http"])
 
 
-def url_with_port(url, default_port):
-    """Accept 'ip', 'ip:port', 'http://ip' or 'http://ip:port'."""
+def url_with_port(url, default_port, scheme_default="http:"):
+    """Accept 'ip', 'ip:port', 'http://ip' or 'http://ip:port'. Sin esquema
+    se pone `scheme_default` (con control_tls, `https:`); un esquema
+    explícito siempre manda."""
     url = str(url)
     scheme, sep, rest = url.partition("//")
     if not sep:
-        scheme, rest = "http:", url
+        scheme, rest = scheme_default, url
         sep = "//"
     host = rest.rstrip("/")
     return scheme + sep + with_port(host, default_port)
@@ -163,7 +183,13 @@ def render_qkc(n, out):
     bind = n.get("listen_ip", "0.0.0.0")
     key_bits = int(n.get("key_size_bits", 256))
     peer_l = bind + ":" + str(p["peer"])
-    local_l = bind + ":" + str(p["local"])
+    # Plano ORR↔QKC (20001): sin autenticación de ningún tipo, por contrato
+    # intra-institución. Con `network_mode: host`, `listen_ip: 0.0.0.0` lo
+    # dejaba en TODAS las interfaces (auditoría 2026-09-03, D-14): quien
+    # conectase inyectaba FRAME_LOCAL_SEND (gasta OTP) y se suscribía a todas
+    # las entregas. Va a loopback salvo `local_bind:` explícito (el ORR en
+    # otra máquina), espejo del `control_addr` del DKMS.
+    local_l = with_port(str(n.get("local_bind", "127.0.0.1")), p["local"])
     admin_l = bind + ":" + str(p["admin"])
     lines = [
         "qkc_id = " + str(int(req(n, "qkc_id", "qkc"))),
@@ -178,7 +204,8 @@ def render_qkc(n, out):
     # Self-registration with the SDN. Optional: without it somebody has to add
     # this node to the SDN's topology by hand.
     if n.get("sdn_url"):
-        lines.append("sdn_url = " + q(url_with_port(n["sdn_url"], PORTS["sdn"]["http"])))
+        lines.append("sdn_url = " + q(url_with_port(
+            n["sdn_url"], PORTS["sdn"]["http"], "https:" if control_tls_on(n) else "http:")))
         # admin_http binds 0.0.0.0, which is useless as an address for the SDN
         # to dial back, so the announcement needs a routable IP.
         if n.get("advertise_ip"):
@@ -294,7 +321,9 @@ def render_orr(n, out):
         "qkc_id = " + str(int(req(n, "qkc_id", "orr"))),
         "qkc_local_addr = " + q(qkc_addr),   # ORR -> its QKC (localhost or remote IP)
         "grpc_addr = " + q(grpc_l),
-        "sdn_url = " + q(n.get("sdn_url", "")),
+        "sdn_url = " + q(url_with_port(n["sdn_url"], PORTS["sdn"]["grpc"],
+                                       "https:" if control_tls_on(n) else "http:")
+                         if n.get("sdn_url") else ""),
         "metrics_addr = " + q(metrics_l),
         # 0 = passthrough: el material ya va sellado extremo a extremo por el
         # DKMS (dkms/src/e2e.rs); la cebolla del ORR es privacidad de camino
@@ -324,7 +353,7 @@ def render_orr(n, out):
     # registered, while its DKMS waited on it forever. Emitting it lets the
     # binary print its own error, like the QKC already does.
     if n.get("sdn_url"):
-        lines.append("sdn_http_url = " + q(sdn_http_from(n["sdn_url"])))
+        lines.append("sdn_http_url = " + q(sdn_http_from(n["sdn_url"], n)))
         if n.get("advertise_ip"):
             lines.append("advertise_ip = " + q(n["advertise_ip"]))
         if n.get("sdn_announce_secs") is not None:
@@ -353,11 +382,20 @@ def render_orr(n, out):
     served = n.get("served_dkms")
     if served is None and n.get("node_id") is not None:
         served = [str(n["node_id"])]
+    if not served:
+        # D-16: sin `served_dkms` la reja de aplicación del ORR queda abierta
+        # a cualquier cert de red. El ejemplo publicado no lo traía.
+        sys.stderr.write(
+            "render_config: AVISO orr " + str(n.get("orr_id")) + ": sin `served_dkms` ni "
+            "`node_id` — SendMessage/StreamDeliveries quedan abiertos a cualquier cert de "
+            "la net-ca. Pon `served_dkms: [dkms-N]` (o `node_id`) en su node.yml.\n")
     if served:
         lines.append("served_dkms = [" + ", ".join(q(str(s)) for s in served) + "]")
     peers = n.get("peers") or {}           # orr_id -> qkc_id
+    # Claves SIEMPRE entrecomilladas (D-17): una clave suelta con `]` o `=`
+    # escribía TOML que el binario leía como otra tabla.
     if peers:
-        lines += ["", "[peers]"] + [str(k) + " = " + str(int(v)) for k, v in peers.items()]
+        lines += ["", "[peers]"] + [q(str(k)) + " = " + str(int(v)) for k, v in peers.items()]
     orr_cert = n.get("cert_name", req(n, "orr_id", "orr"))
     lines += control_tls_lines(n, orr_cert, "client", force=bool(grpc_tls))
     pvk = n.get("peer_verify_keys") or {}  # orr_id -> base64(ML-DSA verify key)
@@ -365,7 +403,7 @@ def render_orr(n, out):
         lines += ["", "[peer_verify_keys]"] + [q(str(k)) + " = " + q(str(v)) for k, v in pvk.items()]
     pg = n.get("peer_grpc_addrs") or {}    # orr_id -> grpc url
     if pg:
-        lines += ["", "[peer_grpc_addrs]"] + [str(k) + " = " + q(v) for k, v in pg.items()]
+        lines += ["", "[peer_grpc_addrs]"] + [q(str(k)) + " = " + q(str(v)) for k, v in pg.items()]
     merge_extra(lines, n.get("extra"))
     write(os.path.join(out, "default.toml"), "\n".join(lines) + "\n")
 
@@ -407,7 +445,11 @@ def render_dkms(n, out):
         "control_plane_ca = " + q(certs + "/net-ca.crt"),
         "",
         "[southbound]",
-        "sdn_endpoint = " + q(n.get("sdn_endpoint", "")),
+        # gRPC de la SDN. Sin esquema sigue a control_tls (https por defecto):
+        # el binario presenta su cert de nodo cuando el endpoint es https.
+        "sdn_endpoint = " + q(url_with_port(n["sdn_endpoint"], PORTS["sdn"]["grpc"],
+                                            "https:" if control_tls_on(n) else "http:")
+                              if n.get("sdn_endpoint") else ""),
         # orr_tls (default true): el ORR corre con grpc_tls y se le habla por
         # https con el cert de nodo de este DKMS. `orr_tls: false` va en claro,
         # y hay que escribirlo también en el TOML: el binario sube http→https
@@ -418,19 +460,19 @@ def render_dkms(n, out):
         # needs the ORR's *id*, not just its address. sdn_endpoint is gRPC;
         # the registration endpoint is on the SDN's HTTP admin.
         "orr_id = " + q(n.get("orr_id", "orr_" + str(node_id).split("-")[-1])),
-        "sdn_http_url = " + q(sdn_http_from(n.get("sdn_endpoint", ""))),
+        "sdn_http_url = " + q(sdn_http_from(n.get("sdn_endpoint", ""), n)),
         "",
         "[generator]",
         # bindea al mismo listen_ip que el resto (0.0.0.0 por defecto = una
         # máquina; una IP concreta si varios DKMS comparten host, p.ej. tests).
         "ack_socket_addr = " + q(bind + ":" + str(p["ack"])),
         "ack_advertised_endpoint = " + q(adv + ":" + str(p["ack"])),
-        # Transporte de los ACK salientes: `socket` (TCP plano, heredado) o
-        # `etsi020` (POST mTLS, identidad = cert). Y si se ESCUCHA el socket:
-        # en un despliegue mixto hay que seguir escuchando a los peers que
-        # aún acusan por él; con todos en etsi020 se apaga.
-        "ack_transport = " + q(str(n.get("ack_transport", "socket"))),
-        "ack_socket_listen = " + ("true" if n.get("ack_socket_listen", True) else "false"),
+        # Transporte de los ACK salientes: `etsi020` (POST mTLS, identidad =
+        # cert; DEFAULT desde 2026-09-03, F2) o `socket` (TCP plano heredado).
+        # Y si se ESCUCHA el socket (default false): solo durante una
+        # migración mixta, para los peers que aún acusan por él.
+        "ack_transport = " + q(str(n.get("ack_transport", "etsi020"))),
+        "ack_socket_listen = " + ("true" if n.get("ack_socket_listen", False) else "false"),
     ]
     fr = n.get("fill_rate")
     if fr is not None:
@@ -467,7 +509,7 @@ def render_dkms(n, out):
         if "//" not in ep:
             ep = "https://" + ep
         orr_id = pc.get("orr_id", "orr_" + str(pid).split("-")[-1])
-        lines += ["", "[peers." + str(pid) + "]", "endpoint = " + q(ep),
+        lines += ["", "[peers." + q(str(pid)) + "]", "endpoint = " + q(ep),
                   'transport = "orr"', "orr_id = " + q(orr_id)]
         # Override por-peer del modo de routing ORR. Sin esto se usa
         # default_max_hops (0 = passthrough de fábrica). Subirlo a >=2 (cebolla
@@ -484,11 +526,12 @@ def render_dkms(n, out):
 # ─────────────────────────────── SDN ────────────────────────────────────────
 def control_tls_lines(n, node_id, kind, force=False):
     """[tls] block for control-plane mTLS (docs/SECURITY.md §Fase 3).
-    Emitted when node.yml sets `control_tls: true`, or when the caller needs
-    the identity anyway (`force`: the ORR's gRPC runs mTLS by default). `kind`
-    selects the field shape: the SDN is a server (cert/key/client_ca), orr/qkc
-    are clients (cert/key/control_plane_ca)."""
-    if not (n.get("control_tls") or force):
+    Emitted by DEFAULT (control_tls on, 2026-09-03) unless node.yml sets
+    `control_tls: false`, and always when the caller needs the identity
+    anyway (`force`: the ORR's gRPC runs mTLS by default). `kind` selects the
+    field shape: the SDN is a server (cert/key/client_ca), orr/qkc are
+    clients (cert/key/control_plane_ca)."""
+    if not (control_tls_on(n) or force):
         return []
     certs = n.get("certs_dir", "/config/certs")
     lines = ["", "[tls]",
@@ -564,8 +607,12 @@ def render_quditto(n, out):
         ]
     else:
         env += [("QUDITTO_TLS", "off")]
+    # Valores entrecomillados para el shell (D-18): el entrypoint hace
+    # `source` de este fichero, así que un valor sin comillas era ejecución de
+    # código desde node.yml (p. ej. `cert_name: "x; rm -rf /"`).
+    import shlex
     write(os.path.join(out, "quditto.env"),
-          "".join("export " + k + "=" + v + "\n" for k, v in env))
+          "".join("export " + k + "=" + shlex.quote(str(v)) + "\n" for k, v in env))
 
 
 ROLES = {"qkc": render_qkc, "orr": render_orr, "dkms": render_dkms, "sdn": render_sdn,

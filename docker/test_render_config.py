@@ -68,11 +68,11 @@ class OrrGrpcTlsPlacement(unittest.TestCase):
         # La forma exacta de docker/examples/node.orr.yml: peers + grpc_tls.
         # Antes `grpc_tls` se emitía después de [peers] y acababa dentro de la
         # tabla: peer fantasma `grpc_tls -> 1` y el false ignorado.
-        cfg = render("orr", ORR_BASE + "grpc_tls: false\npeers:\n  orr_2: 2\n")
+        cfg = render("orr", ORR_BASE + "grpc_tls: false\ncontrol_tls: false\npeers:\n  orr_2: 2\n")
         self.assertIs(cfg["grpc_tls"], False)
         self.assertEqual(cfg["peers"], {"orr_2": 2})
         self.assertNotIn("grpc_tls", cfg["peers"])
-        # Con grpc_tls apagado y sin control_tls no debe salir [tls].
+        # Con grpc_tls apagado y control_tls apagado no debe salir [tls].
         self.assertNotIn("tls", cfg)
 
     def test_default_on_with_peers_keeps_tls_block(self):
@@ -320,7 +320,109 @@ class SdnControlTls(unittest.TestCase):
         self.assertEqual(cfg["push_debounce_ms"], 50)
 
     def test_without_control_tls_no_tls_table(self):
-        self.assertNotIn("tls", render("sdn", "mcf_period_ms: 5000\n"))
+        self.assertNotIn("tls", render("sdn", "control_tls: false\nmcf_period_ms: 5000\n"))
+
+
+class ControlTlsDefaultOn(unittest.TestCase):
+    """F1 (auditoría 2026-09-02): el plano de control va en mTLS DE FÁBRICA.
+    Sin `control_tls` en node.yml la SDN y el QKC llevan [tls], y las URLs
+    hacia la SDN sin esquema salen https; `control_tls: false` es el opt-out
+    (todo http, sin [tls] salvo la identidad que grpc_tls exige al ORR); un
+    esquema explícito en la URL manda siempre."""
+
+    def test_sdn_has_tls_by_default(self):
+        cfg = render("sdn", "listen_ip: 0.0.0.0\n")
+        self.assertEqual(cfg["tls"]["cert_path"], "/config/certs/sdn.crt")
+        self.assertEqual(cfg["tls"]["client_ca"], "/config/certs/net-ca.crt")
+
+    def test_qkc_default_tls_and_https_announce(self):
+        cfg = render("qkc", "qkc_id: 3\nsdn_url: 10.0.0.100\nadvertise_ip: 10.0.0.3\n")
+        self.assertEqual(cfg["sdn_url"], "https://10.0.0.100:19002")
+        self.assertEqual(cfg["tls"]["cert_path"], "/config/certs/qkc-3.crt")
+        self.assertEqual(cfg["tls"]["control_plane_ca"], "/config/certs/net-ca.crt")
+
+    def test_qkc_opt_out_is_plaintext(self):
+        cfg = render("qkc", "qkc_id: 3\ncontrol_tls: false\nsdn_url: 10.0.0.100\n")
+        self.assertEqual(cfg["sdn_url"], "http://10.0.0.100:19002")
+        self.assertNotIn("tls", cfg)
+
+    def test_explicit_scheme_wins(self):
+        cfg = render("qkc", "qkc_id: 3\nsdn_url: http://10.0.0.100\n")
+        self.assertEqual(cfg["sdn_url"], "http://10.0.0.100:19002")
+        cfg = render("qkc", "qkc_id: 3\ncontrol_tls: false\nsdn_url: https://10.0.0.100\n")
+        self.assertEqual(cfg["sdn_url"], "https://10.0.0.100:19002")
+
+    def test_orr_and_dkms_follow_control_tls(self):
+        cfg = render("orr", "orr_id: orr_1\nqkc_id: 1\nsdn_url: 10.0.0.2\n")
+        self.assertEqual(cfg["sdn_url"], "https://10.0.0.2:19000")
+        self.assertEqual(cfg["sdn_http_url"], "https://10.0.0.2:19002")
+        cfg = render("orr", "orr_id: orr_1\nqkc_id: 1\ncontrol_tls: false\nsdn_url: 10.0.0.2\n")
+        self.assertEqual(cfg["sdn_url"], "http://10.0.0.2:19000")
+        self.assertEqual(cfg["sdn_http_url"], "http://10.0.0.2:19002")
+        cfg = render("dkms", DKMS_BASE + "sdn_endpoint: 10.0.0.2\n")
+        self.assertEqual(cfg["southbound"]["sdn_endpoint"], "https://10.0.0.2:19000")
+        self.assertEqual(cfg["southbound"]["sdn_http_url"], "https://10.0.0.2:19002")
+        cfg = render("dkms", DKMS_BASE + "sdn_endpoint: http://10.0.0.2:19000\n")
+        self.assertEqual(cfg["southbound"]["sdn_endpoint"], "http://10.0.0.2:19000")
+        self.assertEqual(cfg["southbound"]["sdn_http_url"], "http://10.0.0.2:19002")
+
+
+class QkcLocalPlaneBind(unittest.TestCase):
+    """D-14: el plano ORR↔QKC (20001, sin auth) va a loopback salvo
+    `local_bind` explícito; con network_mode: host, 0.0.0.0 era todas las
+    interfaces."""
+
+    def test_local_listen_defaults_to_loopback(self):
+        cfg = render("qkc", "qkc_id: 1\nlisten_ip: 0.0.0.0\n")
+        self.assertEqual(cfg["local_listen"], "127.0.0.1:20001")
+        self.assertEqual(cfg["peer_listen"], "0.0.0.0:20000")
+
+    def test_local_bind_opens_it_on_purpose(self):
+        cfg = render("qkc", "qkc_id: 1\nlocal_bind: 10.0.0.5\n")
+        self.assertEqual(cfg["local_listen"], "10.0.0.5:20001")
+
+
+class RendererQuoting(unittest.TestCase):
+    """D-17/D-18: claves de tabla entrecomilladas y env del quditto
+    escapado para el shell."""
+
+    def test_orr_table_keys_are_quoted(self):
+        raw = render_raw("orr", ORR_BASE + "peers:\n  'orr_2]': 2\npeer_grpc_addrs:\n  'orr_2]': http://10.0.0.12:20003\n")
+        self.assertIn('"orr_2]" = 2', raw)
+        cfg = tomllib.loads(raw)
+        self.assertEqual(cfg["peers"]["orr_2]"], 2)
+        self.assertEqual(cfg["peer_grpc_addrs"]["orr_2]"], "http://10.0.0.12:20003")
+
+    def test_dkms_peer_table_header_is_quoted(self):
+        cfg = render("dkms", DKMS_BASE + "peers:\n  'dkms-2.x':\n    endpoint: 10.0.0.2\n")
+        self.assertEqual(cfg["peers"]["dkms-2.x"]["endpoint"], "https://10.0.0.2:20006")
+
+    def test_quditto_env_is_shell_quoted(self):
+        with tempfile.TemporaryDirectory() as td:
+            node = os.path.join(td, "node.yml")
+            with open(node, "w") as f:
+                f.write("listen_ip: 0.0.0.0\nr0: 2000\ncert_name: 'x; touch /tmp/pwned'\n")
+            out = os.path.join(td, "cfg")
+            subprocess.run([sys.executable, RENDER, "quditto", node, out], check=True,
+                           capture_output=True)
+            env = open(os.path.join(out, "quditto.env")).read()
+            self.assertIn("QUDITTO_TLS_CERT='/config/certs/x; touch /tmp/pwned.crt'", env)
+
+
+class DkmsAckDefaults(unittest.TestCase):
+    """F2: los ACK salen por ETSI-020 (mTLS) y el socket en claro no escucha,
+    de fábrica; `socket` + `ack_socket_listen: true` solo durante una
+    migración mixta, escrito a propósito."""
+
+    def test_defaults_are_etsi020_and_listener_off(self):
+        g = render("dkms", DKMS_BASE)["generator"]
+        self.assertEqual(g["ack_transport"], "etsi020")
+        self.assertIs(g["ack_socket_listen"], False)
+
+    def test_explicit_socket_is_honoured(self):
+        g = render("dkms", DKMS_BASE + "ack_transport: socket\nack_socket_listen: true\n")["generator"]
+        self.assertEqual(g["ack_transport"], "socket")
+        self.assertIs(g["ack_socket_listen"], True)
 
 
 if __name__ == "__main__":

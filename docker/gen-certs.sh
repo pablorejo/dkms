@@ -29,6 +29,8 @@
 # en `sae_client_ca` la CA de SUS SAEs). Distribuye net-ca.crt a todos; sae-ca
 # solo donde haga falta verificar esos SAEs. (Follow-on: bundles per-institución.)
 set -euo pipefail
+# Claves privadas solo legibles por el dueño (auditoría 2026-09-03, D-13).
+umask 077
 
 DAYS="${DAYS:-3650}"
 

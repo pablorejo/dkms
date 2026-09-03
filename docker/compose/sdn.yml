@@ -8,6 +8,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
-      # certs: necesarios con `control_tls: true` en su node.yml (mTLS en el
+      # certs: necesarios con control_tls (default ON) en su node.yml (mTLS en el
       # admin HTTP/gRPC — recomendado en multi-host): sdn.crt/.key + net-ca.crt.
       - ./certs:/config/certs:ro

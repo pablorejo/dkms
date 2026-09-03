@@ -1,12 +1,17 @@
 # node.yml para un ORR.
 orr_id: "orr_1"
 qkc_id: 1
+# El DKMS al que sirve (identidad del SAN de su cert): es la reja de
+# `SendMessage`/`StreamDeliveries`. Sin esto el renderer avisa y el ORR
+# acepta cualquier cert de la net-ca en su plano de aplicación.
+served_dkms: ["dkms-1"]
 
 # Dónde está SU QKC. Si el ORR y el QKC están en la MISMA máquina, deja
 # localhost; si están en máquinas distintas, pon la IP del QKC.
 qkc_addr: "127.0.0.1:20001"        # local_listen del QKC (puerto 20001)
 
-sdn_url: "http://10.0.0.100:19000" # gRPC de la SDN central
+sdn_url: "https://10.0.0.100:19000" # gRPC de la SDN central (mTLS por defecto;
+                                    # http:// solo con control_tls: false en todos)
 advertise_ip: "10.0.0.11"          # IP por la que la SDN alcanza a ESTE ORR;
                                    # con ella el ORR se da de alta solo
 # sdn_announce_secs: 30            # cada cuánto reanuncia (es su heartbeat)
