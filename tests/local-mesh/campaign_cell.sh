@@ -240,7 +240,9 @@ while (( SECONDS < DEADLINE )); do
     sleep 10
 done
 OK=$(full_count)
-log "== REC cerrado: $OK/$TOTAL pares a tope$( [ -n "$T_REC" ] || echo " (NO recuperó en ${REC_SECS}s)")"
+# Si el último recuento ya está a tope, recuperó justo al límite: no decir lo contrario.
+[ -z "$T_REC" ] && (( OK >= TOTAL )) && T_REC=$REC_SECS
+log "== REC cerrado: $OK/$TOTAL pares a tope$( [ -n "$T_REC" ] && echo " (en ${T_REC}s)" || echo " (NO recuperó en ${REC_SECS}s)")"
 keys_round final
 stop_sampling
 
