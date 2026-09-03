@@ -294,7 +294,7 @@ done
 bad_mac=$(for n in $(seq 1 "$N"); do tail -c 400000 "$MESH_DIR/logs/qkc$n.log" | strip | grep -a 'qkc.frame_auth me=' | tail -40; done \
     | awk '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] } k = v["me"] "-" v["peer"]; last[k] = v["bad_mac"] + v["replayed"] + v["plain_rej"] }
            END { for (k in last) t += last[k]; print t + 0 }')
-intake_drop=$(cat "$MESH_DIR"/logs/qkc*.log | strip | grep -ac 'intake_dropped_full')
+intake_drop=$(cat "$MESH_DIR"/logs/qkc*.log | strip | grep -a 'intake_full' | grep -oE 'total=[0-9]+' | cut -d= -f2 | sort -n | tail -1); intake_drop=${intake_drop:-0}
 orr_send_failed=0
 for n in $(seq 1 "$N"); do
     v=$(tail -c 100000 "$MESH_DIR/logs/orr$n.log" | strip | grep -a 'orr.state' | tail -1 | grep -oE 'send_failed=[0-9]+' | cut -d= -f2)

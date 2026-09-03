@@ -47,6 +47,9 @@ FAM_LABEL = {"estrella": "Estrella", "anillo": "Anillo (C_N)", "puente": "Puente
 NS = list(range(10, 101, 10))
 
 
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def open_maybe_gz(path):
     if os.path.exists(path + ".gz"):
         return gzip.open(path + ".gz", "rt", encoding="utf-8", errors="replace")
@@ -175,6 +178,26 @@ def analyze_cell(cdir):
            "t_up_s": meta.get("t_up_s"), "t_full_s": meta.get("t_full_s"), "t_recover_s": meta.get("t_recover_s"),
            "health": meta.get("health", {}), "host": meta.get("host"), "git_sha": meta.get("git_sha"),
            "done": os.path.exists(os.path.join(cdir, "DONE")), "failed": os.path.exists(os.path.join(cdir, "FAILED"))}
+    # Frames descartados en la cola de entrada acotada del QKC (INTAKE_QUEUE):
+    # solo se conservan los logs de qkc1 y qkc2, y la línea se emite en
+    # potencias de dos (nth_is_loud), así que es una cota INFERIOR (≥). En la
+    # estrella qkc1 es el hub, que es donde importa.
+    intake_min = 0
+    for q in ("qkc1", "qkc2"):
+        lp = os.path.join(cdir, q + ".log")
+        if not (os.path.exists(lp) or os.path.exists(lp + ".gz")):
+            continue
+        try:
+            with open_maybe_gz(lp) as fh:
+                for line in fh:
+                    if "intake_full" not in line:
+                        continue
+                    mm = re.search(r"total\S*?=\S*?(\d+)", ANSI.sub("", line))
+                    if mm:
+                        intake_min = max(intake_min, int(mm.group(1)))
+        except (OSError, EOFError):
+            pass
+    out["health"] = dict(out["health"] or {}, intake_dropped_frames_min=intake_min)
     # Una celda sin DONE (corriendo, o muerta a medias) aporta su teoría (la
     # topología existe desde el arranque) pero NO métricas medidas: a medias
     # serían un punto falso en las tablas y figuras.
@@ -397,6 +420,9 @@ def build_tables(cells):
     out.append(table("Integridad · intercambios ETSI-014 con bytes distintos u otro error (L1 + final)", lambda c: (c.get("keys_L1", {}).get("mismatch_or_other", 0) + c.get("keys_final", {}).get("mismatch_or_other", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None,
                      note="Los 429/503 de una ronda (contrapresión, buffer vacío) van en la tabla siguiente: no son fallos de integridad."))
     out.append(table("Integridad · intercambios rechazados por 429/503 en las rondas (L1 + final)", lambda c: (c.get("keys_L1", {}).get("throttled", 0) + c.get("keys_final", {}).get("throttled", 0)) if (c.get("keys_L1") or c.get("keys_final")) else None))
+    out.append(table("Salud · claves expiradas por ACK (emitidas sin ACK en 30 s; material descartado por el emisor)", g(["health", "expired"]),
+                     note="En la estrella crece con N desde N≈40: la cola de entrada acotada del QKC del hub (8192 frames) desborda al arrancar L2 y los frames descartados nunca se ACKean."))
+    out.append(table("Salud · frames descartados en la cola de entrada del QKC (≥; solo nodos 1-2 conservan log; hub = nodo 1 en la estrella)", g(["health", "intake_dropped_frames_min"])))
     out.append(table("Bring-up (s)", g(["t_up_s"])))
     return "\n".join(out)
 

@@ -80,7 +80,7 @@ FIG_SECTIONS = [
     ("sec_l2", ["l2_sustained", "l2_fibre_utilisation", "l2_effective_hops", "l2_jain", "l2_min_pair_share", "l2_reject", "l2_latency_p99"],
      ["l2_sustained", "l2_ratio", "l2_util", "l2_hops", "l2_jain", "l2_minshare", "l2_reject", "l2_p99"]),
     ("sec_rec", ["rec_time"], ["t_recover_s"]),
-    ("sec_health", [], ["health"]),
+    ("sec_health", [], ["health", "expired", "intake"]),
     ("sec_res", ["l2_cpu_modules", "rss_peak"], ["cpu", "rss"]),
 ]
 
@@ -94,6 +94,8 @@ TABLE_TITLES = {
            "l2_minshare": "L2 worst pair / uniform share", "l2_reject": "L2 rejected fraction (429/503)",
            "l2_p99": "L2 latency p99 (ms)", "t_recover_s": "Recovery to full after L2 (s; — = not within 180 s)",
            "health": "recv_corrupt / peel_failed / frame-auth rejects / dead+panics / exchanges with different bytes (429/503 in the rounds are backpressure, not counted here)",
+           "expired": "Keys expired at the sender (emitted, no ACK within 30 s — material discarded, never corrupt)",
+           "intake": "Frames dropped by the QKC's bounded intake queue (≥; only nodes 1–2 keep logs; node 1 is the star's hub)",
            "cpu": "Modules CPU under L2 (% of 6400)", "rss": "Peak RSS under L2 (MB)"},
     "es": {"techo_fibra": "Techo de fibra Σcap/ħ (claves/s)", "mean_hops": "Saltos medios (pares ordenados)",
            "t_full_s": "Tiempo hasta todos los pares a tope (s; — = no en 600 s)",
@@ -104,7 +106,9 @@ TABLE_TITLES = {
            "l2_minshare": "L2 peor par / reparto uniforme", "l2_reject": "L2 fracción rechazada (429/503)",
            "l2_p99": "L2 latencia p99 (ms)", "t_recover_s": "Recuperación a tope tras L2 (s; — = no en 180 s)",
            "health": "recv_corrupt / peel_failed / rechazos del sello / muertos+panics / intercambios con bytes distintos (los 429/503 de las rondas son contrapresión y no cuentan aquí)",
-           "cpu": "CPU de los módulos bajo L2 (% de 6400)", "rss": "RSS pico bajo L2 (MB)"},
+                      "expired": "Claves expiradas en el emisor (emitidas sin ACK en 30 s: material descartado, nunca corrupto)",
+           "intake": "Frames descartados por la cola de entrada acotada del QKC (≥; solo los nodos 1–2 conservan log; el nodo 1 es el hub de la estrella)",
+"cpu": "CPU de los módulos bajo L2 (% de 6400)", "rss": "RSS pico bajo L2 (MB)"},
 }
 
 
@@ -158,6 +162,11 @@ def cell_value(c, key):
         failed = (c.get("keys_L1") or {}).get("mismatch_or_other", 0) + (c.get("keys_final") or {}).get("mismatch_or_other", 0)
         return "%d / %d / %d / %d / %d" % (h.get("recv_corrupt", 0), h.get("peel_failed", 0) + h.get("dropped_no_secret", 0),
                                           h.get("frame_auth_rejects", 0), h.get("dead_processes", 0) + h.get("panics", 0), failed)
+    if key == "expired":
+        return fmt(h.get("expired")) if h else "—"
+    if key == "intake":
+        v = h.get("intake_dropped_frames_min") if h else None
+        return ("≥ " + fmt(v)) if v else ("0" if h else "—")
     if key == "cpu":
         cpu = L2.get("cpu_mean_pct") if L2 else None
         return fmt(sum(v for k, v in cpu.items() if k != "sae_load")) if cpu else "—"
