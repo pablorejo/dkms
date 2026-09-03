@@ -156,6 +156,9 @@ def keys_log_result(path):
     return tuple(int(x) for x in m.groups()) + (throttled, other)
 
 
+INCLUDE_PARTIAL = False
+
+
 def analyze_cell(cdir):
     fam, n = os.path.basename(cdir).rsplit("-n", 1)
     n = int(n)
@@ -172,6 +175,11 @@ def analyze_cell(cdir):
            "t_up_s": meta.get("t_up_s"), "t_full_s": meta.get("t_full_s"), "t_recover_s": meta.get("t_recover_s"),
            "health": meta.get("health", {}), "host": meta.get("host"), "git_sha": meta.get("git_sha"),
            "done": os.path.exists(os.path.join(cdir, "DONE")), "failed": os.path.exists(os.path.join(cdir, "FAILED"))}
+    # Una celda sin DONE (corriendo, o muerta a medias) aporta su teoría (la
+    # topología existe desde el arranque) pero NO métricas medidas: a medias
+    # serían un punto falso en las tablas y figuras.
+    if not out["done"] and not INCLUDE_PARTIAL:
+        return out
     # ── L0: llenado ──
     l0 = phase_samples(samples, "L0")
     if l0:
@@ -535,7 +543,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cells", default=os.path.join(os.path.dirname(__file__), "..", "results", "campaign-2026-09", "cells"))
     ap.add_argument("--out", default=None)
+    ap.add_argument("--partial", action="store_true", help="medir también las celdas sin DONE (corriendo)")
     a = ap.parse_args()
+    global INCLUDE_PARTIAL
+    INCLUDE_PARTIAL = a.partial
     cells_dir = os.path.abspath(a.cells)
     outdir = os.path.abspath(a.out or os.path.join(cells_dir, ".."))
     os.makedirs(os.path.join(outdir, "figs"), exist_ok=True)
