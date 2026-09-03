@@ -276,11 +276,23 @@ def analyze_cell(cdir):
         if tag == "L2" and ph:
             # sostenido corregido por stock: ventana = últimos 2/3 de la fase
             persec = read_persec(os.path.join(cdir, "L2.persec.csv"))
-            if persec and len(ph) >= 3:
+            if persec and len(ph) >= 2:
                 t0 = ph[0]["t"]
                 t_end = ph[-1]["t"]
                 w0 = t0 + (t_end - t0) / 3.0
                 win = [s for s in ph if s["t"] >= w0 and s["D"]]
+                # A N≥80 en las familias densas el muestreador (que compite con
+                # miles de flujos en bucle cerrado) deja 2-4 muestras en toda
+                # la fase: si en los últimos 2/3 no caen dos, se usan las dos
+                # últimas de la fase (≥ 60 s de separación) y se marca.
+                relaxed = False
+                if len(win) < 2:
+                    alld = [s for s in ph if s["D"]]
+                    if len(alld) >= 2 and (alld[-1]["t"] - alld[-2]["t"]) >= 60:
+                        win = alld[-2:]
+                        relaxed = True
+                out[tag]["n_samples"] = len(ph)
+                out[tag]["window_relaxed"] = relaxed
                 if len(win) >= 2:
                     stock0, stock1 = sum_enc(win[0]), sum_enc(win[-1])
                     # Segundo almacén: los anillos ENC de los QKC (claves QKD ya
@@ -391,6 +403,7 @@ def build_tables(cells):
     out.append(table("L1 · latencia p50 (ms)", g(["L1", "lat_p50_ms"]), 1))
     out.append(table("L1 · latencia p99 (ms)", g(["L1", "lat_p99_ms"]), 1))
     out.append(table("L2 · servido bruto (claves/s, con stock)", g(["L2", "served_keys_per_s"])))
+    out.append(table("L2 · muestras del muestreador en la fase (ventana relajada a 2 muestras si <2 en los últimos 2/3)", lambda c: ("%d%s" % (c["L2"]["n_samples"], "*" if c["L2"].get("window_relaxed") else "")) if c.get("L2", {}).get("n_samples") else None))
     out.append(table("L2 · SOSTENIDO corregido por stock (claves/s)", g(["L2", "sustained_corrected_keys_per_s"]),
                      note="(servido − stock drenado en la ventana) / ventana, sobre los últimos 2/3 de L2; el stock son los tres almacenes: buffers ENC de los DKMS, anillos ENC de los QKC y búferes de los KME (quditto, muestreados)."))
     out.append(table("L2 · drenado del KME en la ventana (claves/s)", g(["L2", "kme_drain_keys_per_s"])))

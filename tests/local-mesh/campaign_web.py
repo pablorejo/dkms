@@ -88,7 +88,7 @@ TABLE_TITLES = {
     "en": {"techo_fibra": "Fibre ceiling Σcap/ħ (keys/s)", "mean_hops": "Mean hops (ordered pairs)",
            "t_full_s": "Time until every pair is full (s; — = not within 600 s)",
            "l0_fill_slope": "Fill slope, all pairs (keys/s)", "l1_served": "L1 served (keys/s) / offered",
-           "l1_p99": "L1 latency p99 (ms)", "l2_sustained": "L2 sustained, stock-corrected (keys/s)",
+           "l1_p99": "L1 latency p99 (ms)", "l2_sustained": "L2 sustained, stock-corrected (keys/s; * = window relaxed to the last two sampler records, the sampler starved by the load client at N ≥ 80)",
            "l2_ratio": "L2 sustained / uniform-demand ceiling", "l2_util": "L2 fibre utilisation (Σtaken/Σcap)",
            "l2_hops": "L2 effective hops per delivered key (vs uniform mean)", "l2_jain": "L2 Jain fairness index (keys per pair)",
            "l2_minshare": "L2 worst pair / uniform share", "l2_reject": "L2 rejected fraction (429/503)",
@@ -100,7 +100,7 @@ TABLE_TITLES = {
     "es": {"techo_fibra": "Techo de fibra Σcap/ħ (claves/s)", "mean_hops": "Saltos medios (pares ordenados)",
            "t_full_s": "Tiempo hasta todos los pares a tope (s; — = no en 600 s)",
            "l0_fill_slope": "Pendiente de llenado, todos los pares (claves/s)", "l1_served": "L1 servido (claves/s) / ofrecido",
-           "l1_p99": "L1 latencia p99 (ms)", "l2_sustained": "L2 sostenido corregido por stock (claves/s)",
+           "l1_p99": "L1 latencia p99 (ms)", "l2_sustained": "L2 sostenido corregido por stock (claves/s; * = ventana relajada a los dos últimos registros del muestreador, que el cliente de carga deja sin CPU a N ≥ 80)",
            "l2_ratio": "L2 sostenido / techo de demanda uniforme", "l2_util": "L2 utilización de la fibra (Σtaken/Σcap)",
            "l2_hops": "L2 saltos efectivos por clave entregada (vs media uniforme)", "l2_jain": "L2 índice de Jain (claves por par)",
            "l2_minshare": "L2 peor par / reparto uniforme", "l2_reject": "L2 fracción rechazada (429/503)",
@@ -139,7 +139,8 @@ def cell_value(c, key):
     if key == "l1_p99":
         return fmt(L1.get("lat_p99_ms"), 1) if L1 else "—"
     if key == "l2_sustained":
-        return fmt(L2.get("sustained_corrected_keys_per_s")) if L2 else "—"
+        v = fmt(L2.get("sustained_corrected_keys_per_s")) if L2 else "—"
+        return (v + "*") if (L2 and L2.get("window_relaxed") and v != "—") else v
     if key == "l2_ratio":
         v = L2.get("sustained_corrected_keys_per_s") if L2 else None
         return fmt(v / c["techo_fibra"], 2) if v is not None and c["techo_fibra"] else "—"
