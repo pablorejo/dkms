@@ -9,8 +9,8 @@ Referencia y parcialmente sustituye a `audit_2026_05.md` (findings H-5, H-6,
 M-1) y `orr/TODO_SECURITY.md` (P2). Todo lo citado con `file:line` fue
 verificado el 2026-08-27.
 
-Estado global: **Fases 1, 2, 3, 5, 7, 8, 9 y 10 completas; 4 y 6 hechas en código; los flips de default (etsi020 / strict / control_tls) validados en el testbed Proxmox (2026-09-01) pero SIN cambiar en el binario — decisión del operador**
-(actualizado 2026-09-02; ver `audit_2026_09b.md`). Todas las fases recorridas. Quedan diferidos, con requisitos
+Estado global: **Fases 1, 2, 3, 5, 7, 8, 9 y 10 completas; 4 y 6 hechas en código; los flips de default (etsi020 / strict / control_tls) validados en el testbed Proxmox (2026-09-01) y APLICADOS al binario y al renderer el 2026-09-03** (`audit_2026_09c.md`, F1–F4 + E1: ACK por ETSI-020 con el socket apagado, `bootstrap_trust = strict`, `control_tls` por defecto, `#![forbid(unsafe_code)]`, `overflow-checks` en release)
+(actualizado 2026-09-03; ver `audit_2026_09b.md` y `audit_2026_09c.md`). Todas las fases recorridas. Quedan diferidos, con requisitos
 claros: en 4, eliminar el socket de ACK (necesita testbed); en 6, pinning
 estable (necesita persistir la identidad ORR — decisión del usuario) y auth
 del caller de EstablishSecret (necesita testbed + separar puertos gRPC). Todo
@@ -35,20 +35,21 @@ Esta tabla es el artefacto central: cada fase apunta a una fila.
 
 | Plano | Puerto (default) | ¿Cruza institución? | Auth hoy | Auth objetivo | Fase |
 |---|---|---|---|---|---|
-| DKMS↔SAE (ETSI-014) | `listen.sae_addr` :8443 | no (SAE local) — pero es el plano con mandato normativo | mTLS con 3 agujeros (§Fase 1) | mTLS real + autorización por SAE | 1, 2 |
-| DKMS↔DKMS (ETSI-020) | `listen.peer_addr` :8444 | **sí** | mTLS real, pero identidad no comprobada y CA colapsada | mTLS + binding SAN==origen | 2, 4 |
-| DKMS↔DKMS ACK socket | `peer_addr`+1000 (auto) | **sí** | **ninguna** (TCP plano, identidad = campo JSON) | eliminado — ACKs por ETSI-020 | 4 |
-| todos↔SDN (HTTP admin) | SDN `http_addr` :19002 | **sí** | en claro por defecto; **mTLS + identity binding con `control_tls`** (`[tls]` del SDN) | mTLS por defecto cuando el testbed lo valide | 3 |
-| SDN→QKC (push forwarding) | QKC `admin_http` :20002 | **sí** | en claro por defecto; **mTLS con `[tls]` en ambos** (2026-08-31: QKC sirve con cert cliente obligatorio net-ca; SDN empuja https con su cert) y **el POST solo lo autoriza la identidad `sdn` del cert** (Fase 10 B1b: otro miembro de la red no reescribe rutas ajenas). `POST /forwarding-table` = decidir por dónde viaja cada frame OTP | mTLS por defecto cuando el testbed lo valide | 3 |
-| todos↔SDN (gRPC) | SDN `grpc_addr` :50053 | **sí** | ninguna (h2c) | TLS (CA de red) | 3 |
+| DKMS↔SAE (ETSI-014) | `listen.sae_addr` :20005 | no (SAE local) — pero es el plano con mandato normativo | mTLS (sae-ca) + autorización por SAE (`sae_bindings`, fail-closed) + ids validados | hecho | 1, 2 |
+| DKMS↔DKMS (ETSI-020) | `listen.peer_addr` :20006 | **sí** | mTLS (net-ca) + SAN==origen + **pertenencia al `PeerRegistry`** (2026-09-03, B-05) + cotas de ingreso + sello e2e | hecho | 2, 4 |
+| DKMS↔DKMS ACK socket | `peer_addr`+1000 (auto) | **sí** | **apagado de fábrica (2026-09-03)**: ACKs por ETSI-020 mTLS; el socket solo con `ack_transport: socket` + `ack_socket_listen: true` | eliminado — ACKs por ETSI-020 | 4 |
+| todos↔SDN (HTTP admin) | SDN `http_addr` :19002 | **sí** | **mTLS + identity binding por defecto** (`control_tls`, 2026-09-03; `control_tls: false` = en claro a sabiendas) | hecho | 3 |
+| SDN→QKC (push forwarding) | QKC `admin_http` :20002 | **sí** | **mTLS por defecto** (`control_tls`, 2026-09-03; el QKC sirve con cert cliente obligatorio net-ca, la SDN empuja https con su cert) y **el POST solo lo autoriza la identidad `sdn` del cert** (Fase 10 B1b). El `host.ip` del anuncio tiene que ser una IP (C-01) | hecho | 3 |
+| todos↔SDN (gRPC) | SDN `grpc_addr` :19000 | **sí** | **mTLS por defecto** (`[tls]` de la SDN, `control_tls`) | hecho | 3 |
 | QKC↔QKC (TCP binario) | `peer_listen` :20000 | **sí** | OTP + HMAC por frame (`frame_auth`), handshake HMAC/ML-DSA | hecho (5, 8) | 5, 8 |
 | ORR↔ORR (capa cebolla) | dentro del payload QKC | **sí** | AES-256-GCM por capa + ventana anti-replay | hecho (8) | 8 |
-| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` | **sí** | pubkey firmada ML-DSA + **mTLS por defecto** (`grpc_tls`, identidad de nodo, CA de red) | hecho (6, 8) | 6, 8 |
-| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` | no (mismo host) — o sí, si se separan | **mTLS por defecto** (`grpc_tls` en el ORR, `orr_tls` en el DKMS; certs de nodo ML-DSA-65, CA de red). En claro sólo con opt-out explícito en los dos extremos | hecho (8) | 8 |
-| ORR↔QKC (gRPC) | interno | no | ninguna | ninguna — red interna obligatoria | — |
+| ORR↔ORR (gRPC bootstrap) | `peer_grpc_addrs` :20003 | **sí** | pubkey firmada con el cert de nodo (`bootstrap_trust = strict` por defecto, 2026-09-03) + **mTLS por defecto** (`grpc_tls`, identidad de nodo, CA de red) + `from` atado al cert y a un par conocido (D-04) + cotas del acceptor (D-03) | hecho (6, 8) | 6, 8 |
+| DKMS↔ORR (gRPC) | `southbound.orr_endpoint` :20003 | no (mismo host) — o sí, si se separan | **mTLS por defecto** (`grpc_tls` en el ORR, `orr_tls` en el DKMS; certs de nodo ML-DSA-65, CA de red) + `served_dkms`. En claro sólo con opt-out explícito en los dos extremos | hecho (8) | 8 |
+| ORR↔QKC (TCP binario, `local_listen`) | :20001 | no | ninguna — **loopback por defecto** desde 2026-09-03 (D-14; `local_bind:` para separarlos) | red interna obligatoria | — |
 | QKC↔KME/quditto (ETSI-014) | `quditto_url` | no (KME propio) | **mTLS por defecto** (2026-08-31: quditto sirve TLS con cert cliente obligatorio net-ca; el QKC presenta su identidad de nodo con `quditto_url` https). En claro solo con el opt-out explícito `QUDITTO_TLS=off` / `tls: false` (sidecar co-localizado) | hecho | — |
-| DKMS gRPC `DkmsControl` | `listen.grpc_addr` :50054 | no (operador) | **ninguna** (`Drain` borra buffers con 1 RPC) | bind localhost por defecto | 7 |
-| /metrics (todos) | :9100–:9103 | no | ninguna | bind configurable | 7 |
+| DKMS gRPC `DkmsControl` | `listen.grpc_addr` :20007 | no (operador) | **ninguna** (`Drain` borra buffers con 1 RPC) — **127.0.0.1 por defecto** (2026-08-30) | hecho | 7 |
+| DKMS ACK socket (si se enciende) | `ack_socket_addr` :20009 | **sí** | ninguna; apagado de fábrica (F2) | eliminado | 4 |
+| /metrics (todos) | :20004 / :20008 / :19010 | no | ninguna | red interna | 7 |
 
 ### 1.2 No-objetivos explícitos — checklist de operador
 
@@ -280,8 +281,9 @@ negativo cross-plane nuevo.
   `Option<ControlTlsCfg>` en sus configs). `install_default` en orr/qkc main;
   `rustls` añadido a orr/qkc; `reqwest` con `rustls-tls` a common (feature
   unification lo propaga al workspace).
-- `render_config.py`: `control_tls_lines` emite `[tls]` opcional para
-  sdn(server)/orr/qkc(client) solo con `control_tls: true` (default plaintext);
+- `render_config.py`: `control_tls_lines` emite `[tls]` para
+  sdn(server)/orr/qkc(client) — POR DEFECTO desde 2026-09-03 (`control_tls:
+  false` lo apaga; las URLs hacia la SDN sin esquema siguen al flag);
   `http_ro_addr` para el SDN.
 - Verificado: workspace compila; common 26 / dkms 70 / orr 61 / qkc 55 /
   sdn 131 tests verdes; clippy limpio; render condicional comprobado.
@@ -362,12 +364,14 @@ propietario → 403.
 
 ### Fase 4 — Plano peer DKMS: eliminar el ACK socket + binding en ext_keys
 
-**Estado: NÚCLEO DE SEGURIDAD IMPLEMENTADO (2026-08-27); eliminación del
-socket diferida a testbed.** Desde 2026-08-30 todo lo que hace falta para el
-rollout está en código: `ack_transport` (`socket` | `etsi020`) y
-`ack_socket_listen` se renderizan desde `node.yml`, el listener del socket es
-opcional (para un despliegue mixto hay que seguir escuchando a los peers que
-aún acusan por él), y el fallo del envío etsi020 habla en potencias de dos.
+**Estado: NÚCLEO DE SEGURIDAD IMPLEMENTADO (2026-08-27); DEFAULT etsi020 +
+socket apagado desde 2026-09-03 (validado en Proxmox 2026-09-01).** Desde
+2026-08-30 todo lo que hace falta para el rollout está en código:
+`ack_transport` (`etsi020` default | `socket`) y `ack_socket_listen` (default
+`false`) se renderizan desde `node.yml`, el listener del socket es opcional
+(para un despliegue mixto hay que seguir escuchando a los peers que aún
+acusan por él), y el fallo del envío etsi020 habla en potencias de dos. La
+retirada del código del socket queda para cuando no haya peers viejos.
 Los defaults siguen en `socket`/`true` hasta medir en el testbed los brazos
 socket → etsi020+listener → etsi020 sin listener (t20); después, el flip y el
 borrado (`ack_socket.rs`, la derivación `+1000`, el header `ack_endpoint`).
@@ -606,8 +610,10 @@ piezas bloqueadas se resolvieron sin persistir nada en disco:
 **Estado anterior: NÚCLEO HECHO (2026-08-27); pinning estable + auth del
 caller BLOQUEADOS por decisiones de diseño.**
 
-Implementado (opt-in, tofu default = comportamiento actual):
-- `orr/src/config.rs`: `bootstrap_trust = tofu | strict` (default tofu).
+Implementado (`strict` es el default desde 2026-09-03; `tofu` = el
+comportamiento anterior, solo para un ORR en claro a sabiendas):
+- `orr/src/config.rs`: `bootstrap_trust = strict | tofu` (default strict; sin
+  `[tls]` ni `peer_verify_keys` avisa al arrancar de que nada pasará).
 - `orr/src/peers.rs`: snapshot inmutable de los pins de `peer_pubkeys` +
   `verify_fetched_pubkey` (puro, testeado) → `Accept | AcceptPinMismatch |
   Reject`; `with_pubkeys_trust`.
@@ -648,8 +654,8 @@ gRPC plano que cruza instituciones.
 **Cambios.**
 - El mapa `peer_pubkeys` del TOML (**ya existe**: `orr/src/config.rs:84-91`,
   con prioridad sobre la pubkey fetcheada) pasa a ser ancla obligatoria bajo
-  `bootstrap_trust = tofu | strict` (default `tofu` por compat; `strict`
-  recomendado cross-institución en el doc de despliegue). En `strict`,
+  `bootstrap_trust = strict | tofu` (default `strict` desde 2026-09-03;
+  `tofu` solo en claro, a sabiendas). En `strict`,
   `GetPublicKey` solo confirma; la confianza viene del TOML.
 - Challenge-response mutuo en `EstablishSecret`, MACeado con el bootstrap
   secret recién derivado, con el patrón de tags de `orr/src/macs.rs` — las
@@ -857,9 +863,9 @@ Ver la gotcha del troceado en CLAUDE.md.
   Fase 4): acepta TCP plano de cualquiera y saca el `from` del cuerpo. No
   compromete material —es contabilidad del generador— pero sí es
   autenticación de origen que falta, en un plano que cruza instituciones. El
-  camino autenticado y el listener opcional están en código
-  (`ack_transport: etsi020`, `ack_socket_listen: false`); el flip espera al
-  testbed.
+  camino autenticado y el listener opcional están en código y son el
+  default desde 2026-09-03 (`ack_transport: etsi020`,
+  `ack_socket_listen: false`), validados en el testbed el 2026-09-01.
 - **Las claves de sesión SAE** ya llevan `session_key_digest` (una huella ligada
   al `key_id`, comprobada antes de guardar y de acusar recibo), así que el caso
   de "los dos SAE se llevan claves distintas en silencio" está cerrado. Lo que
