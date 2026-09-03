@@ -87,7 +87,10 @@ async fn healthz() -> Response {
 pub fn error_to_response(err: DkmsError) -> Response {
     let (status, msg) = match &err {
         DkmsError::Unauthenticated => (StatusCode::UNAUTHORIZED, err.to_string()),
-        DkmsError::Forbidden(..) => (StatusCode::FORBIDDEN, err.to_string()),
+        DkmsError::Forbidden(..) | DkmsError::UnknownPeer(_) => {
+            (StatusCode::FORBIDDEN, err.to_string())
+        }
+        DkmsError::PendingFull { .. } => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
         DkmsError::UnknownSae(_) => (StatusCode::NOT_FOUND, err.to_string()),
         DkmsError::BadRequest(_) => (StatusCode::BAD_REQUEST, err.to_string()),
         DkmsError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, err.to_string()),

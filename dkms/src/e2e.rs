@@ -106,6 +106,11 @@ const AAD_DOMAIN: &[u8] = b"dkms.e2e.v1";
 /// época desconocida lo dispara por cada frame que llega, y llegan cientos por
 /// segundo.
 const AGREEMENT_MIN_INTERVAL: Duration = Duration::from_secs(2);
+/// Respuestas de acuerdo que se atienden por `AGREEMENT_MIN_INTERVAL` y peer
+/// (B-11) si la config no dice otra cosa: dos acuerdos concurrentes
+/// legítimos (cada lado pide) más el rekey caben; un peer que martillea con
+/// `POST /e2e/kem` no.
+pub const DEFAULT_RESPOND_BURST: u8 = 4;
 /// Una esk pendiente más vieja que esto es de un acuerdo que murió a medias.
 const PENDING_ESK_TTL: Duration = Duration::from_secs(30);
 /// Ventana del guardarraíl anti-reúso de `key_id` por época (ver
@@ -210,6 +215,11 @@ struct PeerState {
     epoch_sends: u64,
     /// Guardarraíl anti-reúso de `key_id` bajo la época en curso.
     recent_key_ids: RecentKeyIds,
+    /// Último acuerdo que RESPONDIMOS a este peer (B-11: cota del respondedor).
+    last_response: Option<Instant>,
+    /// Respuestas que quedan en la ráfaga actual (se recarga a
+    /// `RESPOND_BURST` cuando pasa `AGREEMENT_MIN_INTERVAL` desde la última).
+    respond_burst: u8,
     /// Ventana de lo que nos llega de él.
     replay: ReplayWindow,
     /// Secreta efímera del acuerdo que tenemos en vuelo, si lo pedimos
@@ -232,6 +242,8 @@ impl PeerState {
             pending_esk: None,
             inflight: false,
             last_attempt: None,
+            last_response: None,
+            respond_burst: DEFAULT_RESPOND_BURST,
             established_at: None,
         }
     }
@@ -543,6 +555,31 @@ impl E2e {
     /// época nueva y pasa a emitir con ella. `peer` viene del certificado,
     /// nunca del cuerpo.
     pub fn respond(&self, peer: &str, req: &KemRequest) -> Result<KemResponse, E2eError> {
+        // El que pide ya respeta AGREEMENT_MIN_INTERVAL; el que responde no
+        // tenía cota (auditoría 2026-09-03, B-11): cada POST costaba un encap
+        // ML-KEM y reiniciaba la época de envío. Mismo intervalo aquí; la
+        // comprobación va ANTES del encap para que el rechazo sea barato.
+        {
+            let mut g = self.peers.lock();
+            let st = self.state(&mut g, peer);
+            let burst = self.cfg.respond_burst.max(1);
+            match st.last_response {
+                Some(t) if t.elapsed() < AGREEMENT_MIN_INTERVAL => {
+                    if st.respond_burst == 0 {
+                        return Err(E2eError::Peer(format!(
+                            "acuerdo e2e demasiado frecuente (máximo {burst} por {} s)",
+                            AGREEMENT_MIN_INTERVAL.as_secs()
+                        )));
+                    }
+                    st.respond_burst -= 1;
+                }
+                _ => {
+                    // Intervalo vencido (o primera vez): ráfaga nueva.
+                    st.respond_burst = burst - 1;
+                    st.last_response = Some(Instant::now());
+                }
+            }
+        }
         // Mismo suelo que en complete_request: la suite no se negocia.
         if req.suite != self.cfg.suite {
             return Err(E2eError::Peer(format!(
@@ -697,7 +734,10 @@ mod tests {
         pair_with(TransportE2eCfg::default())
     }
 
-    fn pair_with(cfg: TransportE2eCfg) -> (Arc<E2e>, Arc<E2e>) {
+    fn pair_with(mut cfg: TransportE2eCfg) -> (Arc<E2e>, Arc<E2e>) {
+        // Los tests acuerdan muchas veces seguidas: la cota del respondedor
+        // (B-11) es para la red, no para esto.
+        cfg.respond_burst = 64;
         let reg = || Arc::new(PeerRegistry::from_config(HashMap::<String, PeerCfg>::new()));
         let a = Arc::new(E2e::new("dkms-a", cfg.clone(), None, reg()));
         let b = Arc::new(E2e::new("dkms-b", cfg, None, reg()));

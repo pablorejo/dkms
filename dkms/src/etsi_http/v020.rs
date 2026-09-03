@@ -38,6 +38,9 @@ async fn handle_ext_keys(
     peer: DkmsPeer,
     Json(body): Json<Etsi020ExtKeyContainer>,
 ) -> Response {
+    if let Err(e) = svc.require_known_peer(&peer.node_id) {
+        return super::error_to_response(e);
+    }
     match svc.handle_incoming_ext_keys(&peer.node_id, body).await {
         Ok(ack) => Json(ack).into_response(),
         Err(e) => super::error_to_response(e),
@@ -50,6 +53,9 @@ async fn handle_ext_keys_ack(
     peer: DkmsPeer,
     Json(ack): Json<Etsi020ExtKeyAckContainer>,
 ) -> Response {
+    if let Err(e) = svc.require_known_peer(&peer.node_id) {
+        return super::error_to_response(e);
+    }
     // ACK autenticado por mTLS: la identidad del emisor es su cert
     // (`peer.node_id`), no un campo del cuerpo. Movemos las claves de
     // `ack_pending` a `buffer_enc` (docs/SECURITY.md §Fase 4). Es la variante
@@ -81,6 +87,9 @@ async fn handle_e2e_kem(
     peer: DkmsPeer,
     Json(req): Json<crate::e2e::KemRequest>,
 ) -> Response {
+    if let Err(e) = svc.require_known_peer(&peer.node_id) {
+        return super::error_to_response(e);
+    }
     match svc.e2e.respond(peer.node_id.as_str(), &req) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => super::error_to_response(crate::error::DkmsError::BadRequest(e.to_string())),

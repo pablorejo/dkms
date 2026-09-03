@@ -96,7 +96,14 @@ async fn handle_status(
     Path(slave_sae): Path<String>,
     peer: SaePeer,
 ) -> Response {
-    let slave = SaeId::new(slave_sae);
+    let slave = match SaeId::try_new(slave_sae) {
+        Ok(s) => s,
+        Err(e) => {
+            return super::error_to_response(crate::error::DkmsError::BadRequest(format!(
+                "sae id: {e}"
+            )))
+        }
+    };
     match svc.status_for(&peer.sae_id, &slave).await {
         Ok(s) => Json(s).into_response(),
         Err(e) => super::error_to_response(e),
@@ -132,7 +139,14 @@ async fn enc_keys_response(
     headers: &HeaderMap,
     body: Etsi014KeyRequest,
 ) -> Response {
-    let slave = SaeId::new(slave_sae);
+    let slave = match SaeId::try_new(slave_sae) {
+        Ok(s) => s,
+        Err(e) => {
+            return super::error_to_response(crate::error::DkmsError::BadRequest(format!(
+                "sae id: {e}"
+            )))
+        }
+    };
     let extra_saes_header = extra_saes_from_headers(headers);
 
     match svc
@@ -171,7 +185,14 @@ async fn dec_keys_response(
     peer: SaePeer,
     body: Etsi014KeyIDs,
 ) -> Response {
-    let master = SaeId::new(master_sae);
+    let master = match SaeId::try_new(master_sae) {
+        Ok(s) => s,
+        Err(e) => {
+            return super::error_to_response(crate::error::DkmsError::BadRequest(format!(
+                "sae id: {e}"
+            )))
+        }
+    };
     match svc.handle_dec_keys(&peer.sae_id, &master, body).await {
         Ok(c) => Json(c).into_response(),
         Err(e) => super::error_to_response(e),

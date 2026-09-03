@@ -56,9 +56,16 @@ impl PeerBuffers {
     }
 
     /// Popea una clave ENC del PRIMER grado con stock según el orden de
-    /// preferencia (`SecurityLevel::serve_pref`). `None` si todos vacíos.
-    pub fn enc_pop_pref(&self, prefs: &[KeyGrade]) -> Option<super::buffer::TransportKey> {
-        prefs.iter().find_map(|&g| self.enc(g).pop_oldest())
+    /// preferencia (`SecurityLevel::serve_pref`), diciendo de qué grado
+    /// salió (para poder devolverla si el sobre no llega a emitirse).
+    /// `None` si todos vacíos.
+    pub fn enc_pop_pref(
+        &self,
+        prefs: &[KeyGrade],
+    ) -> Option<(KeyGrade, super::buffer::TransportKey)> {
+        prefs
+            .iter()
+            .find_map(|&g| self.enc(g).pop_oldest().map(|k| (g, k)))
     }
 
     /// Tira todas las claves ENC de este peer (se zeroizan al drop) y

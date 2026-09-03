@@ -253,17 +253,23 @@ where
             );
             return Err((StatusCode::UNAUTHORIZED, "missing client certificate"));
         }
-        let sae = pid
-            .san_identifier
-            .as_deref()
-            .map(sae_id_from_san)
-            .ok_or_else(|| {
+        let sae = match pid.san_identifier.as_deref().map(sae_id_from_san) {
+            Some(Ok(id)) => id,
+            Some(Err(_)) => {
+                tracing::warn!(
+                    uri = %parts.uri,
+                    "auth.reject: identidad del SAN inválida (plano SAE)"
+                );
+                return Err((StatusCode::UNAUTHORIZED, "invalid SAN identity"));
+            }
+            None => {
                 tracing::warn!(
                     uri = %parts.uri,
                     "auth.reject: cert de cliente sin SAN/CN utilizable (plano SAE)"
                 );
-                (StatusCode::UNAUTHORIZED, "no usable SAN in client cert")
-            })?;
+                return Err((StatusCode::UNAUTHORIZED, "no usable SAN in client cert"));
+            }
+        };
         Ok(Self { sae_id: sae })
     }
 }
@@ -289,17 +295,23 @@ where
             );
             return Err((StatusCode::UNAUTHORIZED, "missing client certificate"));
         }
-        let node = pid
-            .san_identifier
-            .as_deref()
-            .map(node_id_from_san)
-            .ok_or_else(|| {
+        let node = match pid.san_identifier.as_deref().map(node_id_from_san) {
+            Some(Ok(id)) => id,
+            Some(Err(_)) => {
+                tracing::warn!(
+                    uri = %parts.uri,
+                    "auth.reject: identidad del SAN inválida (plano peer)"
+                );
+                return Err((StatusCode::UNAUTHORIZED, "invalid SAN identity"));
+            }
+            None => {
                 tracing::warn!(
                     uri = %parts.uri,
                     "auth.reject: cert de cliente sin SAN/CN utilizable (plano peer)"
                 );
-                (StatusCode::UNAUTHORIZED, "no usable SAN in client cert")
-            })?;
+                return Err((StatusCode::UNAUTHORIZED, "no usable SAN in client cert"));
+            }
+        };
         Ok(Self { node_id: node })
     }
 }
@@ -352,12 +364,16 @@ fn select_identity(
 ///
 /// Si el SAN no parece URI, se devuelve tal cual: muchos despliegues usan
 /// directamente el SAE id como CN o DNS.
-fn sae_id_from_san(s: &str) -> SaeId {
-    SaeId::new(strip_known_sae_prefix(s).to_owned())
+/// Ids que vienen de un certificado: validados como cualquier id de fuera
+/// (B-09). El de nodo además en minúsculas, como hace `cert_identity` en el
+/// resto de planos — el mismo cert no puede ser dos claves de mapa distintas
+/// según quién lo mire.
+fn sae_id_from_san(s: &str) -> Result<SaeId, common::ids::InvalidId> {
+    SaeId::try_new(strip_known_sae_prefix(s).to_owned())
 }
 
-fn node_id_from_san(s: &str) -> NodeId {
-    NodeId::new(strip_known_dkms_prefix(s).to_owned())
+fn node_id_from_san(s: &str) -> Result<NodeId, common::ids::InvalidId> {
+    NodeId::try_new(strip_known_dkms_prefix(s).to_ascii_lowercase())
 }
 
 fn strip_known_sae_prefix(s: &str) -> &str {
@@ -450,8 +466,19 @@ mod tests {
 
     #[test]
     fn sae_prefixes_are_stripped() {
-        assert_eq!(sae_id_from_san("urn:dkms:sae:sae-7").as_str(), "sae-7");
-        assert_eq!(sae_id_from_san("sae://org/sae-7").as_str(), "sae-7");
-        assert_eq!(sae_id_from_san("sae-7").as_str(), "sae-7");
+        assert_eq!(
+            sae_id_from_san("urn:dkms:sae:sae-7").unwrap().as_str(),
+            "sae-7"
+        );
+        assert_eq!(
+            sae_id_from_san("sae://org/sae-7").unwrap().as_str(),
+            "sae-7"
+        );
+        assert_eq!(sae_id_from_san("sae-7").unwrap().as_str(), "sae-7");
+        assert!(sae_id_from_san("urn:dkms:sae:sae 7").is_err());
+        assert_eq!(
+            node_id_from_san("dkms://DKMS-2").unwrap().as_str(),
+            "dkms-2"
+        );
     }
 }

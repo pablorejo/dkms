@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{PeerCfg, PeerTransport};
 
@@ -115,7 +115,31 @@ impl PeerRegistry {
             .filter(|(id, _)| self.local.contains(*id))
             .map(|(id, pc)| (id.clone(), pc.clone()))
             .collect();
+        // Validación y cota de lo que dice la SDN (auditoría 2026-09-03,
+        // B-06/B-09): la SDN no es de confianza y cada peer aceptado reserva
+        // estado (buffers, flujo, commodity en /demand).
+        const MAX_PEERS_FROM_SDN: usize = 1024;
+        let mut accepted = 0usize;
         for p in peers {
+            if !common::ids::is_valid_id(&p.dkms_id)
+                || !common::ids::is_valid_id(&p.orr_id)
+                || p.endpoint.is_empty()
+                || p.endpoint.len() > 256
+                || p.endpoint
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control())
+            {
+                warn!(dkms = ?p.dkms_id, "peer de la SDN con id o endpoint inválido; ignorado");
+                continue;
+            }
+            if accepted >= MAX_PEERS_FROM_SDN {
+                warn!(
+                    max = MAX_PEERS_FROM_SDN,
+                    "la SDN manda más peers de los admitidos; el resto se ignora"
+                );
+                break;
+            }
+            accepted += 1;
             let endpoint = if p.endpoint.contains("//") {
                 p.endpoint.clone()
             } else {

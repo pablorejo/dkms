@@ -20,6 +20,14 @@ pub enum DkmsError {
     #[error("unknown sae: {0}")]
     UnknownSae(SaeId),
 
+    /// Cert de red válido pero no es un peer DKMS de este nodo (B-05).
+    #[error("forbidden: {0} is not a known peer dkms of this node")]
+    UnknownPeer(String),
+
+    /// El peer ha agotado su cota de claves pendientes aquí (B-02/R4).
+    #[error("pending store full for peer {peer}: their SAEs are not retrieving")]
+    PendingFull { peer: String },
+
     #[error("rate-limited: sae {sae} requested {requested} tokens, {available} available")]
     RateLimited {
         sae: SaeId,

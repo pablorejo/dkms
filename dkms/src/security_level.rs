@@ -35,6 +35,16 @@ fn find_in(ext: &Option<Vec<Map<String, Value>>>) -> Option<&str> {
 /// * Si no aparece (o el optional es inválido): `None` → el llamador aplica su
 ///   default (por-peer o global).
 pub fn requested(req: &Etsi014KeyRequest) -> Result<Option<SecurityLevel>, String> {
+    // Una extensión OBLIGATORIA que no entendemos se rechaza, no se ignora
+    // (ETSI GS QKD 014; auditoría 2026-09-03, B-13): el SAE que la pidió
+    // creería que se ha honrado.
+    if let Some(maps) = req.extension_mandatory.as_ref() {
+        for m in maps {
+            if let Some(k) = m.keys().find(|k| k.as_str() != EXT_KEY) {
+                return Err(format!("unsupported mandatory extension: {k:?}"));
+            }
+        }
+    }
     if let Some(tok) = find_in(&req.extension_mandatory) {
         return SecurityLevel::from_token(tok)
             .map(Some)

@@ -54,6 +54,8 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use common::security::KeyGrade;
+
 use common::{
     ids::{KeyId, NodeId, SaeId},
     metrics::Metrics,
@@ -143,6 +145,13 @@ fn check_request_limits(body: &Etsi014KeyRequest, n_saes: usize) -> Result<()> {
     }
     Ok(())
 }
+
+/// Contadores globales de descartes en los ingresos (auditoría 2026-09-03):
+/// una línea de aviso en las potencias de dos, nunca un estado por id ajeno.
+static UNKNOWN_DELIVERY_SOURCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UNKNOWN_PEER_ON_PEER_PLANE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PENDING_KEY_CONFLICTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// ¿`requester` es un SAE que este DKMS (`node_id`) declara servir?
 /// La fuente es el mapa `sae_bindings` (SAE → node_id del DKMS donde
@@ -519,67 +528,119 @@ impl DkmsService {
         //    teóricamente segura porque OTP con clave QKD).
         let mut envelopes: Vec<(NodeId, Etsi020ExtKeyContainer)> =
             Vec::with_capacity(remote_groups.len());
+        // Claves de transporte sacadas del buffer para sobres que AÚN no han
+        // salido por el cable (auditoría 2026-09-03, B-03). Si algo falla
+        // antes de emitir, vuelven al frente del buffer: no hay reúso de OTP
+        // porque el texto cifrado nunca dejó el proceso. Antes se perdían —y
+        // los tokens SÍ se devolvían—, así que un SAE con un destino caído
+        // drenaba el buffer_enc de un peer sano a coste cero.
+        let mut popped: Vec<(NodeId, KeyGrade, TransportKey)> = Vec::new();
         let mut transport_keys_consumed = 0usize;
+        let mut prep_err: Option<DkmsError> = None;
         for (peer_node, peer_saes) in remote_groups.iter() {
             // Grade preference to serve this peer = the request's security
             // level (per-request override, else per-peer/global default).
             let level =
                 requested_level.unwrap_or_else(|| self.cfg.security_level_for(peer_node.as_str()));
-            let envelope = self.build_ext_keys_envelope(
+            match self.build_ext_keys_envelope(
                 master,
                 peer_node,
                 peer_saes,
                 &session_keys,
                 level.serve_pref(),
-            )?;
-            transport_keys_consumed += envelope.keys.len();
-            envelopes.push((peer_node.clone(), envelope));
+            ) {
+                Ok((envelope, keys)) => {
+                    transport_keys_consumed += envelope.keys.len();
+                    popped.extend(keys.into_iter().map(|(g, k)| (peer_node.clone(), g, k)));
+                    envelopes.push((peer_node.clone(), envelope));
+                }
+                Err(e) => {
+                    prep_err = Some(e);
+                    break;
+                }
+            }
         }
 
         type SendFuture =
-            std::pin::Pin<Box<dyn std::future::Future<Output = Result<NodeId>> + Send>>;
+            std::pin::Pin<Box<dyn std::future::Future<Output = (NodeId, Result<()>)> + Send>>;
         let mut futures: Vec<SendFuture> = Vec::with_capacity(envelopes.len());
 
-        for (peer_node, envelope) in envelopes.into_iter() {
-            let pc = self.peer_client.clone().ok_or_else(|| {
-                DkmsError::BadRequest(format!(
-                    "peer dkms {peer_node} ETSI020 HTTP peer_client missing — \
-                     orchestator misconfig (tls.cert_path/peer_dkms_ca required)"
-                ))
-            })?;
-            let peer_cfg = self.peers.get(peer_node.as_str()).ok_or_else(|| {
-                DkmsError::BadRequest(format!("peer dkms {peer_node} not configured"))
-            })?;
-            let peer_id_str = peer_node.to_string();
-            let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
-            futures.push(Box::pin(async move {
-                let r = tokio::time::timeout(
-                    send_timeout,
-                    pc.send_ext_keys(&peer_id_str, &peer_cfg, &envelope),
-                )
-                .await;
-                match r {
-                    Ok(Ok(_ack)) => Ok(peer_node),
-                    Ok(Err(e)) => Err(e),
-                    Err(_) => Err(DkmsError::PeerAckTimeout { peer: peer_id_str }),
-                }
-            }));
+        if prep_err.is_none() {
+            for (peer_node, envelope) in envelopes.into_iter() {
+                let Some(pc) = self.peer_client.clone() else {
+                    prep_err = Some(DkmsError::BadRequest(format!(
+                        "peer dkms {peer_node} ETSI020 HTTP peer_client missing — \
+                         orchestator misconfig (tls.cert_path/peer_dkms_ca required)"
+                    )));
+                    break;
+                };
+                let Some(peer_cfg) = self.peers.get(peer_node.as_str()) else {
+                    prep_err = Some(DkmsError::BadRequest(format!(
+                        "peer dkms {peer_node} not configured"
+                    )));
+                    break;
+                };
+                let peer_id_str = peer_node.to_string();
+                let send_timeout = Duration::from_millis(self.cfg.request.peer_send_timeout_ms);
+                futures.push(Box::pin(async move {
+                    let r = tokio::time::timeout(
+                        send_timeout,
+                        pc.send_ext_keys(&peer_id_str, &peer_cfg, &envelope),
+                    )
+                    .await;
+                    let out = match r {
+                        Ok(Ok(_ack)) => Ok(()),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(DkmsError::PeerAckTimeout { peer: peer_id_str }),
+                    };
+                    (peer_node, out)
+                }));
+            }
         }
 
-        let results = join_all(futures).await;
-        let failures: Vec<&DkmsError> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-        if !failures.is_empty() {
-            for e in &failures {
-                error!(error = %e, "key distribution failure");
-                self.resync_transport_buffer_if_stale(e);
+        if let Some(e) = prep_err {
+            // NADA ha salido: se devuelve todo, claves (al frente, en orden) y
+            // tokens, y se retractan las entradas locales.
+            for (peer_node, grade, tk) in popped.into_iter().rev() {
+                self.pool
+                    .for_peer(peer_node.as_str())
+                    .enc(grade)
+                    .push_front(tk);
             }
-            // Reembolso y retracción local.
             if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
                 sbb.refund_many(&remote_peer_ids, master, cost_per_peer);
             } else {
-                // Legacy path: cost = cost_per_peer × num_dkms_destinations,
-                // que es lo que se consumió en la rama legacy.
                 let legacy_cost = cost_per_peer as u64 * (remote_peer_ids.len() as u64).max(1);
+                self.buckets.refund(master, legacy_cost);
+            }
+            for (_uuid, kid, _k) in &session_keys {
+                self.pending.force_remove(kid);
+            }
+            return Err(e);
+        }
+        // A partir de aquí los sobres salen: las claves popeadas están gastadas
+        // pase lo que pase (un timeout no dice si el peer las recibió).
+        drop(popped);
+
+        let results = join_all(futures).await;
+        let failed: Vec<(NodeId, DkmsError)> = results
+            .into_iter()
+            .filter_map(|(p, r)| r.err().map(|e| (p, e)))
+            .collect();
+        if !failed.is_empty() {
+            for (_, e) in &failed {
+                error!(error = %e, "key distribution failure");
+                self.resync_transport_buffer_if_stale(e);
+            }
+            // Reembolso SOLO de los destinos que fallaron y retracción local.
+            // A los que sí se emitió, el material se gastó de verdad: devolver
+            // también sus tokens dejaba el bucket sin acotar la destrucción de
+            // claves de transporte (B-03).
+            let failed_ids: Vec<String> = failed.iter().map(|(p, _)| p.to_string()).collect();
+            if let Some(sbb) = self.sae_buffer_buckets.as_ref() {
+                sbb.refund_many(&failed_ids, master, cost_per_peer);
+            } else {
+                let legacy_cost = cost_per_peer as u64 * (failed_ids.len() as u64).max(1);
                 self.buckets.refund(master, legacy_cost);
             }
             for (_uuid, kid, _k) in &session_keys {
@@ -591,9 +652,9 @@ impl DkmsService {
             );
             // Devolver el primer error como representativo (502/upstream).
             return Err(DkmsError::PeerUnreachable {
-                peer: failures
+                peer: failed
                     .first()
-                    .map(|e| e.to_string())
+                    .map(|(_, e)| e.to_string())
                     .unwrap_or_else(|| "unknown".into()),
                 source: anyhow::anyhow!("one or more peer DKMSs failed during key distribution"),
             });
@@ -623,11 +684,15 @@ impl DkmsService {
         body: Etsi014KeyIDs,
     ) -> Result<Etsi014KeyContainer> {
         self.authorize_local_sae(requester)?;
-        let _ = master; // master_SAE_ID viaja por auditoría; la autoría real la fija mTLS.
+        // El `master_SAE_ID` del path se ata al iniciador de la entrada
+        // (B-01): la semántica ETSI-014 es «clave compartida con ESE
+        // master», y sin esto un SAE no notaba que la clave la puso otro.
         let mut out = Vec::with_capacity(body.key_ids.len());
         for kid in &body.key_ids {
             let key_id = KeyId::new(kid.key_id.to_string());
-            let (material, _initiator) = self.pending.take_for_sae(&key_id, requester)?;
+            let (material, _initiator) =
+                self.pending
+                    .take_for_sae_of_master(&key_id, requester, Some(master))?;
             out.push(Etsi014Key {
                 key_id: kid.key_id,
                 key_id_extension: None,
@@ -652,19 +717,74 @@ impl DkmsService {
         body.validate()
             .map_err(|e| DkmsError::BadRequest(e.to_string()))?;
 
-        let initiator = SaeId::new(body.initiator_sae_id.clone());
+        // Cotas de ingreso (auditoría 2026-09-03, B-02/R4): las mismas que
+        // el egress ETSI-014 aplica en `check_request_limits`. Sin ellas un
+        // peer metía miles de destinos × miles de claves en un POST y cada
+        // clave clonaba el conjunto entero de destinos.
+        if body.target_sae_ids.len() > MAX_SAE_ID_COUNT {
+            return Err(DkmsError::BadRequest(format!(
+                "too many target_sae_ids ({}), max {MAX_SAE_ID_COUNT}",
+                body.target_sae_ids.len()
+            )));
+        }
+        if body.keys.len() > MAX_KEY_PER_REQUEST as usize {
+            return Err(DkmsError::BadRequest(format!(
+                "too many keys ({}), max {MAX_KEY_PER_REQUEST}",
+                body.keys.len()
+            )));
+        }
+        // Solo `ttl_seconds` se entiende como extensión obligatoria (B-13):
+        // ETSI dice que una obligatoria que no se honra se rechaza, no se
+        // ignora en silencio.
+        if let Some(unknown) = body
+            .extension_mandatory
+            .as_ref()
+            .and_then(|m| m.keys().find(|k| k.as_str() != "ttl_seconds"))
+        {
+            return Err(DkmsError::BadRequest(format!(
+                "unsupported mandatory extension: {unknown:?}"
+            )));
+        }
+
+        // Ids de fuera: validados antes de entrar en mapas o logs (B-09).
+        let initiator = SaeId::try_new(body.initiator_sae_id.clone())
+            .map_err(|e| DkmsError::BadRequest(format!("initiator_sae_id: {e}")))?;
         let authorized: HashSet<SaeId> = body
             .target_sae_ids
             .iter()
-            .map(|s| SaeId::new(s.clone()))
-            .collect();
+            .map(|s| SaeId::try_new(s.clone()))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| DkmsError::BadRequest(format!("target_sae_ids: {e}")))?;
+        // Un peer solo puede dejar claves para SAEs que ESTE nodo sirve
+        // (B-01): si los destinos no son nuestros, la entrada no le sirve a
+        // nadie salvo a quien quiera ocupar un `key_id` ajeno.
+        if self.cfg.sae.enforce_authorization {
+            if let Some(bad) = authorized
+                .iter()
+                .find(|s| !sae_served_locally(&self.cfg.sae_bindings, &self.cfg.node_id, s))
+            {
+                warn!(%peer, sae = %bad, "dkms.ext_keys: destino que este nodo no sirve; rechazado");
+                return Err(DkmsError::BadRequest(format!(
+                    "target sae {bad} is not served by this dkms"
+                )));
+            }
+        }
 
+        // El TTL lo propone el peer; se acota a algo del orden del nuestro
+        // (B-02): 7 días de vida por entrada era memoria que el peer decidía.
+        let max_peer_ttl = Duration::from_secs(
+            self.cfg
+                .pending
+                .default_ttl_secs
+                .saturating_mul(4)
+                .max(3_600),
+        );
         let ttl = body
             .extension_mandatory
             .as_ref()
             .and_then(|m| m.get("ttl_seconds"))
             .and_then(|v| v.as_u64())
-            .map(Duration::from_secs);
+            .map(|s| Duration::from_secs(s).min(max_peer_ttl));
 
         let peer_buffers = self.pool.for_peer(peer.as_str());
         let mut ack_ids: Vec<Etsi020KeyID> = Vec::with_capacity(body.keys.len());
@@ -679,7 +799,8 @@ impl DkmsService {
                     DkmsError::BadRequest("Etsi020Key.extension.transport_key_id missing".into())
                 })?
                 .to_owned();
-            let tk_id = KeyId::new(transport_key_id.clone());
+            let tk_id = KeyId::try_new(transport_key_id.clone())
+                .map_err(|e| DkmsError::BadRequest(format!("transport_key_id: {e}")))?;
             let tk = peer_buffers.dec.take_by_id(&tk_id).ok_or_else(|| {
                 DkmsError::TransportKeyMissing {
                     peer: peer.to_string(),
@@ -701,7 +822,7 @@ impl DkmsService {
                 .and_then(|v| v.as_str())
             {
                 let actual = crate::southbound::orr::key_digest(&k.key_id.to_string(), &plaintext);
-                if actual != expected {
+                if !common::crypto::ct_eq(actual.as_bytes(), expected.as_bytes()) {
                     self.flow.recv_corrupt(peer.as_str(), 1);
                     warn!(
                         %peer,
@@ -718,14 +839,31 @@ impl DkmsService {
                 }
             }
 
-            self.pending.insert(
+            match self.pending.insert_from_peer(
                 KeyId::new(k.key_id.to_string()),
+                peer.as_str(),
                 initiator.clone(),
                 authorized.clone(),
                 plaintext,
                 ttl,
-            );
-            ack_ids.push(Etsi020KeyID::new(k.key_id));
+            ) {
+                Ok(()) => ack_ids.push(Etsi020KeyID::new(k.key_id)),
+                Err(crate::state::pending::PendingInsertError::Occupied) => {
+                    // Nunca se pisa (B-01). No se acusa: el peer la verá
+                    // expirar, que es lo correcto para un id en conflicto.
+                    let n =
+                        PENDING_KEY_CONFLICTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if common::log_throttle::nth_is_loud(n) {
+                        warn!(%peer, key_id = %k.key_id, conflicts = n + 1,
+                              "dkms.ext_keys: key_id ya presente en el PendingStore; descartada sin acusar (B-01)");
+                    }
+                }
+                Err(crate::state::pending::PendingInsertError::OriginFull) => {
+                    return Err(DkmsError::PendingFull {
+                        peer: peer.to_string(),
+                    });
+                }
+            }
         }
 
         // ETSI 020 espera un único `target_sae_id` por ACK; con multicast
@@ -840,6 +978,10 @@ impl DkmsService {
         );
     }
 
+    /// Devuelve el sobre y las claves de transporte que gastó (con su grado),
+    /// para que el llamador pueda devolverlas al buffer si el sobre no llega
+    /// a emitirse (B-03). Si falla a medias, las ya sacadas para ESTE sobre
+    /// vuelven al frente aquí mismo.
     fn build_ext_keys_envelope(
         &self,
         master: &SaeId,
@@ -847,19 +989,28 @@ impl DkmsService {
         peer_saes: &[SaeId],
         session_keys: &[(Uuid, KeyId, Zeroizing<Vec<u8>>)],
         serve_pref: &[common::security::KeyGrade],
-    ) -> Result<Etsi020ExtKeyContainer> {
+    ) -> Result<(Etsi020ExtKeyContainer, Vec<(KeyGrade, TransportKey)>)> {
         let peer_buffers = self.pool.for_peer(peer_node.as_str());
         let mut etsi_keys = Vec::with_capacity(session_keys.len());
+        let mut popped: Vec<(KeyGrade, TransportKey)> = Vec::with_capacity(session_keys.len());
+        let give_back = |popped: Vec<(KeyGrade, TransportKey)>| {
+            for (g, k) in popped.into_iter().rev() {
+                peer_buffers.enc(g).push_front(k);
+            }
+        };
         for (uuid, _kid, k_bytes) in session_keys {
             // Pop a transport key of the preferred grade (the request's
             // security level decides the order). A QKD-grade key never comes
             // from a PQC buffer and vice-versa.
-            let tk = peer_buffers.enc_pop_pref(serve_pref).ok_or_else(|| {
-                DkmsError::TransportBufferEmpty {
+            let Some((grade, tk)) = peer_buffers.enc_pop_pref(serve_pref) else {
+                give_back(popped);
+                return Err(DkmsError::TransportBufferEmpty {
                     peer: peer_node.to_string(),
-                }
-            })?;
+                });
+            };
             if tk.bytes.len() < TRANSPORT_KEY_BYTES {
+                // Material corrupto: esa clave no vuelve; las anteriores sí.
+                give_back(popped);
                 return Err(DkmsError::Crypto(format!(
                     "transport key too short ({} bytes, need {})",
                     tk.bytes.len(),
@@ -899,6 +1050,7 @@ impl DkmsService {
                 value: Base64Bytes::new(ciphertext),
                 extension: Some(ext),
             });
+            popped.push((grade, tk));
         }
         let mut extension_mandatory = serde_json::Map::new();
         extension_mandatory.insert(
@@ -906,14 +1058,33 @@ impl DkmsService {
             Value::from(self.cfg.pending.default_ttl_secs),
         );
 
-        Ok(Etsi020ExtKeyContainer {
-            keys: etsi_keys,
-            initiator_sae_id: master.to_string(),
-            target_sae_ids: peer_saes.iter().map(|s| s.to_string()).collect(),
-            ack_callback_url: format!("https://{}/kmapi/v1/ext_keys/ack", self.cfg.node_id),
-            extension_mandatory: Some(extension_mandatory),
-            extension_optional: None,
-        })
+        Ok((
+            Etsi020ExtKeyContainer {
+                keys: etsi_keys,
+                initiator_sae_id: master.to_string(),
+                target_sae_ids: peer_saes.iter().map(|s| s.to_string()).collect(),
+                ack_callback_url: format!("https://{}/kmapi/v1/ext_keys/ack", self.cfg.node_id),
+                extension_mandatory: Some(extension_mandatory),
+                extension_optional: None,
+            },
+            popped,
+        ))
+    }
+
+    /// ¿Es `id` un peer DKMS de este nodo (node.yml o SDN)? Un cert de red
+    /// válido no basta para entrar en el plano peer (B-05): la net-ca la
+    /// comparten también los QKC, los ORR y la SDN, y el modelo de amenaza
+    /// no se fía de ninguno de ellos como DKMS.
+    pub fn require_known_peer(&self, id: &NodeId) -> Result<()> {
+        if self.peers.get(id.as_str()).is_some() {
+            return Ok(());
+        }
+        let n = UNKNOWN_PEER_ON_PEER_PLANE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if common::log_throttle::nth_is_loud(n) {
+            warn!(peer = %id, rejected = n + 1,
+                  "plano peer: cert de red válido pero no es un peer DKMS conocido (403)");
+        }
+        Err(DkmsError::UnknownPeer(id.to_string()))
     }
 
     pub async fn run_background_tasks(self) -> Result<()> {
@@ -1030,6 +1201,23 @@ impl DkmsService {
             })?
             .clone();
         let ack_endpoint = app.get(HDR_ACK_ENDPOINT).cloned();
+
+        // Un origen que no es un peer conocido no toca estado (auditoría
+        // 2026-09-03, B-04): los tres caminos de error del sello de abajo
+        // creaban un `PeerFlow` permanente —y una línea de estado cada 5 s—
+        // por cada id inventado que llegara vía el ORR de un miembro. El id
+        // se valida antes de mirarlo siquiera (B-09).
+        if !common::ids::is_valid_id(&source_dkms) || self.peers.get(&source_dkms).is_none() {
+            let n = UNKNOWN_DELIVERY_SOURCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(
+                    source = ?source_dkms,
+                    dropped = n + 1,
+                    "orr delivery de un origen que no es peer conocido; descartada sin tocar estado"
+                );
+            }
+            return Ok(());
+        }
 
         let bits = app
             .get(HDR_KEY_SIZE_BITS)

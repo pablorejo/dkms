@@ -68,7 +68,10 @@ impl SecureKeyBuffer {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            inner: Mutex::new(VecDeque::with_capacity(capacity.min(4096))),
+            // Reserva perezosa (B-06): la SDN decide cuántos peers hay, y
+            // reservar 3×4096 entradas por peer antes de tener una sola
+            // clave eran ~590 KB por id que nos dieran.
+            inner: Mutex::new(VecDeque::with_capacity(capacity.min(256))),
         }
     }
 
@@ -125,6 +128,13 @@ impl SecureKeyBuffer {
     /// Consume **la siguiente** clave en orden FIFO (rol ENC).
     pub fn pop_oldest(&self) -> Option<TransportKey> {
         self.inner.lock().pop_front()
+    }
+
+    /// Devuelve al FRENTE una clave que se sacó con `pop_oldest` y cuyo
+    /// sobre NUNCA salió por el cable (B-03). Solo entonces: una clave OTP
+    /// que ya cifró algo transmitido no puede volver a usarse.
+    pub fn push_front(&self, key: TransportKey) {
+        self.inner.lock().push_front(key);
     }
 
     /// Consume **una clave específica por su `KeyId`** (rol DEC). El DKMS

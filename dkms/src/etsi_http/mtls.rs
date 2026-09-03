@@ -15,6 +15,7 @@
 //! Sin upgrade/ALPN dance — los SAEs y DKMS clientes ya saben que tienen
 //! que abrir HTTP/2.
 
+static ACCEPT_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::{
     net::SocketAddr,
     sync::{
@@ -130,7 +131,12 @@ pub async fn serve_mtls(
         let (tcp, peer_addr) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
-                error!(error = %e, "tcp accept failed");
+                let n = ACCEPT_FAILED.fetch_add(1, Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    error!(failed = n + 1, error = %e, "tcp accept failed");
+                }
+                // EMFILE y compañía: sin pausa esto es un bucle caliente (R8).
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -158,19 +164,27 @@ pub async fn serve_mtls(
             {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
-                    stats.failed.fetch_add(1, Ordering::Relaxed);
-                    warn!(
-                        %peer_addr,
-                        plane = plane_label,
-                        error = %e,
-                        handshake_ms = t0.elapsed().as_millis() as u64,
-                        "tls handshake failed"
-                    );
+                    // Pre-auth y sin coste para quien lo provoca: el aviso
+                    // habla en las potencias de dos (B-10), el contador lo
+                    // lleva todo.
+                    let n = stats.failed.fetch_add(1, Ordering::Relaxed);
+                    if common::log_throttle::nth_is_loud(n) {
+                        warn!(
+                            %peer_addr,
+                            plane = plane_label,
+                            error = %e,
+                            failed = n + 1,
+                            handshake_ms = t0.elapsed().as_millis() as u64,
+                            "tls handshake failed"
+                        );
+                    }
                     return;
                 }
                 Err(_) => {
-                    stats.failed.fetch_add(1, Ordering::Relaxed);
-                    warn!(%peer_addr, plane = plane_label, "tls handshake timeout (B7)");
+                    let n = stats.failed.fetch_add(1, Ordering::Relaxed);
+                    if common::log_throttle::nth_is_loud(n) {
+                        warn!(%peer_addr, plane = plane_label, failed = n + 1, "tls handshake timeout (B7)");
+                    }
                     return;
                 }
             };

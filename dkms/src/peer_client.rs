@@ -122,7 +122,7 @@ impl PeerHttpClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_snippet(resp).await;
             return Err(DkmsError::PeerRejected {
                 peer: peer_node.to_owned(),
                 status: status.as_u16(),
@@ -217,7 +217,7 @@ impl PeerHttpClient {
         })?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_snippet(resp).await;
             return Err(DkmsError::PeerRejected {
                 peer: peer_node.to_owned(),
                 status: status.as_u16(),
@@ -267,3 +267,24 @@ fn parse_ca_bundle(pem: &[u8]) -> Result<Vec<Certificate>> {
 // `use Arc` superfluo.
 #[allow(dead_code)]
 fn _arc_keepalive(_: &Arc<()>) {}
+
+/// Lee como mucho 512 bytes del cuerpo de error de un peer y los devuelve
+/// ESCAPADOS (`{:?}`): un peer no elige ni el tamaño ni el contenido de
+/// nuestro log ni de nuestro mensaje de error (auditoría 2026-09-03, B-08).
+async fn error_body_snippet(mut resp: reqwest::Response) -> String {
+    const MAX: usize = 512;
+    let mut buf: Vec<u8> = Vec::with_capacity(MAX);
+    while buf.len() < MAX {
+        match resp.chunk().await {
+            Ok(Some(c)) => {
+                let take = (MAX - buf.len()).min(c.len());
+                buf.extend_from_slice(&c[..take]);
+                if take < c.len() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    format!("{:?}", String::from_utf8_lossy(&buf))
+}

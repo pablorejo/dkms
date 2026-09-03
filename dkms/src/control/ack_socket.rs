@@ -47,6 +47,7 @@ const MAX_ACK_FROM: usize = 128;
 /// ACKs con `from` desconocido o absurdo, descartados sin crear estado por-peer.
 /// Global (una sola entrada), no por `from` — ahí estaba la fuga (B5).
 static UNKNOWN_ACK_FROM: AtomicU64 = AtomicU64::new(0);
+static BAD_ACK_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 /// ¿Se procesa este ACK? `from` acotado y perteneciente al registro de peers.
 /// Aislado para poder testearlo sin un `Generator`.
@@ -106,8 +107,12 @@ pub async fn serve(generator: Arc<Generator>, addr: std::net::SocketAddr) -> any
             continue;
         };
         let _ = stream.set_nodelay(true);
-        if seen.lock().insert(peer.ip()) {
-            info!(from_ip = %peer.ip(), "dkms.ack_socket: primera conexión de ACK desde esta IP");
+        {
+            // Acotado (B-10): con IPv6 las direcciones son gratis.
+            let mut s = seen.lock();
+            if s.len() < 1024 && s.insert(peer.ip()) {
+                info!(from_ip = %peer.ip(), "dkms.ack_socket: primera conexión de ACK desde esta IP");
+            }
         }
         debug!(%peer, "dkms.ack_socket accept");
         let gen = generator.clone();
@@ -155,7 +160,12 @@ async fn handle_conn(
         let frame: AckFrame = match serde_json::from_str(trimmed) {
             Ok(f) => f,
             Err(e) => {
-                warn!(error = %e, line = trimmed, %remote, "dkms.ack_socket bad frame");
+                // Escapado y truncado (B-10): bytes elegidos por quien conecta.
+                let shown: String = trimmed.chars().take(200).collect();
+                let n = BAD_ACK_FRAMES.fetch_add(1, Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    warn!(error = %e, line = ?shown, %remote, bad = n + 1, "dkms.ack_socket bad frame");
+                }
                 continue;
             }
         };
