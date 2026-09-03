@@ -24,6 +24,7 @@
 //! (hilo i → esclavo i mod N), como el original: así la medida es la cadena
 //! DKMS→ORR→QKC y no el coste de reconectar.
 
+#![forbid(unsafe_code)]
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -83,6 +84,12 @@ struct Args {
     /// Límite de peticiones/s por hilo (0 = sin límite).
     #[arg(long = "rate-cap", default_value_t = 0.0)]
     rate_cap: f64,
+    /// Pausa (ms) tras un 429/503 antes de reintentar (0 = ninguna). En bucle
+    /// cerrado con el bucket por SAE agotado, sin pausa cada flujo gira a
+    /// ~1000 rechazos/s y a N=100 (9900 flujos) lo que se mide es la ruta de
+    /// rechazo del DKMS, no la malla.
+    #[arg(long = "backoff-ms", default_value_t = 0)]
+    backoff_ms: u64,
     #[arg(long, default_value_t = 20.0)]
     timeout: f64,
     /// CSV de salida (obligatorio salvo en `--roundtrip`).
@@ -268,7 +275,11 @@ async fn worker(
             }
         };
 
-        if args.aggregate_throttled && (status == "429" || status == "503") {
+        let is_throttled = status == "429" || status == "503";
+        if is_throttled && args.backoff_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(args.backoff_ms)).await;
+        }
+        if args.aggregate_throttled && is_throttled {
             match throttled.iter_mut().find(|(s, _)| *s == status) {
                 Some((_, n)) => *n += 1,
                 None => throttled.push((status.clone(), 1)),
@@ -465,8 +476,15 @@ fn main() -> Result<()> {
     // Pocos worker threads por proceso: la campaña levanta un proceso por
     // maestro (N=30 ⇒ 30 procesos). Un runtime con `nproc` hilos cada uno
     // ahogaría el nodo y mediría el generador de carga, no el sistema.
+    // `SAE_LOAD_WORKERS` lo sube para un maestro con muchos destinos (N=100
+    // ⇒ 99 flujos por proceso).
+    let workers = std::env::var("SAE_LOAD_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|w| *w >= 1)
+        .unwrap_or(2);
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(workers)
         .enable_all()
         .build()?;
 

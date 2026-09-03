@@ -90,3 +90,9 @@ docs/Paper_congreso/
 # Certificados pregenerados para CESGA (claves privadas) y target de la VM bookworm
 certs-pregen/
 target-bookworm/
+
+# Targets alternativos (target-local para el build local cuando target/ tiene artefactos de root del contenedor CI)
+/target-*
+
+# Estado de la campaña 2026-09 en el árbol de CESGA (GIT_SHA, celdas, slurm)
+/campaign-2026-09/

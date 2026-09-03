@@ -41,14 +41,16 @@
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
 #
-#   DKMS_MESH_ACK_TRANSPORT     socket (default) | etsi020: ACK por mTLS y, con
-#                              etsi020, el listener del socket apagado
+#   DKMS_MESH_ACK_TRANSPORT     etsi020 (default del binario desde 2026-09-03:
+#                              ACK por mTLS, listener del socket apagado) |
+#                              socket: el TCP plano heredado, brazo de comparación
 #   DKMS_MESH_PQC_REKEY_SECS    pqc_rekey_secs de los enlaces PQC (default 3600)
 #   DKMS_MESH_E2E_REKEY_SECS    transport_e2e.rekey_secs del DKMS (default 3600)
 #   DKMS_MESH_ROTATION_MS       rotation_period_ms del ORR (default 1 h)
 #   DKMS_MESH_MAX_HOPS          default_max_hops del DKMS (0 = relé; 1 = cebolla e2e)
-#   DKMS_MESH_BOOTSTRAP_TRUST   tofu (default) | strict: el ORR exige anuncios de
-#                              pubkey firmados con el cert de nodo (sin verify keys)
+#   DKMS_MESH_BOOTSTRAP_TRUST   strict (default del binario desde 2026-09-03: el
+#                              ORR exige anuncios de pubkey firmados con el cert
+#                              de nodo, sin verify keys) | tofu: brazo de comparación
 #   DKMS_MESH_LINK_TYPE         pqc (default) o qkd. En modo qkd se levanta un
 #                               quditto POR ARISTA —los dos QKC del enlace
 #                               apuntan al mismo, uno pide enc_keys y el otro
@@ -144,10 +146,11 @@ SIGNDIR=""
 R0="${DKMS_MESH_R0:-2000}"
 ALPHA="${DKMS_MESH_ALPHA:-0.2}"
 DIST_KM="${DKMS_MESH_DIST_KM:-5}"
-# Un quditto por arista, en 28xxx: los módulos del nodo n usan 20000+(n-1)*100
+# Un quditto por arista, en 30xxx: los módulos del nodo n usan 20000+(n-1)*100
+# (hasta 29909 con N=100), así que los quditto empiezan justo encima.
 # …+9, así que con N=70 llegan a 26909 — el antiguo 21000+idx CHOCABA con los
 # puertos del nodo 11 en adelante (el modo qkd nunca había corrido con N>10).
-qd_port() { echo $(( 28000 + $1 )); }
+qd_port() { echo $(( 30000 + $1 )); }
 
 # PSK del enlace (a,b), en base64. Determinista y simetrica: `edge_idx` ordena
 # los extremos, asi que los dos lados calculan el mismo valor sin coordinarse.
@@ -179,19 +182,25 @@ die() { echo "mesh: $*" >&2; exit 1; }
 # deliberado: obliga a que el otro extremo se entere por la SDN, que es la
 # propiedad que sostiene todo el diseño de auto-configuración.
 build_topology() {  # build_topology <N>
-    python3 - "$1" "$TOPO" "$SEED" <<'TOPO_PY' > "$DIR/topology.tsv"
+    python3 - "$1" "$TOPO" "$SEED" "$DIR/dist.tsv" <<'TOPO_PY' > "$DIR/topology.tsv"
 import os, random, sys
-n, topo, seed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+n, topo, seed, dist_path = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4]
 edges = set()
+# Distancia en km por arista, solo la custom la declara ("a-b:12.5"); el resto
+# hereda DKMS_MESH_DIST_KM al construir edges.tsv.
+dist = {}
 
 if topo == "custom":
     # Lista explicita de aristas en DKMS_MESH_EDGES: "1-2 2-3 3-10 ...".
     # Para medir topologias concretas (Petersen, C_n puro, contraejemplos)
     # sin inventar un generador por cada una.
     for e in os.environ["DKMS_MESH_EDGES"].split():
-        a, b = sorted(int(x) for x in e.split("-"))
+        ab, _, d = e.partition(":")
+        a, b = sorted(int(x) for x in ab.split("-"))
         assert 1 <= a < b <= n, f"arista fuera de rango: {e}"
         edges.add((a, b))
+        if d:
+            dist[(a, b)] = float(d)
 elif topo == "star":
     edges = {(1, k) for k in range(2, n + 1)}
 elif topo == "random":
@@ -227,11 +236,31 @@ for a, b in sorted(edges):
     declared[a].append(b)
 for k in range(1, n + 1):
     print("%d\t%s" % (k, " ".join(str(x) for x in declared[k])))
+with open(dist_path, "w") as fh:
+    for (a, b), d in sorted(dist.items()):
+        fh.write("%d\t%d\t%s\n" % (a, b, d))
 TOPO_PY
     # Lista plana de aristas con un índice estable: es lo que da su puerto a
     # cada quditto y lo que permite que los dos extremos apunten al mismo.
-    awk -F'\t' '{ n = split($2, v, " "); for (i = 1; i <= n; i++) print $1, v[i] }' \
-        "$DIR/topology.tsv" | awk '{ print NR-1, $1, $2 }' > "$DIR/edges.tsv"
+    # Cuarta columna: la distancia en km de la arista (la suya si la declaró
+    # la topología custom, DKMS_MESH_DIST_KM si no) — es lo que recibe su
+    # quditto y lo que el QKC anuncia a la SDN para dimensionarla.
+    python3 - "$DIR/topology.tsv" "$DIR/dist.tsv" "$DIST_KM" <<'EDGES_PY' > "$DIR/edges.tsv"
+import sys
+topo, distf, default = sys.argv[1], sys.argv[2], sys.argv[3]
+dist = {}
+for line in open(distf):
+    a, b, d = line.split()
+    dist[(int(a), int(b))] = d
+idx = 0
+for line in open(topo):
+    parts = line.rstrip("\n").split("\t")
+    a = int(parts[0])
+    for v in (parts[1].split() if len(parts) > 1 else []):
+        b = int(v)
+        print("%d %d %d %s" % (idx, a, b, dist.get((min(a, b), max(a, b)), default)))
+        idx += 1
+EDGES_PY
 }
 
 # Aristas que tocan al nodo n, en las dos direcciones -> "idx vecino".
@@ -255,6 +284,12 @@ edge_idx() {
         '($2 == a && $3 == b) || ($2 == b && $3 == a) { print $1; exit }' "$DIR/edges.tsv"
 }
 
+# Distancia en km de la arista {a,b} (cuarta columna de edges.tsv).
+edge_dist() {
+    awk -v a="$1" -v b="$2" \
+        '($2 == a && $3 == b) || ($2 == b && $3 == a) { print $4; exit }' "$DIR/edges.tsv"
+}
+
 write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
     local n=$1; shift
     {
@@ -266,7 +301,10 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
             echo 'control_tls: true'
             echo "certs_dir: \"$DIR/certs\""
         else
+            # El renderer pone control_tls (y https) POR DEFECTO desde
+            # 2026-09-03: el brazo en claro tiene que pedirlo por escrito.
             echo 'sdn_url: "127.0.0.1"'
+            echo 'control_tls: false'
         fi
         echo 'advertise_ip: "127.0.0.1"'
         echo "sdn_announce_secs: 5"
@@ -287,7 +325,7 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                     printf '  - {neighbor_id: %s, neighbor_addr: "127.0.0.1:%s", type: qkd, ' \
                         "$nb" "$(peer_port "$nb")"
                     printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s' \
-                        "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$DIST_KM"
+                        "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$(edge_dist "$n" "$nb")"
                     if [ "$FRAME_AUTH" != off ]; then
                         printf ', link_psk: "%s", frame_auth: %s' \
                             "$(link_psk "$n" "$nb")" "$FRAME_AUTH"
@@ -370,6 +408,9 @@ generate() {        # generate <N>
     printf 'listen_ip: "0.0.0.0"\npresence_ttl_secs: 90\n' > "$DIR/yml/node.sdn.yml"
     if [ "$CONTROL_TLS" = 1 ]; then
         printf 'control_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node.sdn.yml"
+    else
+        # Default del renderer desde 2026-09-03: el brazo en claro lo pide.
+        printf 'control_tls: false\n' >> "$DIR/yml/node.sdn.yml"
     fi
     python3 "$RENDER" sdn "$DIR/yml/node.sdn.yml" "$DIR/cfg/sdn" >/dev/null
 
@@ -539,6 +580,9 @@ write_boot() {      # el proceso principal del scope: mientras viva, vive el cgr
     cat > "$DIR/boot.sh" <<EOF
 #!/usr/bin/env bash
 export RUST_LOG=\${RUST_LOG:-info}
+# Descriptores: con N=100 un DKMS tiene ~100 peers + ~100 SAEs conectados y
+# la SDN 300 anunciantes; el 1024 por defecto no llega.
+ulimit -n "\$(ulimit -Hn)" 2>/dev/null || ulimit -n 65536 2>/dev/null || true
 : > "$DIR/logs/starts.tsv"
 mark() { printf '%s\\t%s\\n' "\$1" "\$(date +%s.%N)" >> "$DIR/logs/starts.tsv"; }
 mark sdn
@@ -549,13 +593,14 @@ echo \$! > "$DIR/logs/sdn.pid"
 # luego hay que distinguir de los de verdad.
 QD_LINES='__QD_LINES__'
 if [ -n "\$QD_LINES" ]; then
-  while read -r idx a b; do
+  while read -r idx a b dist; do
     [ -n "\$idx" ] || continue
     mark "quditto\$idx"
     # QUDITTO_TLS=off explícito: aquí quditto y sus dos QKCs comparten
     # 127.0.0.1 (el caso sidecar documentado); el default del binario es mTLS.
-    QUDITTO_TLS=off nohup "$BIN/quditto" --listen "127.0.0.1:\$((28000 + idx))" \
-        --r0 __R0__ --alpha __ALPHA__ --distance __DIST__ \
+    # La distancia es la de ESA arista (edges.tsv), no una global.
+    QUDITTO_TLS=off nohup "$BIN/quditto" --listen "127.0.0.1:\$((30000 + idx))" \
+        --r0 __R0__ --alpha __ALPHA__ --distance "\${dist:-__DIST__}" \
         > "$DIR/logs/quditto\$idx.log" 2>&1 &
     echo \$! > "$DIR/logs/quditto\$idx.pid"
   done <<< "\$QD_LINES"
@@ -629,9 +674,9 @@ cmd_up() {
     for b in "${needed[@]}"; do
         [ -x "$BIN/$b" ] || die "falta target/release/$b — cargo build --release"
     done
-    # Tope 70: los puertos de nodo (20000+100n) deben quedar bajo los 28xxx
-    # de los quditto. El límite de verdad lo pone la memoria de la máquina.
-    (( total >= 2 && total <= 70 )) || die "N entre 2 y 70 (puertos 20000+100n < 28000)"
+    # Tope 100: los puertos de nodo (20000+100(n-1)+9 ≤ 29909) deben quedar
+    # bajo los 30xxx de los quditto. El límite de verdad lo pone la memoria.
+    (( total >= 2 && total <= 100 )) || die "N entre 2 y 100 (puertos 20000+100n < 30000)"
     echo "mesh: generando $total nodos en $DIR  (topología: $TOPO$([ "$TOPO" = random ] && echo ", semilla $SEED"), enlaces $LINK_TYPE)"
     if [ "$LINK_TYPE" = qkd ]; then
         # cap = R0·10^(-alpha·d/10) es lo que la SDN usará como capacidad de
@@ -675,7 +720,7 @@ cmd_up() {
 
 cmd_down() {
     systemctl --user stop "$SCOPE.scope" >/dev/null 2>&1
-    pkill -f "$BIN/quditto --listen 127.0.0.1:28" 2>/dev/null
+    pkill -f "$BIN/quditto --listen 127.0.0.1:30" 2>/dev/null
     for p in "$DIR"/logs/*.pid; do
         [ -f "$p" ] || continue
         kill "$(cat "$p")" 2>/dev/null
