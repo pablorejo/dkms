@@ -55,7 +55,11 @@ pub const REFILL_THRESHOLD: usize = 256;
 pub const REFILL_BATCH: u32 = 128;
 /// Timeout por ronda de banca (D1): corto, para no bloquear el sondeo de stock
 /// con un KME lento (el timeout de lote del cliente KME es de 30 s).
-const BANK_ENC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+// 10 s y no 3 (auditoría 2026-09-03, R9): un `enc_keys` cancelado a medias
+// por el timeout deja al KME con las claves ya sacadas de su almacén — con
+// hardware real es material QKD quemado. 10 s sigue muy por debajo de los
+// 30 s del cliente y acota igual el bloqueo del estimador (D1).
+const BANK_ENC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Tope de IDs pendientes de `dec_keys` antes de aplastar. Si el peer
 /// notifica más rápido de lo que podemos absorber, el remanente queda
@@ -83,6 +87,8 @@ const BANK_RING_HEADROOM: usize = 512;
 /// por encima de cualquier R razonable, sin convertir el sondeo en un bucle
 /// infinito si el KME produce más de lo que cabe).
 const MAX_BANK_ROUNDS: u32 = 16;
+/// Ids anunciados por NOTIFY y aún no pedidos al KME (C-11).
+const DEC_PENDING_MAX: usize = 65_536;
 
 pub struct KeyStore {
     /// Buffer FIFO de claves listas para cifrar (mías a cuenta del peer).
@@ -117,6 +123,10 @@ pub struct KeyStore {
     enc_low: Arc<Notify>,
     /// Cola de IDs pendientes de pedir al quditto vía `dec_keys`.
     dec_pending: Mutex<Vec<Uuid>>,
+    /// Espejo de `dec_pending` + ids ya pedidos al KME y aún no entregados:
+    /// para que un `key_id` que NADIE anunció falle al instante en vez de
+    /// retener 2 s un permiso del semáforo global (C-11).
+    dec_announced: Mutex<std::collections::HashSet<Uuid>>,
     /// Signal: "hay IDs pendientes en `dec_pending`".
     dec_request: Arc<Notify>,
 
@@ -186,6 +196,7 @@ impl KeyStore {
             key_size_bits: key_size_bits as u16,
             enc_low: Arc::new(Notify::new()),
             dec_pending: Mutex::new(Vec::with_capacity(DEC_BATCH_MAX)),
+            dec_announced: Mutex::new(std::collections::HashSet::new()),
             dec_request: Arc::new(Notify::new()),
             dec_inserted: Arc::new(Notify::new()),
             dec_inserted_seq: AtomicU64::new(0),
@@ -435,15 +446,42 @@ impl KeyStore {
     /// añadimos a la cola de `dec_pending` y notificamos al worker
     /// para que haga el `dec_keys` al quditto.
     pub fn notify_remote_enc(&self, ids: Vec<Uuid>) {
+        // Cola acotada (C-11): un peer que anuncia ids sin parar no puede
+        // hacer crecer `dec_pending` sin límite; lo que sobra se descarta y
+        // se cuenta (esas claves las verá expirar quien las anunció).
+        let ids = {
+            let mut g = self.dec_pending.lock();
+            let room = DEC_PENDING_MAX.saturating_sub(g.len());
+            if ids.len() > room {
+                let n = self
+                    .n_notify_dropped
+                    .fetch_add((ids.len() - room) as u64, Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    warn!(
+                        peer = self.peer_id,
+                        dropped = ids.len() - room,
+                        pending = g.len(),
+                        "keystore: cola DEC a tope; NOTIFY recortado"
+                    );
+                }
+            }
+            let ids: Vec<Uuid> = ids.into_iter().take(room).collect();
+            g.extend(ids.iter().copied());
+            ids
+        };
         // Para el estimador, estas claves YA salieron del almacén (las drenó
         // el `enc_keys` del peer hace milisegundos). Contarlas al completar
         // nuestro `dec_keys` — segundos por detrás durante el fill — dejaba
-        // su ΔS sin compensar: −15 % medidos en vivo (2026-09-01).
+        // su ΔS sin compensar: −15 % medidos en vivo (2026-09-01). Lo que el
+        // KME luego NO devuelva se descuenta en `dec_refill_loop` (C-10).
         self.estimator.on_peer_drained(ids.len());
-        let mut g = self.dec_pending.lock();
-        g.extend(ids);
-        drop(g);
+        self.dec_announced.lock().extend(ids.iter().copied());
         self.dec_request.notify_one();
+    }
+
+    /// ¿Se anunció este id por NOTIFY y aún no se ha entregado/consumido?
+    pub fn is_dec_announced(&self, id: &Uuid) -> bool {
+        self.dec_announced.lock().contains(id)
     }
 
     // ─── Workers de background ─────────────────────────────────────
@@ -623,9 +661,21 @@ impl KeyStore {
                         // estimador — ya se contaron al llegar el NOTIFY
                         // (`notify_remote_enc`), que es cuando de verdad
                         // salieron del almacén. Contarlas dos veces inflaría
-                        // la tasa.
+                        // la tasa. Lo que el KME NO devuelve sí se descuenta
+                        // (C-10): un peer que anuncia ids inventados inflaba
+                        // nuestro estimador y con él la capacidad de la
+                        // arista, saltándose el `min` de extremos.
                         self.n_refills_dec.fetch_add(1, Ordering::Relaxed);
                         let n = keys.len();
+                        if n < ids.len() {
+                            self.estimator.on_peer_drained_shortfall(ids.len() - n);
+                        }
+                        {
+                            let mut a = self.dec_announced.lock();
+                            for id in &ids {
+                                a.remove(id);
+                            }
+                        }
                         for k in keys {
                             self.dec.insert(k.key_id, k.material);
                         }
@@ -641,6 +691,15 @@ impl KeyStore {
                         );
                     }
                     Err(e) => {
+                        // Nada llegó: se descuenta todo (C-10) y los ids dejan
+                        // de estar anunciados (el frame que los espere falla).
+                        self.estimator.on_peer_drained_shortfall(ids.len());
+                        {
+                            let mut a = self.dec_announced.lock();
+                            for id in &ids {
+                                a.remove(id);
+                            }
+                        }
                         warn!(
                             peer = self.peer_id,
                             ids = ids.len(),

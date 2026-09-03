@@ -11,6 +11,7 @@
 //! Mismo wire binario (`wire::Frame`) que QKC↔QKC — ningún parser
 //! distinto, solo `kind` distinto.
 
+static ACCEPT_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -47,7 +48,20 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_LOCAL_SEND));
     info!(%addr, max_inflight = MAX_INFLIGHT_LOCAL_SEND, "qkc.local.listening");
     loop {
-        let (stream, peer) = listener.accept().await?;
+        // Un error transitorio de accept (EMFILE) no puede tumbar el plano
+        // entero (auditoría 2026-09b E2 / 2026-09-03 R8): se cuenta, se
+        // avisa en potencias de dos y se espera un poco.
+        let (stream, peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                let n = ACCEPT_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    warn!(error = %e, failed = n + 1, "qkc.local: accept failed");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let _ = stream.set_nodelay(true);
         debug!(%peer, "qkc.local.accept");
         let svc = svc.clone();

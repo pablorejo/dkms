@@ -195,6 +195,19 @@ impl RateEstimator {
         self.pulled.fetch_add(n as u64, Ordering::Relaxed);
     }
 
+    /// El KME devolvió `n` claves MENOS de las que el peer anunció: esos ids
+    /// no existían (o ya no). Se deshace su cuenta (C-10): sin esto un vecino
+    /// inflaba nuestra medida anunciando ids inventados y fijaba él solo la
+    /// capacidad de la arista.
+    pub fn on_peer_drained_shortfall(&self, n: usize) {
+        let n = n as u64;
+        let _ = self
+            .pulled
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(n))
+            });
+    }
+
     /// Un sondeo de `/status` falló (KME caído, TLS, timeout).
     pub fn on_stock_error(&self) {
         let mut g = self.inner.lock();

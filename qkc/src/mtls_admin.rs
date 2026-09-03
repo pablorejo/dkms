@@ -13,6 +13,7 @@
 //! en `common` es un follow-on (docs/SECURITY.md §Fase 3), no se hace ahora
 //! para no arrastrar axum/hyper-util a `common` ni acoplar qkc↔sdn.
 
+static ACCEPT_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -53,7 +54,12 @@ pub async fn serve_mtls(
         let (tcp, peer_addr) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
-                error!(error = %e, "qkc.http_admin tcp accept failed");
+                let n = ACCEPT_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    error!(failed = n + 1, error = %e, "qkc.http_admin tcp accept failed");
+                }
+                // EMFILE y compañía: sin pausa esto es un bucle caliente (R8).
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };

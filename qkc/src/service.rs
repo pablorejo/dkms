@@ -523,6 +523,11 @@ impl QkcService {
         self.links.load().get(&neighbor_id).cloned()
     }
 
+    /// Enlaces montados ahora mismo (node.yml + los que creó la SDN).
+    pub fn link_count(&self) -> usize {
+        self.links.load().len()
+    }
+
     /// Da de alta un enlace en caliente. No-op si ya existe.
     ///
     /// El handshake se coordina solo: el iniciador es el de `qkc_id` menor y

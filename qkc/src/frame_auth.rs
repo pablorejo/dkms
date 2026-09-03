@@ -42,12 +42,21 @@ pub enum FrameAuthError {
 }
 
 /// Contadores para la línea `qkc.frame_auth` y para las pruebas.
+/// Ventana tras el último frame VERIFICADO del peer durante la que un frame
+/// con época desconocida NO dispara resync (R2, ver `open`).
+const RESYNC_SUPPRESS_AFTER_VERIFIED: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Debug, Default)]
 pub struct FrameAuthStats {
     pub signed: AtomicU64,
     pub verified: AtomicU64,
     pub bad_mac: AtomicU64,
     pub replayed: AtomicU64,
+    /// Frames con una época desconocida que NO dispararon resync porque el
+    /// enlace estaba verificando frames del peer hace un instante (R2): un
+    /// peer reiniciado no produce ninguno verificable, un forjador sí
+    /// convive con ellos.
+    pub resync_suppressed: AtomicU64,
     pub plaintext_accepted: AtomicU64,
     pub plaintext_rejected: AtomicU64,
 }
@@ -94,6 +103,8 @@ struct RecvState {
     window: ReplayWindow,
     /// `(sesión del peer, clave derivada)` — evita un HKDF por frame.
     cached: Option<(u64, Zeroizing<[u8; 32]>)>,
+    /// Instante del último frame VERIFICADO del peer (R2).
+    last_verified: Option<std::time::Instant>,
 }
 
 impl LinkFrameAuth {
@@ -152,13 +163,20 @@ impl LinkFrameAuth {
     }
 
     fn with_source(mode: FrameAuth, peer_id: u32, src: RootSource) -> Self {
+        // Con raíz por época la sesión ES la época: monótona. Con PSK fijo es
+        // un número aleatorio por proceso (C-08).
+        let window = match &src {
+            RootSource::PerEpoch { .. } => ReplayWindow::new_monotonic(DEFAULT_WINDOW),
+            RootSource::Fixed { .. } => ReplayWindow::new_quiet_gated(DEFAULT_WINDOW),
+        };
         Self {
             mode,
             peer_id,
             src,
             counter: AtomicU64::new(0),
             recv: Mutex::new(RecvState {
-                window: ReplayWindow::new(DEFAULT_WINDOW),
+                last_verified: None,
+                window,
                 cached: None,
             }),
             stats: Arc::new(FrameAuthStats::default()),
@@ -167,6 +185,14 @@ impl LinkFrameAuth {
 
     pub fn mode(&self) -> FrameAuth {
         self.mode
+    }
+
+    /// Con raíz PSK fija la ventana solo adopta la sesión de un peer
+    /// reiniciado cuando la anterior lleva 10 s callada (C-08); los tests de
+    /// reinicio no pueden esperar tanto.
+    #[cfg(test)]
+    pub fn set_adopt_quiet_for_tests(&self, quiet: std::time::Duration) {
+        self.recv.lock().window.set_quiet(quiet);
     }
 
     /// Sesión de salida actual (para el log). Con PSK es la encarnación fija;
@@ -329,7 +355,25 @@ impl LinkFrameAuth {
                 // relink por encima de AMBAS ventanas; en el respondedor emite
                 // RESYNC_REQ (0x28). Barato e idempotente (fetch_max), apto
                 // para llamarse por frame.
-                if let RootSource::PerEpoch { store, .. } = &self.src {
+                //
+                // Pero el trailer NO está autenticado (es justo lo que no se
+                // pudo verificar), así que este disparo era forjable desde
+                // :20000 sin credencial: un frame inventado cada 5 s forzaba
+                // un relink real con poda de las épocas vivas (auditoría
+                // 2026-09-03, R2; el clamp de B2 acota el salto, no la
+                // frecuencia). Discriminador: un peer que de verdad renació
+                // no nos manda NINGÚN frame verificable, mientras que un
+                // forjador convive con el tráfico legítimo verificado. Si
+                // hemos verificado un frame del peer hace menos de
+                // RESYNC_SUPPRESS_AFTER_VERIFIED, esto es ruido: se cuenta
+                // y no se pide nada. Tras un reinicio real, el tráfico
+                // verificado cesa y el siguiente frame desconocido dispara.
+                let recently_verified = st
+                    .last_verified
+                    .is_some_and(|t| t.elapsed() < RESYNC_SUPPRESS_AFTER_VERIFIED);
+                if recently_verified {
+                    self.stats.resync_suppressed.fetch_add(1, Ordering::Relaxed);
+                } else if let RootSource::PerEpoch { store, .. } = &self.src {
                     store.request_resync(session.min(u64::from(u32::MAX)) as u32);
                 }
                 self.stats.bad_mac.fetch_add(1, Ordering::Relaxed);
@@ -359,6 +403,7 @@ impl LinkFrameAuth {
                 self.stats.replayed.fetch_add(1, Ordering::Relaxed);
                 return Err(FrameAuthError::Replay(e));
             }
+            st.last_verified = Some(std::time::Instant::now());
             (session, counter)
         };
         let cut = frame.payload.len() - AUTH_TRAILER_LEN;
@@ -715,11 +760,18 @@ mod tests {
         let captured = f1.clone();
         rx.open(&mut f1).unwrap();
 
-        // El peer reinicia: sesión nueva, contadores desde 1 otra vez.
+        // El peer reinicia: sesión nueva, contadores desde 1 otra vez. Con
+        // raíz fija la ventana exige antes un silencio de la sesión vieja
+        // (C-08): aquí se acorta a cero para no esperar.
         let tx2 = mk(FrameAuth::Require);
         assert_ne!(tx1.session(), tx2.session());
         let mut f2 = frame(FRAME_RECV);
         tx2.seal(&mut f2);
+        assert!(
+            matches!(rx.open(&mut f2.clone()), Err(FrameAuthError::Replay(_))),
+            "sin silencio, la sesión nueva no se adopta (un frame capturado de otra sesión no tira la viva)"
+        );
+        rx.set_adopt_quiet_for_tests(std::time::Duration::ZERO);
         rx.open(&mut f2).unwrap();
 
         // Y el frame de la sesión vieja ya no vale, aunque su MAC sea correcto.

@@ -48,7 +48,7 @@ use parking_lot::Mutex;
 // `tokio::time::Instant` y no `std`: es el mismo reloj en producción y el
 // reloj pausable de los tests del bucle de rotación.
 use tokio::{sync::Notify, time::Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use wire::{
     Frame, FRAME_PQC_KEM_INIT, FRAME_PQC_KEM_INIT_AUTH, FRAME_PQC_KEM_INIT_SIGNED,
     FRAME_PQC_KEM_RESP, FRAME_PQC_KEM_RESP_AUTH, FRAME_PQC_KEM_RESP_SIGNED, FRAME_PQC_RESYNC_REQ,
@@ -805,6 +805,20 @@ impl PqcHandshake {
             *last = Some(now);
         }
         let (base, aim) = Self::resync_base(self.store.highest(), peer_epoch, self.lookahead);
+        // Época agotada (auditoría 2026-09-03, D-10): `saturating_add` evita
+        // el wrap, pero volver a negociar `u32::MAX` sería REUSAR un número
+        // de época con un secreto distinto — justo lo que nada aguas abajo
+        // detecta. El enlace se queda como está y lo dice; se recupera
+        // reiniciando el QKC (época 1). Son 4·10⁹ rotaciones: siglos.
+        if aim == u32::MAX {
+            error!(
+                me = self.my_id,
+                peer = self.peer_id,
+                base,
+                "qkc.pqc.relink: espacio de épocas agotado; NO renegocio (reinicia el QKC)"
+            );
+            return None;
+        }
         warn!(
             me = self.my_id,
             peer = self.peer_id,

@@ -59,6 +59,9 @@ use crate::{
 
 /// Tiempo máximo de espera por una clave DEC concreta. Si el worker no
 /// la inserta en este plazo, dropeamos el frame.
+/// Trozos OTP (claves) que un frame puede gastar en el enlace de salida (C-09).
+const MAX_RELAY_CHUNKS: usize = 4;
+
 const DEC_WAIT_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Tiempo máximo de espera por un batch completo de claves ENC al
 /// pedirle al worker que rellene. Más grande que DEC porque puede
@@ -187,6 +190,29 @@ async fn forward_plaintext(
         .ok_or(QkcError::UnknownNeighbor(next_hop))?;
     let chunk_bytes = (out_link.cfg.key_size_bits / 8) as usize;
     let needed = num_chunks(plaintext.len(), chunk_bytes);
+    // Techo (auditoría 2026-09-03, C-09): cada trozo gasta UNA clave OTP del
+    // enlace de salida — si es QKD, material físico. El payload de diseño es
+    // un bloque (32 B: la clave de transporte sellada e2e; el tag va en la
+    // cabecera); 255 key_ids × 32 B por frame desde un vecino PQC (material
+    // gratis) secaban un enlace QKD de tránsito. Se descarta sin gastar.
+    if needed > MAX_RELAY_CHUNKS {
+        static OVERSIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = OVERSIZE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if common::log_throttle::nth_is_loud(n) {
+            tracing::warn!(
+                next_hop,
+                bytes = plaintext.len(),
+                chunks = needed,
+                max = MAX_RELAY_CHUNKS,
+                dropped = n + 1,
+                "relay: payload por encima del techo de trozos; descartado sin gastar claves"
+            );
+        }
+        return Err(QkcError::BadRequest(format!(
+            "relay payload of {} bytes needs {needed} chunks, max {MAX_RELAY_CHUNKS}",
+            plaintext.len()
+        )));
+    }
     let enc_keys = take_or_fetch_enc(&out_link, needed).await?;
     let (ciphertext, ids) = encrypt(plaintext, &enc_keys)?;
     send_frame_to_peer(
@@ -352,6 +378,15 @@ async fn lookup_or_fetch_dec(link: &LinkRuntime, ids: &[Uuid]) -> Result<Vec<Otp
     for id in ids {
         let mat = match link.keys.lookup_dec(id) {
             Some(v) => v,
+            // Un id que el peer nunca anunció por NOTIFY no va a llegar: fallar
+            // ya, sin retener 2 s el permiso del semáforo global (C-11).
+            None if !link.keys.is_dec_announced(id) => {
+                return Err(QkcError::KeyWaitTimeout {
+                    what: "dec (id no anunciado)",
+                    missing: 1,
+                    ms: 0,
+                });
+            }
             None => link
                 .keys
                 .wait_dec(id, DEC_WAIT_TIMEOUT)

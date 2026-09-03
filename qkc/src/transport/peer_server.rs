@@ -18,6 +18,7 @@
 //! igual; la alternativa real al drop es el OOM del runtime, que lo pierde
 //! todo.
 
+static ACCEPT_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -53,6 +54,8 @@ const INTAKE_QUEUE: usize = 8192;
 /// Conexiones entrantes concurrentes al plano peer (B8). Una malla real tiene
 /// decenas de peers; 4096 deja margen y acota un flood de conexiones.
 const MAX_PEER_CONNS: usize = 4096;
+/// Plazo para completar el CUERPO de un frame una vez recibido su prefijo.
+const FRAME_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Una conexión que no manda su primer frame en este tiempo se cierra (B8):
 /// reap del slowloris sin cerrar enlaces persistentes legítimamente ociosos
 /// (a esos solo se les aplica el timeout en el PRIMER frame).
@@ -99,7 +102,20 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     }
     let conns = Arc::new(Semaphore::new(MAX_PEER_CONNS));
     loop {
-        let (stream, peer) = listener.accept().await?;
+        // Un error transitorio de accept (EMFILE) no puede tumbar el plano
+        // entero (auditoría 2026-09b E2 / 2026-09-03 R8): se cuenta, se
+        // avisa en potencias de dos y se espera un poco.
+        let (stream, peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                let n = ACCEPT_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if common::log_throttle::nth_is_loud(n) {
+                    warn!(error = %e, failed = n + 1, "qkc.peer_server: accept failed");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let Ok(permit) = conns.clone().try_acquire_owned() else {
             debug!(%peer, "qkc.peer_server: tope de conexiones, rechazo (B8)");
             continue;
@@ -135,7 +151,11 @@ async fn handle_conn(
                 }
             }
         } else {
-            read_frame(&mut stream).await
+            // Sin plazo para el prefijo (enlace ocioso entre ráfagas), pero el
+            // cuerpo anunciado tiene que llegar entero en 30 s (R3): sin
+            // esto, un socket que anunciaba 1 MiB y callaba fijaba ese
+            // megabyte para siempre, N veces.
+            wire::read_frame_body_timeout(&mut stream, FRAME_BODY_TIMEOUT).await
         };
         let frame = match read {
             Ok(f) => f,

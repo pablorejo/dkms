@@ -17,6 +17,8 @@
 //! anuncio sin cambios no toca la versión de la topología y no dispara ni el
 //! push de forwarding ni el LP.
 
+/// Enlaces PQC que la SDN puede hacernos montar sin declararlos (C-07).
+const MAX_SDN_LINKS: usize = 64;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -305,6 +307,8 @@ impl SdnAnnouncer {
     /// al KME de esta institución, y eso la SDN no lo sabe ni puede inventarlo.
     /// Los QKD siguen viniendo del `node.yml`.
     fn apply_peers(&self, peers: &[QkcPeerWire]) {
+        // Enlaces no declarados en node.yml que la SDN nos hace montar (C-07).
+        let mut sdn_created: usize = self.svc.link_count().saturating_sub(self.local_cfgs.len());
         let wanted: std::collections::HashSet<u32> =
             peers.iter().filter_map(|p| p.qkc_id.parse().ok()).collect();
 
@@ -341,6 +345,13 @@ impl SdnAnnouncer {
             // `peer_verify_key` — el peer firmaba y este extremo descartaba por
             // "sin peer_verify_key" (medido 2026-08-27: 302 descartes en un
             // nodo de una malla de 4).
+            // La dirección la dice la SDN, que no es de confianza (C-06):
+            // tiene que ser `ip:puerto` y nada más, o TODOS los QKC abrirían
+            // TCP contra lo que un miembro escribiera.
+            if p.peer_addr.parse::<std::net::SocketAddr>().is_err() {
+                warn!(peer = id, addr = ?p.peer_addr, "peer_addr de la SDN no es ip:puerto; ignoro el par");
+                continue;
+            }
             if let Some(local) = self.local_cfgs.get(&id) {
                 let mut cfg = local.clone();
                 cfg.neighbor_peer_addr = p.peer_addr.clone();
@@ -352,6 +363,17 @@ impl SdnAnnouncer {
                 }
                 continue;
             }
+            // Enlaces que crea la SDN (C-07): acotados. Cada uno es un worker,
+            // una rotación y una línea de log cada 5 s.
+            if sdn_created >= MAX_SDN_LINKS {
+                warn!(
+                    peer = id,
+                    max = MAX_SDN_LINKS,
+                    "demasiados enlaces creados por la SDN; ignoro el par"
+                );
+                continue;
+            }
+            sdn_created += 1;
             let cfg = LinkConfig {
                 neighbor_id: id,
                 neighbor_peer_addr: p.peer_addr.clone(),
