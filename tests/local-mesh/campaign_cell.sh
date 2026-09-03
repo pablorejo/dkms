@@ -28,7 +28,7 @@ FAM=${1:?familia (estrella|anillo|puente|malla|rgg|aleatoria)}
 N=${2:?N}
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
+REPO="${DKMS_REPO:-$(cd "$HERE/../.." && pwd)}"   # el sbatch corre una COPIA del arnés fuera del repo
 MESH="$HERE/mesh.sh"
 TOPOGEN="$HERE/topologies.py"
 REDUCE="$HERE/campaign_reduce.py"

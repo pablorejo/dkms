@@ -75,7 +75,7 @@
 # CLAUDE.md), así que habría que repetir todos los campos de [generator].
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="${DKMS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BIN="$REPO/target/release"
 RENDER="$REPO/docker/render_config.py"
 GENCERTS="$REPO/docker/gen-certs.sh"

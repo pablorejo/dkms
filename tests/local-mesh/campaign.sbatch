@@ -50,8 +50,18 @@ rustc --version; "$PROTOC" --version
 echo "=== compilando (incremental) ==="
 time cargo build --release -j "$(nproc)"
 
-bash tests/local-mesh/campaign_cell.sh "$FAM" "$N"
+# El arnés se ejecuta desde una COPIA en el scratch del nodo: bash lee el
+# guion por bloques según avanza, y reemplazar el fichero en el home (rsync
+# desde el login) mientras corre deja a los bash de los nodos con un handle
+# obsoleto — el 2026-09-03 nueve celdas salieron en silencio con rc=0 al
+# cerrar L0, dos minutos después de un campaign_sync.sh. Con la copia, el
+# home puede cambiar sin tocar a las celdas en vuelo.
+HARNESS="$DKMS_MESH_DIR-harness"
+rm -rf "$HARNESS"; mkdir -p "$HARNESS"; cp -r tests/local-mesh/. "$HARNESS/"
+export DKMS_REPO="$PWD"
+bash "$HARNESS/campaign_cell.sh" "$FAM" "$N"
 rc=$?
+rm -rf "$HARNESS"
 rm -rf "$DKMS_MESH_DIR"
 echo "########## fin $FAM N=$N rc=$rc $(date '+%F %T') ##########"
 exit $rc
