@@ -102,7 +102,11 @@ impl SdnControl for SdnGrpc {
         &self,
         _req: Request<StreamTopologyRequest>,
     ) -> std::result::Result<Response<Self::StreamTopologyStream>, Status> {
-        let rx = self.svc.pushers.subscribe();
+        let Some(rx) = self.svc.pushers.subscribe() else {
+            return Err(Status::resource_exhausted(
+                "too many topology subscribers; retry later",
+            ));
+        };
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
         )))

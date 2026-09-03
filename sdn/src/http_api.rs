@@ -324,6 +324,9 @@ async fn announce_qkc(
     if let Err(resp) = require_identity(identity.as_deref(), &format!("qkc-{}", reg.id), "qkc") {
         return resp;
     }
+    if let Err(e) = validate_qkc_announce(&reg) {
+        return err_response(SdnError::BadRequest(e));
+    }
     let mut out = svc.topology.announce_qkc(&reg);
     // Un QKC no tiene ancla: siempre entra, así que siempre cuenta como vivo.
     svc.presence.touch(Kind::Qkc, &reg.id);
@@ -342,6 +345,86 @@ async fn announce_qkc(
     (StatusCode::OK, Json(out)).into_response()
 }
 
+/// Cotas de un anuncio de QKC (auditoría 2026-09-03, C-01/C-03/C-04/C-06/
+/// C-13). Todo lo que aquí entra lo decide un miembro de la federación con
+/// su propio cert, y acaba en URLs que la SDN dial-a con SU identidad
+/// (`host`), en direcciones que TODOS los QKC dial-an (`peer_addr`), en el
+/// modelo de capacidad (`r0`/`alpha`/`distance`) y en mapas sin cota
+/// (`links`, ids). Un anuncio fuera de rango se rechaza con 400.
+pub const MAX_LINKS_PER_QKC: usize = 256;
+const MAX_KEYS_PER_S: f64 = 1.0e9;
+
+fn validate_host(h: &crate::topology::HostEndpoint) -> Result<(), String> {
+    // `host.ip` va interpolado en la URL del push con el cert `sdn`: tiene
+    // que ser una IP y nada más (C-01: `10.0.0.7:20002/forwarding-table?z=`
+    // hacía que la SDN entregara SU tabla a un QKC ajeno).
+    h.ip.parse::<std::net::IpAddr>().map_err(|_| {
+        format!(
+            "host.ip no es una IP: {:?}",
+            h.ip.chars().take(64).collect::<String>()
+        )
+    })?;
+    if h.port == 0 {
+        return Err("host.port = 0".to_string());
+    }
+    Ok(())
+}
+
+fn validate_qkc_announce(reg: &QkcAnnounce) -> Result<(), String> {
+    if !common::ids::is_valid_id(&reg.id) || reg.id.parse::<u32>().is_err() {
+        return Err("qkc id debe ser numérico".to_string());
+    }
+    validate_host(&reg.host)?;
+    if let Some(pa) = reg.peer_addr.as_deref() {
+        pa.parse::<std::net::SocketAddr>().map_err(|_| {
+            format!(
+                "peer_addr no es ip:puerto: {:?}",
+                pa.chars().take(64).collect::<String>()
+            )
+        })?;
+    }
+    if reg.links.len() > MAX_LINKS_PER_QKC {
+        return Err(format!(
+            "{} links, máximo {MAX_LINKS_PER_QKC}",
+            reg.links.len()
+        ));
+    }
+    let finite_in = |v: f64, lo: f64, hi: f64, what: &str| -> Result<(), String> {
+        if !v.is_finite() || v < lo || v > hi {
+            return Err(format!("{what} fuera de rango [{lo}, {hi}]: {v}"));
+        }
+        Ok(())
+    };
+    for l in &reg.links {
+        if !common::ids::is_valid_id(&l.neighbor_id) || l.neighbor_id.parse::<u32>().is_err() {
+            return Err("neighbor_id debe ser numérico".to_string());
+        }
+        finite_in(l.meta.r0_keys_per_second, 0.0, MAX_KEYS_PER_S, "r0")?;
+        finite_in(l.meta.alpha, 0.0, 100.0, "alpha")?;
+        finite_in(
+            l.meta.pqc_capacity_keys_per_s,
+            0.0,
+            MAX_KEYS_PER_S,
+            "capacity_keys_per_s",
+        )?;
+        if l.meta.distance_km > 100_000 {
+            return Err(format!(
+                "distance_km fuera de rango: {}",
+                l.meta.distance_km
+            ));
+        }
+        if let Some(m) = l.measured_rate_keys_per_s {
+            finite_in(m, 0.0, MAX_KEYS_PER_S, "measured_rate_keys_per_s")?;
+        }
+        if let Some(q) = l.measured_quality.as_deref() {
+            if q.len() > 32 {
+                return Err("measured_quality demasiado largo".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An ORR announcing itself, anchored to its QKC.
 async fn announce_orr(
     State(svc): State<SdnService>,
@@ -350,6 +433,15 @@ async fn announce_orr(
 ) -> axum::response::Response {
     if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "orr") {
         return resp;
+    }
+    if let Err(e) = validate_host(&reg.host).and_then(|()| {
+        if !common::ids::is_valid_id(&reg.id) || reg.qkc_id.parse::<u32>().is_err() {
+            Err("orr_id/qkc_id inválidos".to_string())
+        } else {
+            Ok(())
+        }
+    }) {
+        return err_response(SdnError::BadRequest(e));
     }
     let mut out = svc.topology.announce_orr(&reg);
     // Solo si entró: lo que no está en la topología no puede caducar de ella.
@@ -371,6 +463,21 @@ async fn announce_dkms(
 ) -> axum::response::Response {
     if let Err(resp) = require_identity(identity.as_deref(), &reg.id, "dkms") {
         return resp;
+    }
+    if let Err(e) = validate_host(&reg.host).and_then(|()| {
+        if !common::ids::is_valid_id(&reg.id) || !common::ids::is_valid_id(&reg.orr_id) {
+            return Err("dkms id/orr_id inválidos".to_string());
+        }
+        if let Some(pa) = reg.peer_addr.as_deref() {
+            pa.parse::<std::net::SocketAddr>()
+                .map_err(|_| format!("peer_addr no es ip:puerto: {pa:?}"))?;
+        }
+        if let Some(bad) = reg.saes.iter().find(|s| !common::ids::is_valid_id(s)) {
+            return Err(format!("sae id inválido ({} bytes)", bad.len()));
+        }
+        Ok(())
+    }) {
+        return err_response(SdnError::BadRequest(e));
     }
     let mut out = svc.topology.announce_dkms(&reg);
     if out.accepted {

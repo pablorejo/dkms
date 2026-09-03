@@ -252,6 +252,15 @@ impl Upsert {
     }
 }
 
+/// Cota de SAEs registrados por DKMS (R7).
+pub const MAX_SAES_PER_DKMS: usize = 4096;
+/// Capacidad máxima que una arista puede tener en el modelo (C-04): mil
+/// millones de claves/s está órdenes de magnitud por encima de cualquier
+/// enlace real y muy por debajo de `+inf`.
+pub const MAX_CAPACITY_KEYS_PER_S: f64 = 1.0e9;
+
+static SAE_ANNOUNCE_CONFLICTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Result of an ORR/DKMS announcement. `accepted == false` is not an error: it
 /// means the anchor (the QKC of an ORR, the ORR of a DKMS) has not registered
 /// yet, so the announcer should keep retrying.
@@ -275,6 +284,11 @@ pub struct AnnounceOutcome {
     /// Pares DKMS, cuando el anuncio es de un DKMS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dkms_peers: Vec<DkmsPeer>,
+    /// SAEs del anuncio que NO se aplicaron porque ya tienen otro dueño
+    /// (auditoría 2026-09-03, R1). Informativo: el dueño actual los libera
+    /// con `PUT/DELETE /sae` o al expirar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sae_conflicts: Vec<String>,
 }
 
 /// Channel kind of a QKC↔QKC link.
@@ -387,13 +401,20 @@ impl EdgeMeta {
     /// PQC. Único punto de decisión — quien necesite la capacidad de una
     /// arista pasa por aquí, no por `is_pqc()` más un caso especial.
     pub fn capacity_keys_per_second(&self) -> f64 {
-        if self.is_pqc() {
-            self.pqc_capacity_keys_per_s.max(0.0)
+        // Acotada y finita (C-04): `alpha < 0` o un `r0` desmesurado daban
+        // `+inf`, que `quantise_weight` convertía en `u32::MAX` y el precio
+        // en 0 — atracción total de tránsito hacia esa arista.
+        let raw = if self.is_pqc() {
+            self.pqc_capacity_keys_per_s
         } else if let Some(m) = self.measured_keys_per_s {
-            m.max(0.0)
+            m
         } else {
             self.quditto_capacity_keys_per_second()
+        };
+        if !raw.is_finite() {
+            return 0.0;
         }
+        raw.clamp(0.0, MAX_CAPACITY_KEYS_PER_S)
     }
 
     /// `true` for PQC links.
@@ -801,9 +822,20 @@ impl Topology {
         Upsert::from_changed(changed)
     }
 
+    /// SAEs que cuelgan de un DKMS.
+    pub fn sae_count_for(&self, dkms_id: &str) -> usize {
+        self.saes.values().filter(|s| s.dkms_id == dkms_id).count()
+    }
+
     pub fn upsert_sae(&mut self, sae: Sae) -> bool {
         if !self.dkms.contains_key(&sae.dkms_id) {
             warn!(sae=%sae.id, dkms=%sae.dkms_id, "SAE references unknown DKMS; skipping");
+            return false;
+        }
+        // Cota por DKMS (R7): los ids los pone el cliente.
+        if !self.saes.contains_key(&sae.id) && self.sae_count_for(&sae.dkms_id) >= MAX_SAES_PER_DKMS
+        {
+            warn!(sae=%sae.id, dkms=%sae.dkms_id, max = MAX_SAES_PER_DKMS, "demasiados SAEs para este DKMS; skipping");
             return false;
         }
         let key = sae.id.clone();
@@ -1194,11 +1226,24 @@ impl TopologyStore {
     where
         F: FnOnce(&mut Topology) -> Result<T>,
     {
+        self.try_mutate_if(|t| f(t).map(|v| (v, true)))
+    }
+
+    /// Como [`Self::try_mutate`], pero `f` dice si de verdad cambió algo:
+    /// con `false` no se publica ni se bumpea la versión (auditoría
+    /// 2026-09-03, R7). Un `/sae-bulk` sin efecto bumpeaba igual, y cada
+    /// bump re-empuja las forwarding tables a todos los QKC.
+    pub fn try_mutate_if<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Topology) -> Result<(T, bool)>,
+    {
         let _g = self.write_mux.lock();
         let mut next = (**self.inner.load()).clone();
-        let out = f(&mut next)?;
-        next.version += 1;
-        self.inner.store(Arc::new(next));
+        let (out, changed) = f(&mut next)?;
+        if changed {
+            next.version += 1;
+            self.inner.store(Arc::new(next));
+        }
         Ok(out)
     }
 
@@ -1238,10 +1283,15 @@ impl TopologyStore {
         // Reportes de tasa medida: al registro lateral SIEMPRE (no toca el
         // snapshot ni la versión); al snapshot solo el combinado, con
         // histéresis, dentro del mismo mutate que el resto del anuncio.
+        // Solo de vecinos que EXISTEN (C-03): una medida sobre un id que
+        // nunca se registra no entraba jamás en `edges_removed`, así que
+        // `forget_edge` no corría y cada anuncio con ids nuevos dejaba su
+        // entrada para siempre.
+        let known = self.load();
         let measured: Vec<(String, f64)> = reg
             .links
             .iter()
-            .filter(|l| l.neighbor_id != reg.id)
+            .filter(|l| l.neighbor_id != reg.id && known.qkcs.contains_key(&l.neighbor_id))
             .filter_map(|l| {
                 let kps = l.measured_rate_keys_per_s?;
                 if !(kps.is_finite() && kps >= 0.0) {
@@ -1349,6 +1399,14 @@ impl TopologyStore {
         };
         let mut accepted = false;
         let mut occupied = false;
+        let mut conflicts: Vec<String> = Vec::new();
+        if reg.saes.len() > MAX_SAES_PER_DKMS {
+            out.reason = Some(format!(
+                "announce with {} saes; max {MAX_SAES_PER_DKMS}",
+                reg.saes.len()
+            ));
+            return out;
+        }
         let changed = self.mutate(|t| {
             if !t.orrs.contains_key(&reg.orr_id) {
                 return false;
@@ -1375,7 +1433,21 @@ impl TopologyStore {
             accepted = true;
             // Los SAE van después del DKMS a propósito: `upsert_sae` exige que
             // su DKMS exista, y acabamos de meterlo.
+            //
+            // Y SOLO los que no tengan ya otro dueño (R1): el anuncio está
+            // atado al cert del anunciante, pero `sae_bindings` lo escribe
+            // él, así que `dkms-2` podía poner el `sae_1` de `dkms-1` en su
+            // lista y quedarse con el binding —y con la clave de sesión que
+            // el origen sella hacia quien la SDN diga— sin pasar por el
+            // `PUT /sae` que A1 cerró. El dueño lo cede por `PUT/DELETE
+            // /sae` o al expirar; hasta entonces el anuncio no lo mueve.
             for sae_id in &reg.saes {
+                if let Some(cur) = t.saes.get(sae_id) {
+                    if cur.dkms_id != reg.id {
+                        conflicts.push(sae_id.clone());
+                        continue;
+                    }
+                }
                 changed |= t.upsert_sae(Sae {
                     id: sae_id.clone(),
                     dkms_id: reg.id.clone(),
@@ -1383,6 +1455,14 @@ impl TopologyStore {
             }
             changed
         });
+        if !conflicts.is_empty() {
+            let n = SAE_ANNOUNCE_CONFLICTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if common::log_throttle::nth_is_loud(n) {
+                warn!(dkms = %reg.id, saes = ?conflicts, total = n + 1,
+                      "announce_dkms: SAEs con otro dueño, NO reasignados (R1)");
+            }
+        }
+        out.sae_conflicts = conflicts;
         out.accepted = accepted;
         out.changed = changed;
         if !accepted {
@@ -1429,6 +1509,11 @@ impl TopologyStore {
                 })?
                 .id
                 .clone();
+            if t.sae_count_for(&dkms) >= MAX_SAES_PER_DKMS {
+                return Err(SdnError::BadRequest(format!(
+                    "dkms {dkms} already has {MAX_SAES_PER_DKMS} saes"
+                )));
+            }
             let sae = Sae {
                 id: sae_id.into(),
                 dkms_id: dkms,
@@ -1453,8 +1538,9 @@ impl TopologyStore {
             return Ok(Vec::new());
         }
         let mut results: Vec<BulkSaeOutcome> = Vec::with_capacity(items.len());
+        let mut any_change = false;
         // ONE mutex take, ONE clone for the whole batch.
-        self.try_mutate(|t| {
+        self.try_mutate_if(|t| {
             for item in items.iter() {
                 if item.dkms_id.is_none() && item.dkms_target.is_none() {
                     results.push(BulkSaeOutcome::Error {
@@ -1493,14 +1579,23 @@ impl TopologyStore {
                         continue;
                     }
                 };
+                if t.sae_count_for(&dkms_id) >= MAX_SAES_PER_DKMS {
+                    results.push(BulkSaeOutcome::Error {
+                        sae_id: item.sae_id.clone(),
+                        code: "too_many_saes".into(),
+                        detail: format!("dkms {dkms_id} already has {MAX_SAES_PER_DKMS} saes"),
+                    });
+                    continue;
+                }
                 let sae = Sae {
                     id: item.sae_id.clone(),
                     dkms_id,
                 };
+                any_change = true;
                 t.saes.insert(sae.id.clone(), sae.clone());
                 results.push(BulkSaeOutcome::Ok(sae));
             }
-            Ok(())
+            Ok(((), any_change))
         })?;
         Ok(results)
     }
@@ -1532,6 +1627,13 @@ impl TopologyStore {
                 })?
                 .id
                 .clone();
+            if t.saes.get(sae_id).map(|s| s.dkms_id.as_str()) != Some(dkms.as_str())
+                && t.sae_count_for(&dkms) >= MAX_SAES_PER_DKMS
+            {
+                return Err(SdnError::BadRequest(format!(
+                    "dkms {dkms} already has {MAX_SAES_PER_DKMS} saes"
+                )));
+            }
             let sae = Sae {
                 id: sae_id.into(),
                 dkms_id: dkms,
@@ -2617,6 +2719,99 @@ mod tests {
         let t = store.load();
         assert_eq!(t.dkms_by_qkc.get("1").map(String::as_str), Some("dkms-1"));
         assert!(!t.dkms.contains_key("dkms-9"));
+    }
+
+    /// R1 (auditoría 2026-09-03): el anuncio está atado al cert del
+    /// anunciante, pero `saes` lo escribe él. Un DKMS que liste un SAE con
+    /// otro dueño no se lo lleva: el binding —y la clave de sesión que el
+    /// origen sella hacia quien la SDN diga— se queda con el dueño actual.
+    #[test]
+    fn an_announce_cannot_steal_a_sae_bound_to_another_dkms() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        store.announce_qkc(&announce("2", &[], 2000.0));
+        for (orr, qkc, hid) in [("orr_1", "1", 201), ("orr_2", "2", 202)] {
+            assert!(
+                store
+                    .announce_orr(&OrrAnnounce {
+                        id: orr.into(),
+                        host: dummy_host(hid, 20003),
+                        qkc_id: qkc.into(),
+                    })
+                    .accepted
+            );
+        }
+        let dkms = |id: &str, orr: &str, hid: i64, saes: &[&str]| DkmsAnnounce {
+            id: id.into(),
+            host: dummy_host(hid, 20005),
+            peer_addr: Some(format!("10.0.0.{hid}:20006")),
+            orr_id: orr.into(),
+            saes: saes.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(
+            store
+                .announce_dkms(&dkms("dkms-1", "orr_1", 301, &["sae_1"]))
+                .accepted
+        );
+        assert_eq!(store.load().saes["sae_1"].dkms_id, "dkms-1");
+        let v = store.load().version;
+
+        // dkms-2 reclama sae_1 en su anuncio: se acepta el DKMS, NO el SAE.
+        let out = store.announce_dkms(&dkms("dkms-2", "orr_2", 302, &["sae_1", "sae_2"]));
+        assert!(out.accepted);
+        assert_eq!(out.sae_conflicts, vec!["sae_1".to_string()]);
+        let t = store.load();
+        assert_eq!(t.saes["sae_1"].dkms_id, "dkms-1", "el dueño no cambia");
+        assert_eq!(t.saes["sae_2"].dkms_id, "dkms-2");
+        assert!(t.version > v);
+
+        // Un latido idéntico del ladrón no bumpea nada (idempotencia).
+        let v = store.load().version;
+        let out = store.announce_dkms(&dkms("dkms-2", "orr_2", 302, &["sae_1", "sae_2"]));
+        assert!(out.accepted && !out.changed);
+        assert_eq!(store.load().version, v);
+
+        // El dueño lo suelta: entonces sí.
+        store.delete_sae("sae_1").unwrap();
+        let out = store.announce_dkms(&dkms("dkms-2", "orr_2", 302, &["sae_1", "sae_2"]));
+        assert!(out.sae_conflicts.is_empty());
+        assert_eq!(store.load().saes["sae_1"].dkms_id, "dkms-2");
+    }
+
+    #[test]
+    fn a_noop_sae_bulk_does_not_bump_the_version() {
+        let store = TopologyStore::new(Topology::default());
+        store.announce_qkc(&announce("1", &[], 2000.0));
+        assert!(
+            store
+                .announce_orr(&OrrAnnounce {
+                    id: "orr_1".into(),
+                    host: dummy_host(201, 20003),
+                    qkc_id: "1".into(),
+                })
+                .accepted
+        );
+        assert!(
+            store
+                .announce_dkms(&DkmsAnnounce {
+                    id: "dkms-1".into(),
+                    host: dummy_host(301, 20005),
+                    peer_addr: Some("10.0.0.301:20006".into()),
+                    orr_id: "orr_1".into(),
+                    saes: vec!["sae_1".into()],
+                })
+                .accepted
+        );
+        let v = store.load().version;
+        let out = store
+            .register_sae_bulk(vec![SaeBulkItem {
+                sae_id: "sae_1".into(),
+                dkms_id: Some("dkms-1".into()),
+                dkms_target: None,
+            }])
+            .unwrap();
+        assert!(matches!(out[0], BulkSaeOutcome::Error { .. }));
+        assert_eq!(store.load().version, v, "un bulk sin efecto no bumpea (R7)");
     }
 
     #[test]

@@ -88,12 +88,21 @@ impl CommodityDemand {
 
     /// Sanity check: fields are within plausible bounds.
     pub fn is_well_formed(&self) -> bool {
+        // Magnitudes acotadas (auditoría 2026-09-03, C-05): un `drain_rate`
+        // de 1e300 finito y positivo pasaba, y la proyección a factible
+        // (`out[i] = xs[i] / worst`) dejaba a CERO toda commodity que
+        // compartiera arista con él — justo el `starved = 0` que el
+        // asignador existe para garantizar.
+        const MAX_MAGNITUDE: f64 = 1.0e9;
         self.capacity > 0.0
             && self.level >= 0.0
             && self.drain_rate >= 0.0
             && self.level.is_finite()
             && self.capacity.is_finite()
             && self.drain_rate.is_finite()
+            && self.capacity <= MAX_MAGNITUDE
+            && self.level <= MAX_MAGNITUDE
+            && self.drain_rate <= MAX_MAGNITUDE
             && !self.src_dkms.is_empty()
             && !self.dst_dkms.is_empty()
             && self.src_dkms != self.dst_dkms

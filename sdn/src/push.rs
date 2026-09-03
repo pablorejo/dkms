@@ -22,17 +22,22 @@ impl Pushers {
         }
     }
 
-    pub fn subscribe(&self) -> mpsc::Receiver<std::result::Result<TopologyEvent, tonic::Status>> {
+    /// `None` si no cabe: a tope se rechaza al NUEVO (auditoría 2026-09-03,
+    /// R6). Echar al más viejo dejaba que un miembro con 256 streams
+    /// desalojara a todos los ORR legítimos, que son justo los más viejos.
+    pub fn subscribe(
+        &self,
+    ) -> Option<mpsc::Receiver<std::result::Result<TopologyEvent, tonic::Status>>> {
         let (tx, rx) = mpsc::channel(64);
         let mut g = self.subscribers.lock();
         // Poda los cerrados y acota el número de suscriptores (B10): sin cota,
         // cualquiera (o cualquier miembro bajo mTLS) abría streams sin límite.
         g.retain(|s| !s.is_closed());
         if g.len() >= MAX_SUBSCRIBERS {
-            g.remove(0); // suelta el más viejo
+            return None;
         }
         g.push(tx);
-        rx
+        Some(rx)
     }
 
     pub async fn broadcast(&self, ev: TopologyEvent) {
@@ -72,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_subscriber_does_not_block_broadcast_and_is_pruned() {
         let p = Pushers::new();
-        let _rx = p.subscribe(); // nunca lee: su canal (64) se llena
+        let _rx = p.subscribe().expect("cabe"); // nunca lee: su canal (64) se llena
         let ev = TopologyEvent::default();
         // Muchos más broadcasts que la capacidad del canal: ninguno debe
         // bloquear, y el suscriptor lleno se poda.
@@ -85,5 +90,17 @@ mod tests {
             .expect("broadcast no debe bloquear con un suscriptor lleno");
         }
         assert_eq!(p.subscriber_count(), 0, "el suscriptor lleno debe podarse");
+    }
+
+    #[test]
+    fn a_full_table_rejects_the_newcomer_instead_of_evicting_the_oldest() {
+        // R6: el más viejo suele ser un ORR legítimo; el que sobra es el nuevo.
+        let p = Pushers::new();
+        let keep: Vec<_> = (0..MAX_SUBSCRIBERS)
+            .map(|_| p.subscribe().expect("cabe"))
+            .collect();
+        assert!(p.subscribe().is_none(), "a tope, el nuevo se rechaza");
+        assert_eq!(p.subscriber_count(), MAX_SUBSCRIBERS);
+        drop(keep);
     }
 }
