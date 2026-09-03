@@ -5,7 +5,7 @@
 #   bash tests/local-mesh/campaign_sync.sh            # rsync + GIT_SHA
 #   bash tests/local-mesh/campaign_sync.sh --dry-run
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="${DKMS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$REPO"
 SHA="$(git rev-parse --short HEAD)$(git diff --quiet || echo '-dirty')"
 mkdir -p campaign-2026-09

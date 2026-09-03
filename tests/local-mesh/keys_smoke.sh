@@ -15,7 +15,7 @@
 #   keys_smoke.sh [nodos...]     default: los que haya levantados
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="${DKMS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DIR="${DKMS_MESH_DIR:-$REPO/tests/results/local-mesh}"
 C="$DIR/certs"
 [ -d "$C" ] || { echo "keys_smoke: no hay malla en $DIR (mesh.sh up N)" >&2; exit 2; }
