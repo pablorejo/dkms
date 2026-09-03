@@ -401,7 +401,34 @@ def build_tables(cells):
     return "\n".join(out)
 
 
-def make_plots(cells, outdir):
+FAM_LABEL_EN = {"estrella": "Star", "anillo": "Ring (C_N)", "puente": "Bridge",
+                "malla": "Mesh (grid)", "rgg": "RGG (QKD at distance)", "aleatoria": "Random"}
+# (título, etiqueta y) en inglés por nombre de figura; las unidades compartidas
+# (s, ms, MB, Jain) se dejan igual.
+PLOT_EN = {
+    "l2_sustained": ("L2 · sustained, stock-corrected", "keys/s"),
+    "l2_vs_ceiling": ("L2 · sustained / fibre ceiling", "fraction"),
+    "ceilings": ("Fibre ceiling (Σcap/hops) per topology", "keys/s"),
+    "l1_served_vs_offered": ("L1 · served / offered", "fraction"),
+    "l1_latency": ("L1 · latency p99", "ms"),
+    "l2_latency_p99": ("L2 · latency p99", "ms"),
+    "l0_fill_time": ("L0 · time until every buffer is full", "s"),
+    "l0_fill_slope": ("L0 · fill slope (Σ over all pairs)", "keys/s"),
+    "l2_reject": ("L2 · fraction of rejected requests (back-pressure)", "fraction"),
+    "l2_fibre_utilisation": ("L2 · fibre utilisation (Σtaken/Σcap)", "fraction"),
+    "l2_effective_hops": ("L2 · effective hops per delivered key", "hops"),
+    "l2_jain": ("L2 · fairness between pairs (Jain index)", "Jain"),
+    "l2_min_pair_share": ("L2 · worst pair / uniform share", "fraction"),
+    "l2_cpu_modules": ("L2 · CPU of the modules (6400 % = whole node)", "% cumulative"),
+    "rss_peak": ("L2 · total peak RSS", "MB"),
+    "rec_time": ("REC · recovery to full after L2", "s"),
+    "hops": ("Mean hops per topology", "hops"),
+}
+
+
+def make_plots(cells, outdir, lang="es"):
+    os.makedirs(outdir, exist_ok=True)
+    fam_label = FAM_LABEL if lang == "es" else FAM_LABEL_EN
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -412,8 +439,20 @@ def make_plots(cells, outdir):
     by = defaultdict(dict)
     for c in cells:
         by[c["family"]][c["n"]] = c
-    colors = {"estrella": "#e6a100", "anillo": "#1f77b4", "puente": "#d62728",
-              "malla": "#2ca02c", "rgg": "#9467bd", "aleatoria": "#7f7f7f"}
+    # Paleta y fondo de la web (las figuras se incrustan como SVG en una
+    # página oscura: fondo transparente, texto y rejilla apagados).
+    colors = {"estrella": "#e6a100", "anillo": "#38d3f0", "puente": "#ff6b6b",
+              "malla": "#4cd97b", "rgg": "#9d7bfa", "aleatoria": "#93a1bb"}
+    ink, muted, grid = "#e6ebf4", "#93a1bb", "#2c3a5c"
+    plt.rcParams.update({
+        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
+        "axes.edgecolor": grid, "axes.labelcolor": muted, "axes.titlecolor": ink,
+        "xtick.color": muted, "ytick.color": muted, "grid.color": grid,
+        "text.color": ink, "legend.facecolor": "#101829", "legend.edgecolor": grid,
+        "legend.labelcolor": ink, "font.family": "DejaVu Sans", "font.size": 11,
+        "axes.titlesize": 12, "legend.fontsize": 9.5,
+        "axes.spines.top": False, "axes.spines.right": False,
+    })
     figs = []
 
     def series(getter):
@@ -436,20 +475,24 @@ def make_plots(cells, outdir):
         fig, ax = plt.subplots(figsize=(8, 4.8))
         for f, (xs, ys) in series(getter).items():
             if xs:
-                ax.plot(xs, ys, marker="o", color=colors[f], label=FAM_LABEL[f])
+                ax.plot(xs, ys, marker="o", color=colors[f], label=fam_label[f])
         if extra:
             extra(ax)
-        ax.set_xlabel("N (nodos)")
+        if lang != "es":
+            title, ylabel = PLOT_EN.get(name, (title, ylabel))
+        ax.set_xlabel("N (nodos)" if lang == "es" else "N (nodes)")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.6, linewidth=0.6)
         if logy:
             ax.set_yscale("log")
         if ax.get_legend_handles_labels()[0]:
-            ax.legend(fontsize=8)
+            ax.legend()
         fig.tight_layout()
-        for ext in ("png", "svg"):
-            fig.savefig(os.path.join(outdir, name + "." + ext), dpi=130)
+        # SVG transparente (va incrustado en la web); PNG con el fondo oscuro
+        # de la web para que se lea en el ANALYSIS.md.
+        fig.savefig(os.path.join(outdir, name + ".svg"), transparent=True)
+        fig.savefig(os.path.join(outdir, name + ".png"), dpi=130, facecolor="#101829")
         plt.close(fig)
         figs.append(name)
 
@@ -563,6 +606,7 @@ def main():
     tables = build_tables(cells)
     open(os.path.join(outdir, "TABLES.md"), "w").write("# Tablas de la campaña 2026-09\n\n" + tables)
     figs = make_plots(cells, os.path.join(outdir, "figs"))
+    make_plots(cells, os.path.join(outdir, "figs", "en"), lang="en")
     draw_topologies(os.path.join(outdir, "figs"))
     done = sum(1 for c in cells if c["done"])
     print("celdas analizadas: %d (DONE: %d, FAILED: %d); figuras: %d; salida en %s" % (

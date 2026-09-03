@@ -193,6 +193,15 @@ def svg_inline(path):
     return s
 
 
+def fig_path(figs_dir, lang, name):
+    """Las gráficas van rotuladas por idioma (figs/en/ para el inglés); las
+    figuras neutras (topologías) viven solo en figs/."""
+    cand = os.path.join(figs_dir, lang, name + ".svg")
+    if lang != "es" and os.path.exists(cand):
+        return cand
+    return os.path.join(figs_dir, name + ".svg")
+
+
 def topo_cards(lang, cells, figs_dir):
     by = {(c["family"], c["n"]): c for c in cells}
     out = []
@@ -224,7 +233,7 @@ def build(lang, cells, figs_dir, narrative, style, date):
                  % (html.escape(t["sec_topos"]), t["topos_reading"], topo_cards(lang, cells, figs_dir)))
     for sec, figs, tables in FIG_SECTIONS:
         reading = nar.get(sec, t["pending"])
-        fig_html = "".join("<div class=\"card\">%s</div>" % svg_inline(os.path.join(figs_dir, f + ".svg")) for f in figs)
+        fig_html = "".join("<div class=\"card\">%s</div>" % svg_inline(fig_path(figs_dir, lang, f)) for f in figs)
         parts.append("<section><h2>%s</h2><p class=\"reading\">%s</p>%s%s</section>"
                      % (html.escape(t[sec]), reading,
                         ("<div class=\"chart-row\">%s</div>" % fig_html) if fig_html else "",
