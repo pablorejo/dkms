@@ -65,7 +65,7 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = addr.parse()?;
     let listener = common::net::bind_reuse_addr(addr).await?;
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_PEER));
-    let (intake_tx, mut intake_rx) = tokio::sync::mpsc::channel::<wire::Frame>(INTAKE_QUEUE);
+    let (intake_tx, mut intake_rx) = tokio::sync::mpsc::channel::<IngressFrame>(INTAKE_QUEUE);
     info!(
         %addr,
         max_inflight = MAX_INFLIGHT_PEER,
@@ -77,7 +77,11 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     {
         let svc = svc.clone();
         tokio::spawn(async move {
-            while let Some(frame) = intake_rx.recv().await {
+            while let Some(IngressFrame {
+                frame,
+                authenticated,
+            }) = intake_rx.recv().await
+            {
                 let permit = match Arc::clone(&inflight).acquire_owned().await {
                     Ok(p) => p,
                     Err(_) => return,
@@ -85,7 +89,7 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
                 let svc2 = svc.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = relay::handle_incoming(svc2, frame).await {
+                    if let Err(e) = relay::handle_incoming(svc2, frame, authenticated).await {
                         // Throttled: aquí desemboca TODO error sostenido del
                         // relay (BadMac, replay, plaintext rechazado, enlace
                         // seco) — un warn por frame re-anulaba el throttling
@@ -133,10 +137,21 @@ pub async fn serve(svc: QkcService, addr: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Frame de datos camino del dispatcher, con la marca de si el lector de la
+/// conexión ya lo autenticó (MAC + ventana anti-replay) en orden de llegada.
+pub(crate) struct IngressFrame {
+    pub(crate) frame: wire::Frame,
+    /// `true` ⇒ `relay::handle_incoming` NO vuelve a llamar a `authenticate`:
+    /// `open` ya quitó el trailer y devolvió el kind a su variante en claro,
+    /// y una segunda pasada lo trataría como plaintext (rechazado con
+    /// `require`).
+    pub(crate) authenticated: bool,
+}
+
 async fn handle_conn(
     svc: QkcService,
     mut stream: TcpStream,
-    intake: tokio::sync::mpsc::Sender<wire::Frame>,
+    intake: tokio::sync::mpsc::Sender<IngressFrame>,
 ) -> anyhow::Result<()> {
     let mut first = true;
     loop {
@@ -170,16 +185,59 @@ async fn handle_conn(
         first = false;
 
         match frame.kind {
-            // Las variantes `_AUTH` siguen exactamente el mismo camino: el MAC
-            // se comprueba en `relay::handle_incoming`, donde el enlace (y por
-            // tanto la clave) ya está resuelto. Aquí sólo hay que dejarlas pasar.
+            // El MAC y la ventana anti-replay se comprueban AQUÍ, en el lector
+            // de la conexión y por tanto en orden de llegada. Antes se hacían
+            // en `relay::handle_incoming`, dentro de una de las hasta
+            // `MAX_INFLIGHT_PEER` (8192) tareas concurrentes, y la ventana
+            // cubre 1024 contadores: bajo carga una tarea con un frame viejo
+            // corría después de miles con frames nuevos y el frame legítimo
+            // se rechazaba como repetido. Medido 2026-09-03 en CESGA: 332 762
+            // `replayed` (10 % de lo verificado) en el extremo del puente a
+            // N=100, y 121k/211k en las hojas de la estrella a N=90/100, con
+            // `bad_mac = 0` — material expirado y tasa perdida sin ningún
+            // ataque. Verificar en el lector también deja fuera de la cola de
+            // entrada todo frame forjado: un tercero ya no puede llenarla.
+            // Un sender sin enlace conocido se encola sin autenticar y el
+            // relay produce su error habitual (`UnknownNeighbor`).
             FRAME_RECV | FRAME_RELAY | FRAME_RECV_AUTH | FRAME_RELAY_AUTH => {
+                let mut frame = frame;
+                let authenticated = match svc.link_to(frame.sender_id) {
+                    Some(link) => {
+                        if let Err(e) =
+                            crate::frame_auth::authenticate(link.frame_auth.as_ref(), &mut frame)
+                        {
+                            // Contado ya en `LinkFrameAuth` (bad_mac /
+                            // replayed / plain_rej); aquí solo el aviso
+                            // throttled, como el `handle_err` del dispatcher.
+                            static N: AtomicU64 = AtomicU64::new(0);
+                            let n = N.fetch_add(1, Ordering::Relaxed);
+                            if common::log_throttle::nth_is_loud(n) {
+                                warn!(
+                                    sender = frame.sender_id,
+                                    error = %e,
+                                    total = n + 1,
+                                    "qkc.peer_server.ingress_rejected"
+                                );
+                            }
+                            continue;
+                        }
+                        true
+                    }
+                    None => false,
+                };
                 // try_send, nunca await: si el reader se bloquease, el
                 // siguiente frame (que podría ser `FRAME_KEY_IDS_NOTIFY` con
                 // las claves que un handler de delante espera) no se leería
                 // → head-of-line deadlock. La concurrencia real la acota el
                 // semáforo en el dispatcher; lo pendiente, la cola.
-                enqueue_data_frame(&intake, &svc.stats, frame);
+                enqueue_data_frame(
+                    &intake,
+                    &svc.stats,
+                    IngressFrame {
+                        frame,
+                        authenticated,
+                    },
+                );
             }
             FRAME_KEY_IDS_NOTIFY => {
                 // Sin semáforo: handle_notify es síncrono y trivial
@@ -253,9 +311,9 @@ fn handle_notify(svc: QkcService, mut frame: wire::Frame) {
 /// llena o dispatcher muerto), contado en `intake_dropped_full` y con warn
 /// throttled — nunca bloquea al reader.
 fn enqueue_data_frame(
-    intake: &tokio::sync::mpsc::Sender<wire::Frame>,
+    intake: &tokio::sync::mpsc::Sender<IngressFrame>,
     stats: &crate::service::ServiceStats,
-    frame: wire::Frame,
+    frame: IngressFrame,
 ) -> bool {
     match intake.try_send(frame) {
         Ok(()) => true,
@@ -303,18 +361,14 @@ mod tests {
     /// A cola llena el frame se descarta contado, sin bloquear jamás.
     #[tokio::test]
     async fn full_intake_drops_and_counts() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<wire::Frame>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<IngressFrame>(1);
         let stats = crate::service::ServiceStats::default();
-        assert!(enqueue_data_frame(
-            &tx,
-            &stats,
-            wire::Frame::empty(FRAME_RECV)
-        ));
-        assert!(!enqueue_data_frame(
-            &tx,
-            &stats,
-            wire::Frame::empty(FRAME_RECV)
-        ));
+        let ingress = || IngressFrame {
+            frame: wire::Frame::empty(FRAME_RECV),
+            authenticated: false,
+        };
+        assert!(enqueue_data_frame(&tx, &stats, ingress()));
+        assert!(!enqueue_data_frame(&tx, &stats, ingress()));
         assert_eq!(
             stats.intake_dropped_full.load(Ordering::Relaxed),
             1,
@@ -322,10 +376,6 @@ mod tests {
         );
         // Al vaciar la cola vuelve a aceptar.
         rx.recv().await.expect("frame encolado");
-        assert!(enqueue_data_frame(
-            &tx,
-            &stats,
-            wire::Frame::empty(FRAME_RECV)
-        ));
+        assert!(enqueue_data_frame(&tx, &stats, ingress()));
     }
 }

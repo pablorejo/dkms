@@ -71,9 +71,13 @@ const DEC_WAIT_TIMEOUT: Duration = Duration::from_millis(2000);
 const ENC_WAIT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Frame entrante desde otro QKC.
-pub async fn handle_incoming(svc: QkcService, frame: Frame) -> Result<()> {
+/// `pre_authenticated`: el lector de la conexión ya pasó `authenticate` (MAC +
+/// ventana anti-replay, en orden de llegada — ver `peer_server::handle_conn`);
+/// el frame llega con el trailer quitado y su kind en claro, así que aquí NO se
+/// vuelve a comprobar (una segunda pasada lo trataría como plaintext).
+pub async fn handle_incoming(svc: QkcService, frame: Frame, pre_authenticated: bool) -> Result<()> {
     svc.stats.incoming_starts.fetch_add(1, Ordering::Relaxed);
-    let result = handle_incoming_inner(&svc, frame).await;
+    let result = handle_incoming_inner(&svc, frame, pre_authenticated).await;
     match &result {
         Ok(()) => {}
         Err(_) => {
@@ -83,15 +87,23 @@ pub async fn handle_incoming(svc: QkcService, frame: Frame) -> Result<()> {
     result
 }
 
-async fn handle_incoming_inner(svc: &QkcService, mut frame: Frame) -> Result<()> {
+async fn handle_incoming_inner(
+    svc: &QkcService,
+    mut frame: Frame,
+    pre_authenticated: bool,
+) -> Result<()> {
     let in_link = svc
         .link_to(frame.sender_id)
         .ok_or(QkcError::UnknownNeighbor(frame.sender_id))?;
     // Autenticación del frame ANTES de tocar nada: `sender_id` todavía no está
     // verificado, así que hasta aquí sólo se ha usado para elegir el enlace (y
     // por tanto la clave con la que se comprueba). Un `open` correcto es lo que
-    // ata el frame a ese enlace.
-    crate::frame_auth::authenticate(in_link.frame_auth.as_ref(), &mut frame)?;
+    // ata el frame a ese enlace. En el camino normal ya lo hizo el lector de
+    // la conexión (en orden de llegada, que es lo que la ventana anti-replay
+    // necesita); aquí queda como red para cualquier otro origen.
+    if !pre_authenticated {
+        crate::frame_auth::authenticate(in_link.frame_auth.as_ref(), &mut frame)?;
+    }
     let in_chunk_bytes = (in_link.cfg.key_size_bits / 8) as usize;
     let key_ids: Vec<Uuid> = parse_key_ids(&frame.key_ids)?;
 

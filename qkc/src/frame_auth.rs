@@ -628,6 +628,42 @@ mod tests {
         (mk(FrameAuth::Require), mk(FrameAuth::Require))
     }
 
+    /// Regresión 2026-09-03 (CESGA, puente N=100 / estrella N=90-100): con
+    /// MAC + ventana comprobados en tareas concurrentes, un frame legítimo
+    /// podía comprobarse después de miles posteriores y caer fuera de la
+    /// ventana (1024) como «repetido» — 332 762 `replayed` con `bad_mac = 0`
+    /// en el extremo del puente. Verificado en el lector, en orden de
+    /// llegada, ninguna ráfaga puede rechazarse por larga que sea.
+    #[test]
+    fn opened_in_arrival_order_a_burst_beyond_the_window_never_rejects() {
+        let (tx, rx) = pair();
+        let burst = 4 * common::crypto::frame_mac::DEFAULT_WINDOW as usize;
+        for _ in 0..burst {
+            let mut f = frame(FRAME_RECV);
+            tx.seal(&mut f);
+            rx.open(&mut f).expect("en orden nunca se rechaza");
+        }
+        assert_eq!(rx.stats.replayed.load(Ordering::Relaxed), 0);
+        assert_eq!(rx.stats.verified.load(Ordering::Relaxed), burst as u64);
+    }
+
+    /// La misma ráfaga con un frame comprobado tarde: es exactamente lo que
+    /// producía la verificación concurrente, y lo que la ventana debe seguir
+    /// rechazando (un frame de verdad viejo ES un replay).
+    #[test]
+    fn opened_out_of_order_beyond_the_window_is_rejected_as_replay() {
+        let (tx, rx) = pair();
+        let mut late = frame(FRAME_RECV);
+        tx.seal(&mut late);
+        for _ in 0..(2 * common::crypto::frame_mac::DEFAULT_WINDOW as usize) {
+            let mut f = frame(FRAME_RECV);
+            tx.seal(&mut f);
+            rx.open(&mut f).unwrap();
+        }
+        assert!(matches!(rx.open(&mut late), Err(FrameAuthError::Replay(_))));
+        assert_eq!(rx.stats.replayed.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn seal_open_round_trip() {
         let (tx, rx) = pair();
