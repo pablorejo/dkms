@@ -203,6 +203,11 @@ pub struct TransportE2eCfg {
     /// Anchura de la ventana anti-replay por peer emisor, en contadores.
     #[serde(default = "default_e2e_window")]
     pub replay_window: u64,
+    /// Acuerdos que este lado RESPONDE por peer y por intervalo de 2 s
+    /// (auditoría 2026-09-03, B-11). 4 de fábrica: caben dos acuerdos
+    /// concurrentes legítimos y el rekey.
+    #[serde(default = "default_respond_burst")]
+    pub respond_burst: u8,
 }
 
 impl Default for TransportE2eCfg {
@@ -213,6 +218,7 @@ impl Default for TransportE2eCfg {
             rekey_keys: default_e2e_rekey_keys(),
             epoch_history_keep: default_e2e_history(),
             replay_window: default_e2e_window(),
+            respond_burst: default_respond_burst(),
         }
     }
 }
@@ -445,26 +451,27 @@ pub struct GeneratorCfg {
     /// con un puerto offset definido por `ack_socket_port_offset`.
     pub ack_socket_addr: Option<SocketAddr>,
 
-    /// Transporte de los ACK **salientes**: `"socket"` (default, TCP plano
-    /// heredado) o `"etsi020"` (POST mTLS a `/kmapi/v1/ext_keys/ack`).
+    /// Transporte de los ACK **salientes**: `"etsi020"` (default: POST mTLS a
+    /// `/kmapi/v1/ext_keys/ack`, identidad = certificado de cliente) o
+    /// `"socket"` (TCP plano heredado).
     ///
     /// El socket acepta conexiones de cualquiera y se cree el `from` que le
     /// mandan, así que un ACK forjado saca entradas de `ack_pending` y
-    /// descuadra el generador (docs/SECURITY.md §Fase 4). Con `etsi020` la
-    /// identidad la pone el certificado de cliente.
-    ///
-    /// Sigue en `socket` por defecto: el receptor autenticado ya existía
-    /// (`handle_ext_keys_ack`), pero migrar la salida y retirar el socket está
-    /// pendiente de verificación en testbed. Hay que ponerlo en los DOS
-    /// extremos y comprobar que `generator.state` sigue moviendo `acked`.
+    /// descuadra el generador (docs/SECURITY.md §Fase 4; auditoría
+    /// 2026-09-02 B4). El default pasó a `etsi020` el 2026-09-03 (F2), una
+    /// vez validado en el testbed Proxmox multi-host (2026-09-01: 950
+    /// claves/s sostenidas, `acked` moviéndose, 0 corruptas) y en el soak
+    /// local de 60 min. Hay que ponerlo igual en los DOS extremos: un peer
+    /// que siga en `socket` necesita que este lado escuche (`ack_socket_listen`).
     #[serde(default = "default_ack_transport")]
     pub ack_transport: String,
     /// Si este DKMS **escucha** ACKs en el socket TCP plano (`ack_socket_addr`).
     /// Independiente de `ack_transport`, que es la salida: durante un
     /// despliegue mixto un peer que aún acuse por socket necesita que este
-    /// lado lo escuche. Con todos los peers en `etsi020` se apaga, y con él
-    /// el único plano cross-institución que quedaba sin autenticar.
-    #[serde(default = "default_true")]
+    /// lado lo escuche. Apagado por defecto desde 2026-09-03 (F2): con todos
+    /// los peers en `etsi020` no queda ningún plano cross-institución sin
+    /// autenticar. `true` solo mientras dure una migración mixta.
+    #[serde(default)]
     pub ack_socket_listen: bool,
     /// Override del valor textual que se ANUNCIA a peers en el header
     /// ``ack_endpoint``. Cuando ``ack_socket_addr`` binda en ``0.0.0.0``
@@ -537,7 +544,7 @@ impl Default for GeneratorCfg {
             ack_reaper_ms: 1_000,
             ack_socket_addr: None,
             ack_transport: default_ack_transport(),
-            ack_socket_listen: true,
+            ack_socket_listen: false,
             ack_advertised_endpoint: None,
             max_tokens_per_peer_per_tick: 32,
             max_emits_in_flight: 128,
@@ -563,9 +570,13 @@ fn default_rpc_timeout_ms() -> u64 {
     3_000
 }
 fn default_ack_transport() -> String {
-    "socket".to_string()
+    "etsi020".to_string()
 }
 
 fn default_max_hops() -> i32 {
     0
+}
+
+fn default_respond_burst() -> u8 {
+    4
 }

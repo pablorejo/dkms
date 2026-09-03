@@ -495,15 +495,15 @@ impl Generator {
         );
     }
 
-    /// Punto de entrada del ACK socket: el peer confirma que recibió la
-    /// clave `key_id`. Movemos la entrada de `ack_pending[peer]` a
-    /// `BufferPool.enc[peer]`. Devuelve `true` si se movió.
     /// ¿`from` es un peer del que legítimamente esperamos ACKs? Solo emitimos
     /// (y por tanto solo esperamos ACK) hacia peers del registro (B5).
     pub fn is_known_ack_peer(&self, from: &str) -> bool {
         self.peers.get(from).is_some()
     }
 
+    /// Punto de entrada del ACK (socket o ETSI-020): el peer confirma que
+    /// recibió la clave `key_id`. Movemos la entrada de `ack_pending[peer]` a
+    /// `BufferPool.enc[peer]`. Devuelve `true` si se movió.
     pub fn on_ack(&self, peer_dkms_id: &str, key_id: &KeyId) -> bool {
         let entry = match self.ack_pending.take_diagnosed(peer_dkms_id, key_id) {
             TakeOutcome::Hit(e) => e,
@@ -1175,10 +1175,19 @@ mod tests {
 
     #[test]
     fn ack_endpoint_is_not_advertised_when_the_listener_is_off() {
+        // De fábrica (desde 2026-09-03) el listener está apagado: ni con un
+        // endpoint anunciado explícito se pone en la cabecera.
         let mut g = GeneratorCfg {
             ack_advertised_endpoint: Some("10.0.0.7:20009".into()),
             ..GeneratorCfg::default()
         };
+        assert!(
+            !g.ack_socket_listen,
+            "el default del listener es apagado (F2)"
+        );
+        assert_eq!(advertised_ack_endpoint(&g), None);
+
+        g.ack_socket_listen = true;
         assert_eq!(
             advertised_ack_endpoint(&g).as_deref(),
             Some("10.0.0.7:20009")
