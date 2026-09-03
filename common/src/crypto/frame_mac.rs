@@ -216,6 +216,43 @@ pub struct ReplayWindow {
     bits: Vec<u64>,
     /// Sesiones abandonadas, para que nadie las reviva con frames capturados.
     retired: Vec<u64>,
+    /// Ventana de la sesión ANTERIOR: un frame sellado justo antes de una
+    /// rotación puede llegar después del primero de la nueva (contadores
+    /// concurrentes, orden de escritura ≠ orden de sellado). Se acepta si su
+    /// contador es fresco AHÍ; sin esto, o se perdía o —peor— tiraba la
+    /// sesión nueva (auditoría 2026-09-03, C-08).
+    prev: Option<(u64, u64, Vec<u64>)>,
+    /// Cómo se adopta una sesión nueva (ver [`SessionAdopt`]).
+    adopt: SessionAdopt,
+    /// Último frame aceptado en la sesión actual (modo no monótono: una
+    /// sesión nueva solo se adopta si la actual lleva `quiet` sin verificar
+    /// nada — un peer reiniciado calla, un forjador no).
+    last_accept: Option<std::time::Instant>,
+    /// Silencio exigido en `AfterQuiet` (default `ADOPT_AFTER_QUIET`).
+    quiet: std::time::Duration,
+}
+
+/// Modo `AfterQuiet`: silencio mínimo de la sesión actual para adoptar otra.
+const ADOPT_AFTER_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cuándo un frame verificado con una sesión distinta de la actual la
+/// convierte en la nueva sesión (C-08). Las sesiones ya vistas (la anterior,
+/// las retiradas) nunca se readoptan, en ninguna política.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAdopt {
+    /// Cualquier sesión no vista se adopta en el acto. Para claves EFÍMERAS
+    /// por proceso (e2e del DKMS, cebolla del ORR): un frame capturado de una
+    /// sesión anterior a nuestro reinicio ya no verifica, así que lo único
+    /// que hay que impedir es revivir las sesiones vistas.
+    Any,
+    /// Solo una sesión MAYOR (épocas): una menor es un frame viejo.
+    Monotonic,
+    /// Solo si la actual lleva `ADOPT_AFTER_QUIET` sin verificar nada. Para
+    /// una raíz FIJA (PSK): la clave de cualquier sesión se deriva igual
+    /// antes y después de un reinicio nuestro, así que un frame capturado de
+    /// una sesión que este proceso no vio verificaría y, adoptado, dejaba
+    /// muda la sesión viva. Un peer reiniciado de verdad calla.
+    AfterQuiet,
 }
 
 /// Cuántas sesiones retiradas se recuerdan. Un enlace que ve más reinicios que
@@ -232,7 +269,33 @@ impl ReplayWindow {
             highest: 0,
             bits: vec![0u64; (width as usize).div_ceil(64)],
             retired: Vec::new(),
+            prev: None,
+            adopt: SessionAdopt::Any,
+            last_accept: None,
+            quiet: ADOPT_AFTER_QUIET,
         }
+    }
+
+    /// Silencio exigido antes de adoptar otra sesión en `AfterQuiet`.
+    /// Para tests (un reinicio «inmediato» no puede esperar 10 s).
+    pub fn set_quiet(&mut self, quiet: std::time::Duration) {
+        self.quiet = quiet;
+    }
+
+    /// Ventana cuyas sesiones son números de ÉPOCA (crecientes): una sesión
+    /// menor que la actual es un frame viejo, nunca un reinicio.
+    pub fn new_monotonic(width: u64) -> Self {
+        let mut w = Self::new(width);
+        w.adopt = SessionAdopt::Monotonic;
+        w
+    }
+
+    /// Ventana para una raíz FIJA (PSK): una sesión nueva solo se adopta
+    /// cuando la actual lleva un rato callada (ver [`SessionAdopt`]).
+    pub fn new_quiet_gated(width: u64) -> Self {
+        let mut w = Self::new(width);
+        w.adopt = SessionAdopt::AfterQuiet;
+        w
     }
 
     /// Sesión que la ventana está seguiendo ahora mismo.
@@ -248,15 +311,57 @@ impl ReplayWindow {
     fn reset_to(&mut self, session: u64) {
         if let Some(old) = self.session {
             if old != session {
-                self.retired.push(old);
-                if self.retired.len() > RETIRED_KEPT {
-                    self.retired.remove(0);
+                // La anterior queda viva un turno (frames tardíos); la que
+                // había en `prev` sí se retira del todo.
+                if let Some((p, _, _)) = self.prev.take() {
+                    self.retired.push(p);
+                    if self.retired.len() > RETIRED_KEPT {
+                        self.retired.remove(0);
+                    }
                 }
+                self.prev = Some((old, self.highest, self.bits.clone()));
             }
         }
         self.session = Some(session);
         self.highest = 0;
         self.bits.iter_mut().for_each(|w| *w = 0);
+    }
+
+    /// Frame de la sesión anterior: fresco si su contador no está en la
+    /// ventana guardada de esa sesión (y no la reabre por encima).
+    fn check_and_set_prev(&mut self, session: u64, counter: u64) -> Result<(), ReplayError> {
+        let width = self.width;
+        let Some((p, highest, bits)) = self.prev.as_mut() else {
+            return Err(ReplayError::RetiredSession { session });
+        };
+        debug_assert_eq!(*p, session);
+        if counter > *highest {
+            // Por encima de lo visto en esa sesión: el emisor siguió
+            // contando antes de rotar; se acepta y se avanza la ventana.
+            let by = counter - *highest;
+            if by >= width {
+                bits.iter_mut().for_each(|w| *w = 0);
+            } else {
+                shift_bits(bits, by);
+            }
+            *highest = counter;
+            bits[0] |= 1;
+            return Ok(());
+        }
+        let back = *highest - counter;
+        if back >= width {
+            return Err(ReplayError::TooOld {
+                session,
+                counter,
+                floor: highest.saturating_sub(width - 1),
+            });
+        }
+        let i = back as usize;
+        if bits[i / 64] & (1u64 << (i % 64)) != 0 {
+            return Err(ReplayError::Replayed { session, counter });
+        }
+        bits[i / 64] |= 1u64 << (i % 64);
+        Ok(())
     }
 
     fn is_set(&self, back: u64) -> bool {
@@ -274,22 +379,7 @@ impl ReplayWindow {
             self.bits.iter_mut().for_each(|w| *w = 0);
             return;
         }
-        let words = (by / 64) as usize;
-        let rem = (by % 64) as u32;
-        let n = self.bits.len();
-        if words > 0 {
-            for i in (0..n).rev() {
-                self.bits[i] = if i >= words { self.bits[i - words] } else { 0 };
-            }
-        }
-        if rem > 0 {
-            let mut carry = 0u64;
-            for w in self.bits.iter_mut() {
-                let next = *w >> (64 - rem);
-                *w = (*w << rem) | carry;
-                carry = next;
-            }
-        }
+        shift_bits(&mut self.bits, by);
     }
 
     /// Acepta `(session, counter)` si es fresco, y lo marca como visto.
@@ -302,9 +392,33 @@ impl ReplayWindow {
         if self.retired.contains(&session) {
             return Err(ReplayError::RetiredSession { session });
         }
-        if self.session != Some(session) {
+        if let Some((p, _, _)) = &self.prev {
+            if *p == session {
+                return self.check_and_set_prev(session, counter);
+            }
+        }
+        if let Some(cur) = self.session {
+            if cur != session {
+                // ¿Adoptar la sesión nueva? Antes se adoptaba SIEMPRE, y la
+                // actual se retiraba: un frame CAPTURADO de una sesión vieja
+                // (verifica: su clave sigue en la historia) enmudecía el
+                // enlace hasta la siguiente rotación (C-08).
+                let adopt = match self.adopt {
+                    SessionAdopt::Any => true,
+                    SessionAdopt::Monotonic => session > cur,
+                    SessionAdopt::AfterQuiet => {
+                        self.last_accept.is_none_or(|t| t.elapsed() >= self.quiet)
+                    }
+                };
+                if !adopt {
+                    return Err(ReplayError::RetiredSession { session });
+                }
+                self.reset_to(session);
+            }
+        } else {
             self.reset_to(session);
         }
+        self.last_accept = Some(std::time::Instant::now());
         if counter > self.highest {
             let by = counter - self.highest;
             self.shift(by);
@@ -325,6 +439,25 @@ impl ReplayWindow {
         }
         self.set(back);
         Ok(())
+    }
+}
+
+fn shift_bits(bits: &mut [u64], by: u64) {
+    let words = (by / 64) as usize;
+    let rem = (by % 64) as u32;
+    let n = bits.len();
+    if words > 0 {
+        for i in (0..n).rev() {
+            bits[i] = if i >= words { bits[i - words] } else { 0 };
+        }
+    }
+    if rem > 0 {
+        let mut carry = 0u64;
+        for w in bits.iter_mut() {
+            let next = *w >> (64 - rem);
+            *w = (*w << rem) | carry;
+            carry = next;
+        }
     }
 }
 
@@ -540,9 +673,9 @@ mod tests {
 
     #[test]
     fn new_session_resets_the_window() {
-        let mut w = ReplayWindow::new(64);
+        // Monótona (épocas): una sesión mayor se adopta en el acto.
+        let mut w = ReplayWindow::new_monotonic(64);
         assert!(w.check_and_set(1, 50).is_ok());
-        // El emisor reinicia: sesión nueva, contadores desde 1 otra vez.
         assert!(w.check_and_set(2, 1).is_ok());
         assert_eq!(w.session(), Some(2));
         assert_eq!(w.highest(), 1);
@@ -550,10 +683,11 @@ mod tests {
 
     #[test]
     fn retired_session_cannot_be_revived() {
-        let mut w = ReplayWindow::new(64);
+        let mut w = ReplayWindow::new_monotonic(64);
         assert!(w.check_and_set(1, 5).is_ok());
         assert!(w.check_and_set(2, 1).is_ok());
-        // Reinyectar un frame capturado de la sesión 1.
+        assert!(w.check_and_set(3, 1).is_ok());
+        // La sesión 1 ya está dos rotaciones atrás: retirada del todo.
         assert_eq!(
             w.check_and_set(1, 5),
             Err(ReplayError::RetiredSession { session: 1 })
@@ -562,6 +696,64 @@ mod tests {
             w.check_and_set(1, 6),
             Err(ReplayError::RetiredSession { session: 1 })
         );
+        // Y la actual sigue viva: el capturado no la tiró (C-08).
+        assert!(w.check_and_set(3, 2).is_ok());
+    }
+
+    #[test]
+    fn a_captured_frame_of_an_older_session_does_not_mute_the_current_one() {
+        // C-08: antes, cualquier sesión distinta se adoptaba y la actual se
+        // retiraba: un frame capturado de la sesión 1 dejaba mudo al enlace.
+        let mut w = ReplayWindow::new_monotonic(64);
+        assert!(w.check_and_set(5, 10).is_ok());
+        assert_eq!(
+            w.check_and_set(1, 7),
+            Err(ReplayError::RetiredSession { session: 1 })
+        );
+        assert_eq!(w.session(), Some(5));
+        assert!(w.check_and_set(5, 11).is_ok());
+        // Raíz fija (PSK): tampoco, mientras la actual esté viva.
+        let mut w = ReplayWindow::new_quiet_gated(64);
+        assert!(w.check_and_set(77, 3).is_ok());
+        assert_eq!(
+            w.check_and_set(12, 1),
+            Err(ReplayError::RetiredSession { session: 12 })
+        );
+        assert!(w.check_and_set(77, 4).is_ok());
+        // Claves efímeras (`Any`): una sesión no vista se adopta en el acto,
+        // pero la anterior y las retiradas no vuelven.
+        let mut w = ReplayWindow::new(64);
+        assert!(w.check_and_set(9, 1).is_ok());
+        assert!(w.check_and_set(4, 1).is_ok());
+        assert_eq!(w.session(), Some(4));
+        assert!(
+            w.check_and_set(9, 2).is_ok(),
+            "la anterior sigue aceptando frescos"
+        );
+        assert!(w.check_and_set(1, 1).is_ok());
+        assert_eq!(
+            w.check_and_set(9, 3),
+            Err(ReplayError::RetiredSession { session: 9 })
+        );
+    }
+
+    #[test]
+    fn late_frames_of_the_previous_session_are_still_accepted_once() {
+        let mut w = ReplayWindow::new_monotonic(64);
+        assert!(w.check_and_set(1, 5).is_ok());
+        assert!(w.check_and_set(2, 1).is_ok());
+        // Sellado antes de rotar, llegado después: fresco en su ventana.
+        assert!(w.check_and_set(1, 6).is_ok());
+        assert!(w.check_and_set(1, 4).is_ok());
+        // Pero solo una vez.
+        assert_eq!(
+            w.check_and_set(1, 6),
+            Err(ReplayError::Replayed {
+                session: 1,
+                counter: 6
+            })
+        );
+        assert_eq!(w.session(), Some(2));
     }
 
     #[test]
