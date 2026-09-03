@@ -113,6 +113,18 @@ sampler() {
             # Curva par a par de un nodo (dkms1), para ver el llenado de cada peer.
             tail -c 900000 "$MESH_DIR/logs/dkms1.log" 2>/dev/null | strip | grep -a 'generator.state' | tail -$(( N - 1 )) \
                 | grep -oE 'peer=[^ ]+ enc=[0-9]+ dec=[0-9]+' | awk '{ printf "R1 %s %s %s\n", $1, $2, $3 }'
+            # Stock de cada KME (quditto, HTTP plano en 30000+idx): el tercer
+            # almacén que drena la saturación; sin él el sostenido de L2 no se
+            # puede corregir del todo (8192 claves por arista de fábrica).
+            while read -r idx _a _b _d; do
+                [ -n "$idx" ] || continue
+                curl -s --max-time 2 "http://127.0.0.1:$(( 30000 + idx ))/api/v1/keys/probe/status" 2>/dev/null \
+                    | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print("K idx=%s stored=%d max=%d" % (sys.argv[1], d.get("stored_key_count",0), d.get("max_key_count",0)))
+except Exception:
+    pass' "$idx"
+            done < "$MESH_DIR/edges.tsv"
             tail -c 200000 "$MESH_DIR/logs/sdn.log" 2>/dev/null | strip | grep -a 'mcmcf' | tail -2 | sed 's/^/S /'
             ps -eo rss=,pcpu=,comm= | awk '
                 $3 ~ /^(sdn|qkc|orr|dkms|quditto|sae_load)$/ { n[$3]++; rss[$3] += $1; cpu[$3] += $2 }

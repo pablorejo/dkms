@@ -73,7 +73,7 @@ def parse_samples(path):
                 if not m:
                     continue
                 cur = {"t": int(m.group(1)), "phase": m.group(2), "up": int(m.group(3)),
-                       "D": [], "Q": [], "O": [], "P": {}, "loadavg": None}
+                       "D": [], "Q": [], "O": [], "K": [], "P": {}, "loadavg": None}
                 samples.append(cur)
             elif cur is None:
                 continue
@@ -83,6 +83,8 @@ def parse_samples(path):
                 cur["Q"].append(kv_line(line[2:]))
             elif line.startswith("O "):
                 cur["O"].append(kv_line(line[2:]))
+            elif line.startswith("K idx="):
+                cur["K"].append(kv_line(line[2:]))
             elif line.startswith("P comm="):
                 d = kv_line(line[2:])
                 cur["P"][d["comm"]] = {"n": int(d["n"]), "rss_mb": float(d["rss_mb"]), "cpu": float(d["cpu"])}
@@ -180,6 +182,8 @@ def analyze_cell(cdir):
                     qs[k] += int(v)
         out["l0_estimator_quality"] = dict(qs)
         out["l0_sdn_rate_zero_frac"] = (sum(fnum(d, "sdn_zero") for d in last["D"]) / pairs) if last["D"] else None
+        kme = [fnum(k, "stored") / max(1.0, fnum(k, "max")) for k in last["K"]]
+        out["l0_kme_fill_frac_mean"] = (sum(kme) / len(kme)) if kme else None
     # ── L1 / L2 ──
     for tag in ("L1", "L2"):
         sp = os.path.join(cdir, tag + ".summary.json")
@@ -230,16 +234,22 @@ def analyze_cell(cdir):
                     # cota como residuo (a 300 s de L2 es <10 % del techo).
                     ring0 = sum(fnum(q, "enc") for q in win[0]["Q"])
                     ring1 = sum(fnum(q, "enc") for q in win[-1]["Q"])
+                    kme0 = sum(fnum(k, "stored") for k in win[0]["K"])
+                    kme1 = sum(fnum(k, "stored") for k in win[-1]["K"])
                     ta, tb = win[0]["t"], win[-1]["t"]
                     served_win = sum(r["ok_keys"] for r in persec if ta <= r["t_unix"] < tb)
                     dur = tb - ta
-                    drained = (stock0 - stock1) + (ring0 - ring1)
+                    # Los tres almacenes: buffers ENC de los DKMS, anillos ENC de
+                    # los QKC y el búfer de cada KME (quditto, muestreado).
+                    drained = (stock0 - stock1) + (ring0 - ring1) + (kme0 - kme1)
                     out[tag]["window_s"] = dur
                     out[tag]["served_window_keys_per_s"] = served_win / dur if dur else None
                     out[tag]["stock_drain_keys_per_s"] = (stock0 - stock1) / dur if dur else None
                     out[tag]["ring_drain_keys_per_s"] = (ring0 - ring1) / dur if dur else None
+                    out[tag]["kme_drain_keys_per_s"] = (kme0 - kme1) / dur if dur else None
+                    out[tag]["kme_sampled"] = bool(win[0]["K"])
                     out[tag]["sustained_corrected_keys_per_s"] = (served_win - drained) / dur if dur else None
-                    out[tag]["quditto_stock_bound_keys_per_s"] = (topo["edges"] * 8192.0) / dur if dur else None
+                    out[tag]["quditto_stock_bound_keys_per_s"] = None if win[0]["K"] else ((topo["edges"] * 8192.0) / dur if dur else None)
                     out[tag]["stock_start_frac"] = stock0 / cap_stock if cap_stock else None
                     out[tag]["stock_end_frac"] = stock1 / cap_stock if cap_stock else None
     # ── REC ──
@@ -309,8 +319,8 @@ def build_tables(cells):
     out.append(table("L1 · latencia p99 (ms)", g(["L1", "lat_p99_ms"]), 1))
     out.append(table("L2 · servido bruto (claves/s, con stock)", g(["L2", "served_keys_per_s"])))
     out.append(table("L2 · SOSTENIDO corregido por stock (claves/s)", g(["L2", "sustained_corrected_keys_per_s"]),
-                     note="(servido − stock drenado de los DKMS − anillos ENC del QKC) / ventana, sobre los últimos 2/3 de L2. Residuo no muestreado: el búfer del quditto, ≤ E·8192/ventana (tabla siguiente)."))
-    out.append(table("L2 · cota del residuo no muestreado (quditto, claves/s)", g(["L2", "quditto_stock_bound_keys_per_s"])))
+                     note="(servido − stock drenado en la ventana) / ventana, sobre los últimos 2/3 de L2; el stock son los tres almacenes: buffers ENC de los DKMS, anillos ENC de los QKC y búferes de los KME (quditto, muestreados)."))
+    out.append(table("L2 · drenado del KME en la ventana (claves/s)", g(["L2", "kme_drain_keys_per_s"])))
     out.append(table("L2 · sostenido / techo de fibra", lambda c: (c["L2"]["sustained_corrected_keys_per_s"] / c["techo_fibra"]) if c.get("L2", {}).get("sustained_corrected_keys_per_s") is not None and c["techo_fibra"] else None, 2))
     out.append(table("L2 · fracción rechazada (429/503)", g(["L2", "reject_frac"]), 3))
     out.append(table("L2 · latencia p50 (ms)", g(["L2", "lat_p50_ms"]), 1))
