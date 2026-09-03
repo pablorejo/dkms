@@ -5,6 +5,7 @@
 //!   2. HTTP server — admin API (mostly read-only) consumed by the web UI.
 //!   3. Background — periodic MCF recompute + debounced topology pushes.
 
+#![forbid(unsafe_code)]
 use anyhow::Result;
 use clap::Parser;
 use common::{logging, metrics::Metrics};

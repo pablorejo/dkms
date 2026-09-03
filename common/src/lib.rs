@@ -4,6 +4,8 @@
 //! gRPC clients/servers, TLS) lives here. Each module's own business logic
 //! does NOT belong here.
 
+// `unsafe` solo en hardening.rs (mlockall / RLIMIT_CORE), con allow local.
+#![deny(unsafe_code)]
 // `CommonError` (y los Status de tonic en el código GENERADO por prost)
 // superan el umbral de `result_large_err` del clippy moderno. Boxear el
 // error cruzaría todas las firmas públicas del workspace y el código

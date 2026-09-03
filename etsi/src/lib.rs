@@ -23,6 +23,7 @@
 //!   `Etsi020Built`) en lugar del polimorfismo dinámico que el Python
 //!   resuelve por herencia. Equivalente semánticamente.
 
+#![forbid(unsafe_code)]
 pub mod base64bytes;
 pub mod binary;
 pub mod error;

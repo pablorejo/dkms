@@ -16,6 +16,7 @@
 //! Los modelos de wire vienen del crate [`etsi`] (port 1:1 del
 //! Python `ETSIQKD/`).
 
+#![forbid(unsafe_code)]
 pub mod config;
 pub mod crypto;
 pub mod error;

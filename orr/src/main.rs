@@ -1,5 +1,6 @@
 //! ORR binary entry point.
 
+#![forbid(unsafe_code)]
 use anyhow::Result;
 use clap::Parser;
 use common::{logging, metrics::Metrics};

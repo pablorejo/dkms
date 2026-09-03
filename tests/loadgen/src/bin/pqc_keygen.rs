@@ -16,6 +16,7 @@
 //! Las semillas son material secreto: quedan en el directorio de la malla, que
 //! es efímero (scratch del job), y nunca se anuncian — solo viajan las `.vk`.
 
+#![forbid(unsafe_code)]
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};

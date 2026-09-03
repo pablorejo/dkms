@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // El error principal (`DkmsError`) lleva variantes que envuelven errores
 // gordos de `common`/`tonic` (`Transport`, `Status`...). Cambiar a
 // `Box<inner>` rompería la ergonomía de `?` con `#[from]`; en este crate

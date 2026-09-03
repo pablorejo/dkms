@@ -26,6 +26,7 @@
 //! * Cliente HTTP a quditto con keep-alive y `reqwest::Client` único.
 //! * Cola de envío por peer con `crossbeam::ArrayQueue` lock-free.
 
+#![forbid(unsafe_code)]
 pub mod config;
 pub mod crypto;
 pub mod error;

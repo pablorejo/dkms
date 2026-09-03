@@ -22,6 +22,8 @@
 //! arranca. Llamar pronto en `main`, tras `logging::init()` (usa `tracing`) y
 //! antes de tocar claves. Es idempotente.
 
+#![allow(unsafe_code)] // las llamadas libc de este módulo, y solo ellas
+
 /// Fija la memoria del proceso en RAM y desactiva los core dumps. Ver el
 /// módulo. No-op con aviso en plataformas que no son Linux.
 #[cfg(target_os = "linux")]

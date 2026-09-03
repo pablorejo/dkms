@@ -15,6 +15,7 @@
 //! `ORR_TLS_KEY` y `ORR_TLS_CA` (un cert de nodo de la CA de red, p. ej. el
 //! del DKMS de esa hoja) y el cliente diala `https://` él solo.
 
+#![forbid(unsafe_code)]
 use std::collections::HashMap;
 
 use anyhow::Result;

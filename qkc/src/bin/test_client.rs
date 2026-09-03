@@ -17,6 +17,7 @@
 //!   también al QKC destino y espera a recibir N deliveries antes de
 //!   reportar latencia end-to-end.
 
+#![forbid(unsafe_code)]
 use std::time::Instant;
 
 use anyhow::Result;

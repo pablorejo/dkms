@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // OrrError envuelve io::Error/anyhow::Error (~176 B) por #[from], lo que
 // dispara `result_large_err` en cada Result<(), OrrError>. Boxearlos sería
 // churn cosmético — los retornos no van por hot paths.

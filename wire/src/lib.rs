@@ -63,6 +63,7 @@
 //! `BadMagic`, y viceversa. La incompatibilidad es deliberada para que
 //! deployments mezclados fallen ruidosos en lugar de misparsear.
 
+#![forbid(unsafe_code)]
 use std::io;
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -408,12 +409,67 @@ pub async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Frame, W
     if total_len > MAX_TOTAL_LEN {
         return Err(WireError::TooLarge(total_len));
     }
-    let mut body = vec![0u8; total_len as usize];
-    stream.read_exact(&mut body).await?;
+    let body = read_body(stream, total_len as usize).await?;
     let mut f = Frame::decode_body(&body)?;
     f.kind = kind;
     f.grade = prefix[5]; // RESERVED byte carries the key grade
     Ok(f)
+}
+
+/// Como [`read_frame`], pero el CUERPO tiene que llegar entero antes de
+/// `body_timeout` una vez leído el prefijo. El prefijo se espera sin plazo:
+/// un enlace persistente puede pasar minutos sin frames entre ráfagas y no
+/// hay que cerrarlo por eso; lo que no puede pasar es anunciar 1 MiB y
+/// mandar un byte por minuto (auditoría 2026-09-03, R3).
+pub async fn read_frame_body_timeout<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    body_timeout: std::time::Duration,
+) -> Result<Frame, WireError> {
+    let mut prefix = [0u8; FIXED_PREFIX];
+    stream.read_exact(&mut prefix).await?;
+    if prefix[..4] != MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    let kind = prefix[4];
+    let total_len = u32::from_le_bytes([prefix[6], prefix[7], prefix[8], prefix[9]]);
+    if total_len > MAX_TOTAL_LEN {
+        return Err(WireError::TooLarge(total_len));
+    }
+    let body = match tokio::time::timeout(body_timeout, read_body(stream, total_len as usize)).await
+    {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(WireError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "frame body incomplete within timeout",
+            )))
+        }
+    };
+    let mut f = Frame::decode_body(&body)?;
+    f.kind = kind;
+    f.grade = prefix[5];
+    Ok(f)
+}
+
+/// Lee `total` bytes en trozos de 16 KiB: la memoria crece con lo que de
+/// verdad llega, no con la longitud que anuncia el remitente. Antes era
+/// `vec![0u8; total_len]` antes de leer nada, así que N sockets anunciando
+/// 1 MiB y callando fijaban N MiB (con `mlockall`, RAM residente).
+async fn read_body<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    total: usize,
+) -> Result<Vec<u8>, WireError> {
+    const CHUNK: usize = 16 * 1024;
+    let mut body = Vec::with_capacity(total.min(CHUNK));
+    let mut chunk = [0u8; CHUNK];
+    let mut remaining = total;
+    while remaining > 0 {
+        let n = remaining.min(CHUNK);
+        stream.read_exact(&mut chunk[..n]).await?;
+        body.extend_from_slice(&chunk[..n]);
+        remaining -= n;
+    }
+    Ok(body)
 }
 
 /// Escribe un frame a cualquier `AsyncWrite` (TcpStream,

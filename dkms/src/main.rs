@@ -8,6 +8,7 @@
 //! * Endpoint Prometheus (`/metrics`).
 //! * Tareas de fondo (sweeper de pending, refill de buffers — TODO QKC).
 
+#![forbid(unsafe_code)]
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};

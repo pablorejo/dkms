@@ -6,6 +6,7 @@
 //!
 //! Termina con Ctrl-C.
 
+#![forbid(unsafe_code)]
 use anyhow::Result;
 use clap::Parser;
 use quditto::{config::QudittoConfig, service::QudittoService};

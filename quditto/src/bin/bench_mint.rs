@@ -11,6 +11,7 @@
 //! mint. Como referencia: en hardware moderno de servidor con
 //! `ChaCha20Rng` userspace esperamos > 10M keys/s en un solo thread.
 
+#![forbid(unsafe_code)]
 use std::time::{Duration, Instant};
 
 use clap::Parser;
