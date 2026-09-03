@@ -29,10 +29,14 @@ if [ -z "$BUILD" ]; then
     BUILD=$(sbatch --parsable tests/local-mesh/campaign_build.sbatch)
     echo "build job: $BUILD"
 fi
+# Celdas con un job ya en cola o corriendo: NO se resometen (dos jobs sobre el
+# mismo directorio se pisan; pasó el 2026-09-03 con tres celdas).
+QUEUED="$(squeue -u "$USER" -h -o '%j' 2>/dev/null | tr '\n' ' ')"
 n_sub=0; n_skip=0
 for n in $NS; do
     for fam in $FAMS; do
         if [ -f "$CELLS/$fam-n$n/DONE" ]; then n_skip=$(( n_skip + 1 )); continue; fi
+        case " $QUEUED " in *" dkms-c9-$fam-$n "*) echo "$fam N=$n ya en cola/corriendo; no se resomete"; n_skip=$(( n_skip + 1 )); continue;; esac
         # shellcheck disable=SC2046
         jid=$(sbatch --parsable -J "dkms-c9-$fam-$n" $(res_for "$n") \
               --dependency=afterok:"$BUILD" --export=ALL,FAM="$fam",N="$n" \
