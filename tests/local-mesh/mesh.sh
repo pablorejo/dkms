@@ -95,6 +95,12 @@ TOKENS_PER_TICK="${DKMS_MESH_TOKENS_PER_TICK:-}"
 SAE_MIN_TOKENS="${DKMS_MESH_SAE_MIN_TOKENS:-}"
 SDN_HTTP=19002
 SDN_GRPC=19000
+# Espejo read-only en claro de la SDN (solo GET: /healthz, /topology, /links,
+# /rate…), en loopback. Es lo que sondea este script con CONTROL_TLS=1: el
+# curl de CESGA (OpenSSL 1.1.1g) no puede presentar un cert cliente ML-DSA y
+# la sonda mTLS de /healthz daba «la SDN no arrancó» con la SDN perfectamente
+# viva (canario 9550631, 2026-09-03).
+SDN_RO=19003
 TOPO="${DKMS_MESH_TOPO:-ring}"
 SEED="${DKMS_MESH_SEED:-42}"
 LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
@@ -407,7 +413,7 @@ generate() {        # generate <N>
     build_topology "$total"
     printf 'listen_ip: "0.0.0.0"\npresence_ttl_secs: 90\n' > "$DIR/yml/node.sdn.yml"
     if [ "$CONTROL_TLS" = 1 ]; then
-        printf 'control_tls: true\ncerts_dir: "%s"\n' "$DIR/certs" >> "$DIR/yml/node.sdn.yml"
+        printf 'control_tls: true\ncerts_dir: "%s"\nhttp_ro_port: %s\n' "$DIR/certs" "$SDN_RO" >> "$DIR/yml/node.sdn.yml"
     else
         # Default del renderer desde 2026-09-03: el brazo en claro lo pide.
         printf 'control_tls: false\n' >> "$DIR/yml/node.sdn.yml"
@@ -653,11 +659,10 @@ wait_for() {        # wait_for <segundos> <expresión que debe dar "true">
 # curl al HTTP admin de la SDN respetando CONTROL_TLS: con el plano de
 # control en mTLS hay que presentar un cert de la net-ca (vale el de la
 # propia SDN, que la malla ya tiene en $DIR/certs).
-sdn_curl() { # sdn_curl <path> [curl args...]
+sdn_curl() { # sdn_curl <path> [curl args...]  (solo lecturas: van al espejo RO)
     local path=$1; shift
     if [ "$CONTROL_TLS" = 1 ]; then
-        curl -s --cacert "$DIR/certs/net-ca.crt" --cert "$DIR/certs/sdn.crt" \
-             --key "$DIR/certs/sdn.key" "$@" "https://127.0.0.1:$SDN_HTTP$path"
+        curl -s "$@" "http://127.0.0.1:$SDN_RO$path"
     else
         curl -s "$@" "http://127.0.0.1:$SDN_HTTP$path"
     fi

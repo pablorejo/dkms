@@ -319,6 +319,12 @@ class SdnControlTls(unittest.TestCase):
         self.assertEqual(cfg["mcf_period_ms"], 2500)
         self.assertEqual(cfg["push_debounce_ms"], 50)
 
+    def test_read_only_mirror_binds_to_loopback_by_default(self):
+        cfg = render("sdn", "listen_ip: 0.0.0.0\nhttp_ro_port: 19003\n")
+        self.assertEqual(cfg["http_ro_addr"], "127.0.0.1:19003")
+        cfg = render("sdn", "http_ro_port: 19003\nhttp_ro_bind: 10.0.0.1\n")
+        self.assertEqual(cfg["http_ro_addr"], "10.0.0.1:19003")
+
     def test_without_control_tls_no_tls_table(self):
         self.assertNotIn("tls", render("sdn", "control_tls: false\nmcf_period_ms: 5000\n"))
 

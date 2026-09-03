@@ -566,8 +566,10 @@ def render_sdn(n, out):
         lines.append("mcf_period_ms = " + str(int(n["mcf_period_ms"])))
     if n.get("push_debounce_ms") is not None:
         lines.append("push_debounce_ms = " + str(int(n["push_debounce_ms"])))
+    # Espejo read-only en claro (auditoría 2026-09b §RO): loopback salvo
+    # `http_ro_bind:` explícito — es para inspección local, no para la red.
     if n.get("http_ro_port"):
-        lines.append("http_ro_addr = " + q(bind + ":" + str(int(n["http_ro_port"]))))
+        lines.append("http_ro_addr = " + q(with_port(str(n.get("http_ro_bind", "127.0.0.1")), int(n["http_ro_port"]))))
     # cert_name como en qkc/orr: por defecto "sdn" (gen-certs.sh sdn <ip>).
     lines += control_tls_lines(n, n.get("cert_name", "sdn"), "server")
     merge_extra(lines, n.get("extra"))
