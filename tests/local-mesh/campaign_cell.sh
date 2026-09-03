@@ -48,8 +48,14 @@ export DKMS_MESH_DIR="${DKMS_MESH_DIR:-${TMPDIR:-/tmp}/dkms-c9-$FAM-$N}"
 export DKMS_MESH_LINK_TYPE=qkd DKMS_MESH_TOPO=custom
 export DKMS_MESH_SEED="${DKMS_MESH_SEED:-42}"
 MESH_DIR="$DKMS_MESH_DIR"
+# Los CSV crudos de carga van al SCRATCH del nodo, no a $OUT (home NFS): a
+# N=40 son ~2 GB por celda durante L2 y con varias celdas en paralelo se
+# agotó la cuota del home (20 GB) — tres celdas murieron con «0/40 procesos
+# vivos» porque la redirección del .err fallaba con EDQUOT (2026-09-03). A
+# $OUT solo va lo reducido (y los CSV comprimidos para N≤20).
+LOAD_DIR="${DKMS_CELL_LOAD_DIR:-$MESH_DIR-load}"
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$LOAD_DIR"
 rm -f "$OUT/DONE" "$OUT/FAILED"
 log()  { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$OUT/cell.log"; }
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
@@ -161,8 +167,8 @@ start_load() {   # start_load <tag> <segundos> <rate-cap por flujo (0 = bucle ce
             --sae "sae_$m" --slaves "$slaves" \
             --certs "$MESH_DIR/certs" --host 127.0.0.1 --port "$(sae_port "$m")" \
             --threads $(( N - 1 )) --duration "$dur" --number 1 --size 256 \
-            --rate-cap "$cap" --backoff-ms "$backoff" --aggregate-throttled --out "$OUT/$tag.sae_$m.csv" \
-            > "$OUT/$tag.sae_$m.err" 2>&1 &
+            --rate-cap "$cap" --backoff-ms "$backoff" --aggregate-throttled --out "$LOAD_DIR/$tag.sae_$m.csv" \
+            > "$LOAD_DIR/$tag.sae_$m.err" 2>&1 &
         LOAD_PIDS+=($!)
     done
     log "   $tag: ${#LOAD_PIDS[@]} procesos de carga, $(( N * (N - 1) )) flujos, rate-cap $cap req/s por flujo, backoff ${backoff}ms, ${dur}s"
@@ -171,10 +177,12 @@ check_load() {   # la carga tiene que ARRANCAR (ver scale_one.sh, 2026-08-26)
     local tag=$1 vivos=0 p errs
     sleep 20
     for p in "${LOAD_PIDS[@]}"; do kill -0 "$p" 2>/dev/null && vivos=$(( vivos + 1 )); done
-    errs=$(grep -lE "SyntaxError|Traceback|^Error|error:" "$OUT"/"$tag".sae_*.err 2>/dev/null | wc -l)
+    errs=$(grep -lE "SyntaxError|Traceback|^Error|error:" "$LOAD_DIR"/"$tag".sae_*.err 2>/dev/null | wc -l)
     log "   $tag: $vivos/${#LOAD_PIDS[@]} procesos vivos a los 20 s, $errs con error"
     if [ "$vivos" -lt $(( ${#LOAD_PIDS[@]} / 2 )) ] || [ "$errs" -gt 0 ]; then
-        head -3 "$OUT/$tag.sae_1.err" 2>/dev/null | tee -a "$OUT/cell.log"
+        head -3 "$LOAD_DIR/$tag.sae_1.err" 2>/dev/null | tee -a "$OUT/cell.log"
+        ls "$LOAD_DIR" | head -3 | tee -a "$OUT/cell.log"
+        df -h "$OUT" | tail -1 | tee -a "$OUT/cell.log"
         die "la carga $tag no arrancó"
     fi
 }
@@ -294,11 +302,16 @@ for n in $(seq 1 "$N"); do
 done
 log "== salud: procesos muertos=$dead panics=$panics recv_corrupt=$corrupt recv_no_epoch=$noepoch recv_replayed=$replayed expired=$expired peel_failed=$peel dropped_no_secret=$nosec orr_send_failed=$orr_send_failed frame_auth_rechazos=$bad_mac intake_dropped(líneas)=$intake_drop"
 
-# ── reducción de los CSV de carga ──────────────────────────────────────────
+# ── reducción de los CSV de carga (en el scratch; a $OUT solo lo reducido) ──
 for tag in L1 L2; do
-    python3 "$REDUCE" "$OUT" "$tag" > "$OUT/$tag.reduce.log" 2>&1 || log "   AVISO: reduce $tag falló: $(tail -1 "$OUT/$tag.reduce.log")"
+    python3 "$REDUCE" "$LOAD_DIR" "$tag" > "$OUT/$tag.reduce.log" 2>&1 || log "   AVISO: reduce $tag falló: $(tail -1 "$OUT/$tag.reduce.log")"
+    cp "$LOAD_DIR/$tag.persec.csv" "$LOAD_DIR/$tag.pairs.csv" "$LOAD_DIR/$tag.summary.json" "$OUT/" 2>/dev/null
+    cp "$LOAD_DIR"/$tag.sae_*.err "$OUT/" 2>/dev/null
     log "   $tag: $(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print("ok_keys=%d req_ok=%d n429=%d n503=%d other=%d p50=%.1fms p99=%.1fms pares_sin_clave=%d" % (s["ok_keys"], s["ok_req"], s["n429"], s["n503"], s["n_other"], s["lat_p50_ms"], s["lat_p99_ms"], s["pairs_zero"]))' "$OUT/$tag.summary.json" 2>/dev/null || echo 'sin resumen')"
-    if (( N <= 20 )); then gzip -f "$OUT"/$tag.sae_*.csv 2>/dev/null; else rm -f "$OUT"/$tag.sae_*.csv; fi
+    if (( N <= 20 )); then
+        for f in "$LOAD_DIR"/$tag.sae_*.csv; do gzip -c "$f" > "$OUT/$(basename "$f").gz" 2>/dev/null; done
+    fi
+    rm -f "$LOAD_DIR"/$tag.sae_*.csv
 done
 
 # ── archivo ────────────────────────────────────────────────────────────────
