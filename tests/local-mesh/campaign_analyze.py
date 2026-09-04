@@ -229,6 +229,11 @@ def analyze_cell(cdir):
         out["l0_pairs_full_frac"] = (sum(fnum(d, "enc_full") for d in last["D"]) / pairs) if last["D"] else None
         rates = [(fnum(q, "rate_sum") / fnum(q, "rate_n")) for q in last["Q"] if fnum(q, "rate_n") > 0]
         out["l0_estimator_rate_mean"] = (sum(rates) / len(rates)) if rates else None
+        # Curva de llenado (fracción del stock total frente a segundos desde el
+        # arranque), ≤ 80 puntos: es lo que dibuja `fill_<familia>` en la web.
+        curve = [(s["up"], sum_enc(s) / cap_stock) for s in l0 if s["D"] and cap_stock]
+        step = max(1, len(curve) // 80)
+        out["l0_curve"] = [[int(t), round(v, 4)] for t, v in curve[::step]]
         qs = defaultdict(int)
         for q in last["Q"]:
             for part in q.get("rate_q", "").split(","):
@@ -267,6 +272,26 @@ def analyze_cell(cdir):
                 out[tag]["jain_index"] = (sum(vals) ** 2) / (len(vals) * sum(v * v for v in vals)) if sum(v * v for v in vals) > 0 else None
                 out[tag]["min_pair_share"] = (min(vals) / mean) if mean > 0 else None
                 out[tag]["p10_pair_share"] = (sorted(vals)[len(vals) // 10] / mean) if mean > 0 else None
+                # Cuantiles del reparto por par (claves del par / media), 101
+                # puntos: la CDF de equidad de la web sin arrastrar N·(N−1) filas.
+                if mean > 0:
+                    sv = sorted(v / mean for v in vals)
+                    out[tag]["pair_share_quantiles"] = [round(sv[min(len(sv) - 1, int(q * (len(sv) - 1) / 100))], 4) for q in range(101)]
+        # Serie temporal de la carga en cajas de 10 s (servido/s y rechazos/s),
+        # relativa al primer segundo de L1 de la celda (`t_l1_start`).
+        persec_rows = read_persec(os.path.join(cdir, tag + ".persec.csv"))
+        if persec_rows:
+            t0 = min(r["t_unix"] for r in persec_rows)
+            if tag == "L1":
+                out["t_l1_start"] = t0
+            base = out.get("t_l1_start", t0)
+            bins = defaultdict(lambda: [0.0, 0.0, 0])
+            for r in persec_rows:
+                b = int((r["t_unix"] - base) // 10)
+                bins[b][0] += r["ok_keys"]
+                bins[b][1] += r["n429"] + r["n503"] + r["n_other"]
+                bins[b][2] += 1
+            out[tag]["timeline"] = [[b * 10, round(v[0] / 10.0, 1), round(v[1] / 10.0, 1)] for b, v in sorted(bins.items()) if v[2] > 0]
         ph = phase_samples(samples, tag)
         if ph:
             enc_zero = [sum(fnum(d, "enc_zero") for d in s["D"]) / pairs for s in ph if s["D"]]
@@ -356,6 +381,13 @@ def analyze_cell(cdir):
         pts = [(s["t"], sum_enc(s)) for s in rec if s["D"]]
         out["rec_refill_slope_keys_per_s"] = linear_slope(pts) if len(pts) >= 2 else None
         out["rec_final_stock_frac"] = pts[-1][1] / cap_stock if pts and cap_stock else None
+    # Stock total (fracción) a lo largo de L1 → L2 → REC, relativo al inicio
+    # de L1, para superponerlo a la serie de carga en `timeline_<familia>`.
+    if out.get("t_l1_start"):
+        base = out["t_l1_start"]
+        st = [(s["t"] - base, sum_enc(s) / cap_stock, s["phase"]) for s in samples
+              if s["phase"] in ("L1", "L2", "REC") and s["D"] and cap_stock]
+        out["stock_timeline"] = [[int(t), round(v, 4), ph] for t, v, ph in st]
     # ── integridad ──
     for tag in ("L1", "final"):
         r = keys_log_result(os.path.join(cdir, "keys_%s.log" % tag))
@@ -576,6 +608,243 @@ def make_plots(cells, outdir, lang="es"):
     return figs
 
 
+EXTRA_EN = {
+    "fill": ("L0 · fill from empty — %s", "stock (%% of N·(N−1)·4096 keys)", "seconds since bring-up"),
+    "timeline": ("L1 → L2 → REC — %s, N=%d", "keys/s", "seconds since L1 start", "stock (%)", "served", "rejected (429/503)", "stock"),
+    "fairness": ("L2 · per-pair share of the served keys, N=%d", "fraction of pairs ≤ x", "keys of the pair / uniform share"),
+    "replay_fix": ("Per-frame seal · legitimate frames rejected as replays", "rejections at node 1", ("before (d60714a)", "after (d40d2fc)")),
+    "star_hub": ("Star · what the hub costs as N grows", "count (log)", ("keys expired at senders", "frames dropped by the hub's intake (≥)")),
+    "estimator": ("L0 · in-situ QKD rate estimator / quditto formula", "ratio", "N (nodes)"),
+    "l2_latency_p50": ("L2 · latency p50", "ms"), "l1_latency_p50": ("L1 · latency p50", "ms"),
+    "bringup": ("Bring-up time of the whole cell", "s"), "l0_pairs_full": ("L0 · pairs full at the end of the window", "fraction"),
+    "l2_pairs_zero": ("L2 · ordered pairs with no key served", "pairs"),
+}
+EXTRA_ES = {
+    "fill": ("L0 · llenado desde vacío — %s", "stock (%% de N·(N−1)·4096 claves)", "segundos desde el arranque"),
+    "timeline": ("L1 → L2 → REC — %s, N=%d", "claves/s", "segundos desde el inicio de L1", "stock (%)", "servido", "rechazado (429/503)", "stock"),
+    "fairness": ("L2 · reparto por par de las claves servidas, N=%d", "fracción de pares ≤ x", "claves del par / reparto uniforme"),
+    "replay_fix": ("Sello por frame · frames legítimos rechazados como repetidos", "rechazos en el nodo 1", ("antes (d60714a)", "después (d40d2fc)")),
+    "star_hub": ("Estrella · lo que cuesta el hub al crecer N", "cuenta (log)", ("claves expiradas en los emisores", "frames descartados en la cola del hub (≥)")),
+    "estimator": ("L0 · estimador in situ de tasa QKD / fórmula de quditto", "cociente", "N (nodos)"),
+    "l2_latency_p50": ("L2 · latencia p50", "ms"), "l1_latency_p50": ("L1 · latencia p50", "ms"),
+    "bringup": ("Tiempo de arranque de la celda entera", "s"), "l0_pairs_full": ("L0 · pares a tope al cerrar la ventana", "fracción"),
+    "l2_pairs_zero": ("L2 · pares ordenados sin ninguna clave servida", "pares"),
+}
+
+
+def make_extra_plots(cells, outdir, lang="es", rerun=None):
+    """Figuras de detalle para la web: curvas de llenado y líneas temporales por
+    familia, CDF de equidad, antes/después del fix del replay, el hub de la
+    estrella, el estimador, latencias p50 y arranque."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return []
+    os.makedirs(outdir, exist_ok=True)
+    tx = EXTRA_ES if lang == "es" else EXTRA_EN
+    fam_label = FAM_LABEL if lang == "es" else FAM_LABEL_EN
+    colors = {"estrella": "#e6a100", "anillo": "#38d3f0", "puente": "#ff6b6b",
+              "malla": "#4cd97b", "rgg": "#9d7bfa", "aleatoria": "#93a1bb"}
+    by = defaultdict(dict)
+    for c in cells:
+        by[c["family"]][c["n"]] = c
+    figs = []
+
+    def save(fig, name):
+        fig.tight_layout()
+        fig.savefig(os.path.join(outdir, name + ".svg"), transparent=True)
+        fig.savefig(os.path.join(outdir, name + ".png"), dpi=130, facecolor="#101829")
+        plt.close(fig)
+        figs.append(name)
+
+    # gradiente por N (frío → cálido) sobre fondo oscuro
+    n_col = {n: plt.cm.plasma(0.15 + 0.75 * (i / (len(NS) - 1))) for i, n in enumerate(NS)}
+
+    for f in FAMILIES:
+        # ── curvas de llenado ──
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        for n in NS:
+            c = by[f].get(n)
+            if not c or not c.get("l0_curve"):
+                continue
+            xs = [p[0] for p in c["l0_curve"]]
+            ys = [100 * p[1] for p in c["l0_curve"]]
+            ax.plot(xs, ys, color=n_col[n], label="N=%d" % n, linewidth=1.4)
+        ax.axhline(100, color="#5d6b87", linestyle=":", linewidth=0.8)
+        ax.set_ylim(0, 105)
+        ax.set_xlabel(tx["fill"][2])
+        ax.set_ylabel(tx["fill"][1].replace("%%", "%"))
+        ax.set_title(tx["fill"][0] % fam_label[f])
+        ax.grid(True, alpha=0.6, linewidth=0.6)
+        ax.legend(ncol=2)
+        save(fig, "fill_%s" % f)
+        # ── línea temporal a N=50 y N=100 ──
+        for n in (50, 100):
+            c = by[f].get(n)
+            if not c or not (c.get("L1", {}).get("timeline") or c.get("L2", {}).get("timeline")):
+                continue
+            fig, ax = plt.subplots(figsize=(8, 4.8))
+            ax2 = ax.twinx()
+            for tag, alpha in (("L1", 0.9), ("L2", 0.9)):
+                tl = c.get(tag, {}).get("timeline") or []
+                if tl:
+                    ax.plot([p[0] for p in tl], [p[1] for p in tl], color=colors[f], linewidth=1.4,
+                            label=tx["timeline"][4] if tag == "L1" else None)
+                    ax.plot([p[0] for p in tl], [p[2] for p in tl], color="#ff6b6b", linewidth=1.0, linestyle="--",
+                            label=tx["timeline"][5] if tag == "L1" else None)
+            st = c.get("stock_timeline") or []
+            if st:
+                ax2.plot([p[0] for p in st], [100 * p[1] for p in st], color="#e6ebf4", linewidth=1.2, linestyle=":", label=tx["timeline"][6])
+                ax2.set_ylim(0, 105)
+                ax2.set_ylabel(tx["timeline"][3])
+                ax2.tick_params(colors="#93a1bb")
+                # sombreado de fases según el stock (que cubre L1, L2 y REC)
+                spans = {}
+                for t, _, ph in st:
+                    spans.setdefault(ph, [t, t])
+                    spans[ph][1] = t
+                for ph, (a, b) in spans.items():
+                    ax.axvspan(a, b, color={"L1": "#38d3f0", "L2": "#ff6b6b", "REC": "#4cd97b"}.get(ph, "#93a1bb"), alpha=0.06)
+                    ax.text((a + b) / 2, ax.get_ylim()[1] * 0.98, ph, ha="center", va="top", fontsize=9, color="#93a1bb")
+            ax.set_xlabel(tx["timeline"][2])
+            ax.set_ylabel(tx["timeline"][1])
+            ax.set_title(tx["timeline"][0] % (fam_label[f], n))
+            ax.grid(True, alpha=0.6, linewidth=0.6)
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, loc="center right")
+            save(fig, "timeline_%s_n%d" % (f, n))
+
+    # ── CDF de equidad ──
+    for n in (50, 100):
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        any_ = False
+        for f in FAMILIES:
+            c = by[f].get(n)
+            q = (c or {}).get("L2", {}).get("pair_share_quantiles")
+            if not q:
+                continue
+            any_ = True
+            ax.plot([max(v, 1e-3) for v in q], [i / 100 for i in range(101)], color=colors[f], label=fam_label[f], linewidth=1.5)
+        if any_:
+            ax.axvline(1.0, color="#5d6b87", linestyle=":", linewidth=0.8)
+            ax.set_xscale("log")
+            ax.set_xlabel(tx["fairness"][2])
+            ax.set_ylabel(tx["fairness"][1])
+            ax.set_title(tx["fairness"][0] % n)
+            ax.grid(True, alpha=0.6, linewidth=0.6, which="both")
+            ax.legend()
+            save(fig, "fairness_cdf_n%d" % n)
+        else:
+            plt.close(fig)
+
+    # ── antes / después del fix del replay ──
+    if rerun:
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        names = sorted(rerun.keys(), key=lambda k: (FAMILIES.index(k.rsplit("-n", 1)[0]), int(k.rsplit("-n", 1)[1])))
+        xs = range(len(names))
+        before = [rerun[k]["before"] for k in names]
+        after = [rerun[k]["after"] for k in names]
+        ax.bar([x - 0.2 for x in xs], before, width=0.4, color="#ff6b6b", label=tx["replay_fix"][2][0])
+        ax.bar([x + 0.2 for x in xs], after, width=0.4, color="#4cd97b", label=tx["replay_fix"][2][1])
+        for x, b, a in zip(xs, before, after):
+            ax.text(x - 0.2, b, "{:,}".format(b).replace(",", " "), ha="center", va="bottom", fontsize=9)
+            ax.text(x + 0.2, max(a, 1), str(a), ha="center", va="bottom", fontsize=9)
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels([rerun[k]["label"][lang] for k in names])
+        ax.set_ylabel(tx["replay_fix"][1])
+        ax.set_title(tx["replay_fix"][0])
+        ax.grid(True, axis="y", alpha=0.6, linewidth=0.6)
+        ax.legend()
+        save(fig, "replay_fix")
+
+    # ── el hub de la estrella ──
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    xs = [n for n in NS if n in by["estrella"]]
+    exp = [max(1, (by["estrella"][n].get("health") or {}).get("expired", 0)) for n in xs]
+    intk = [max(1, (by["estrella"][n].get("health") or {}).get("intake_dropped_frames_min", 0)) for n in xs]
+    ax.plot(xs, exp, marker="o", color="#e6a100", label=tx["star_hub"][2][0])
+    ax.plot(xs, intk, marker="s", color="#ff6b6b", linestyle="--", label=tx["star_hub"][2][1])
+    ax.set_yscale("log")
+    ax.set_xlabel("N (nodos)" if lang == "es" else "N (nodes)")
+    ax.set_ylabel(tx["star_hub"][1])
+    ax.set_title(tx["star_hub"][0])
+    ax.grid(True, alpha=0.6, linewidth=0.6, which="both")
+    ax.legend()
+    save(fig, "star_hub")
+
+    # ── estimador / fórmula, latencias p50, arranque, pares a tope, pares a cero ──
+    def simple(name, title, ylabel, getter, logy=False):
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        for f in FAMILIES:
+            pts = [(n, getter(by[f][n])) for n in NS if n in by[f]]
+            pts = [(n, v) for n, v in pts if v is not None]
+            if pts:
+                ax.plot([p[0] for p in pts], [p[1] for p in pts], marker="o", color=colors[f], label=fam_label[f])
+        ax.set_xlabel("N (nodos)" if lang == "es" else "N (nodes)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        if logy:
+            ax.set_yscale("log")
+        ax.grid(True, alpha=0.6, linewidth=0.6)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend()
+        save(fig, name)
+
+    def est_ratio(c):
+        r = c.get("l0_estimator_rate_mean")
+        edges = c.get("edges") or 0
+        sigma_cap = (c.get("techo_fibra") or 0) * (c.get("mean_hops") or 0)
+        return (r / (sigma_cap / edges)) if (r and edges and sigma_cap) else None
+    simple("estimator", tx["estimator"][0], tx["estimator"][1], est_ratio)
+    simple("l2_latency_p50", tx["l2_latency_p50"][0], tx["l2_latency_p50"][1], lambda c: c.get("L2", {}).get("lat_p50_ms"), logy=True)
+    simple("l1_latency_p50", tx["l1_latency_p50"][0], tx["l1_latency_p50"][1], lambda c: c.get("L1", {}).get("lat_p50_ms"), logy=True)
+    simple("bringup", tx["bringup"][0], tx["bringup"][1], lambda c: c.get("t_up_s"))
+    simple("l0_pairs_full", tx["l0_pairs_full"][0], tx["l0_pairs_full"][1], lambda c: c.get("l0_pairs_full_frac"))
+    simple("l2_pairs_zero", tx["l2_pairs_zero"][0], tx["l2_pairs_zero"][1], lambda c: c.get("L2", {}).get("pairs_zero"))
+    return figs
+
+
+def replay_before_after(cells_dir):
+    """Rechazos «replayed» en el nodo 1 de las celdas remedidas: antes (copia
+    en rerun-prefix/<celda>-d60714a) y después (cells/<celda>)."""
+    prefix = os.path.join(cells_dir, "..", "rerun-prefix")
+    if not os.path.isdir(prefix):
+        return None
+
+    def replayed(logpath):
+        last = {}
+        if not (os.path.exists(logpath) or os.path.exists(logpath + ".gz")):
+            return None
+        with open_maybe_gz(logpath) as fh:
+            for line in fh:
+                if "qkc.frame_auth" not in line or "bad_mac" not in line:
+                    continue
+                line = ANSI.sub("", line)
+                m = re.search(r"peer=(\d+)", line)
+                if m:
+                    last[m.group(1)] = line
+        tot = 0
+        for line in last.values():
+            m = re.search(r"replayed=(\d+)", line)
+            tot += int(m.group(1)) if m else 0
+        return tot
+
+    out = {}
+    for d in sorted(glob.glob(os.path.join(prefix, "*-d60714a"))):
+        cell = os.path.basename(d)[: -len("-d60714a")]
+        b = replayed(os.path.join(d, "qkc1.log"))
+        a = replayed(os.path.join(cells_dir, cell, "qkc1.log"))
+        if b is None or a is None:
+            continue
+        fam, n = cell.rsplit("-n", 1)
+        out[cell] = {"before": b, "after": a,
+                     "label": {"es": "%s N=%s" % (FAM_LABEL[fam].split(" ")[0], n), "en": "%s N=%s" % (FAM_LABEL_EN[fam].split(" ")[0], n)}}
+    return out or None
+
+
 def draw_topologies(outdir, n=20):
     """Dibuja las 6 familias a N=20 (figs/topo_<fam>.svg) con las aristas
     coloreadas por capacidad (solo varía en la RGG)."""
@@ -663,6 +932,11 @@ def main():
     open(os.path.join(outdir, "TABLES.md"), "w").write("# Tablas de la campaña 2026-09\n\n" + tables)
     figs = make_plots(cells, os.path.join(outdir, "figs"))
     make_plots(cells, os.path.join(outdir, "figs", "en"), lang="en")
+    rerun = replay_before_after(cells_dir)
+    figs += make_extra_plots(cells, os.path.join(outdir, "figs"), lang="es", rerun=rerun)
+    make_extra_plots(cells, os.path.join(outdir, "figs", "en"), lang="en", rerun=rerun)
+    if rerun:
+        json.dump(rerun, open(os.path.join(outdir, "replay_fix.json"), "w"), indent=1)
     draw_topologies(os.path.join(outdir, "figs"))
     done = sum(1 for c in cells if c["done"])
     print("celdas analizadas: %d (DONE: %d, FAILED: %d); figuras: %d; salida en %s" % (
