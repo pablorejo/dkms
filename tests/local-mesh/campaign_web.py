@@ -38,7 +38,7 @@ T = {
         "title": "Six topologies, ten sizes, three loads",
         "kicker": "dkms-rust · CESGA FT3 · N=10–100 · 6 topologies × 3 loads · QKD quditto per link · factory defaults",
         "back": "← D-KMS — back to the site",
-        "stand": "Every cell is a full deployment on one 64-core node: SDN + N×(QKC, ORR, DKMS) + one simulated QKD link (quditto) per edge, brought up from empty buffers and driven through rest, paced load and closed-loop saturation. Same factory defaults and the same harness across the 60 cells; the three affected by the replay finding were re-measured with the fixed binary.",
+        "stand": "Every cell is a full deployment on one 64-core node: SDN + N×(QKC, ORR, DKMS) + one simulated QKD link (quditto) per edge — designed with R₀=2000 keys/s, α=0.2 dB/km and 5 km of fibre, or the real geometric distance in the RGG — brought up from empty buffers and driven through rest, paced load and closed-loop saturation. Same factory defaults and the same harness across the 60 cells; the three affected by the replay finding were re-measured with the fixed binary.",
         "toc": "Contents",
         "sec_glossary": "How to read this report",
         "glossary_intro": "Every number on this page is one of the quantities below, measured the same way in the 60 cells. The phases are the three loads the request asked for, plus a recovery window.",
@@ -48,6 +48,7 @@ T = {
             ("L1 — paced load", "one SAE flow per ordered pair, rate-capped so the aggregate offered load is 50 % of the fibre ceiling (at most 30 000 keys/s), for 300 s."),
             ("L2 — closed-loop saturation", "one SAE flow per ordered pair asking for the next key as soon as the previous one arrives, with a 100 ms pause after each 429/503, for 300 s."),
             ("REC — recovery", "no traffic again for up to 180 s: how the buffers refill after the saturation."),
+            ("R₀, α, d — the link model", "every QKD link is a quditto simulator minting 256-bit keys at R₀·10^(−αd/10): R₀ is the rate at zero distance (2 000 keys/s here), α the fibre attenuation (0.2 dB/km, standard single-mode fibre at 1 550 nm) and d the link length (5 km in five families; the geometric distance of each edge, 2–47 km, in the RGG). The SDN sizes every edge with the same formula and, since the in-situ estimator exists, with the measured rate when it drifts from it."),
             ("Fibre ceiling Σcap/ħ", "the aggregate rate the fibre allows if every ordered pair received the same share and every key crossed the mean number of hops: the sum of the link capacities divided by the mean path length. Link capacity is R₀·10^(−αd/10)."),
             ("Bottleneck link ceiling", "the aggregate rate at which the most loaded link (under uniform, shortest-path demand) would saturate first."),
             ("Sustained, stock-corrected", "keys served in the last two thirds of L2 minus the key stock drained from the three stores (DKMS buffers, QKC rings, KME) in the same window, divided by the window: what the network actually produced, not what it took from its reserves."),
@@ -60,6 +61,10 @@ T = {
             ("Integrity round", "an ETSI-014 enc_keys/dec_keys exchange with byte comparison for every ordered pair among 10 nodes, after L1 and at the end of the cell."),
             ("Expired keys", "transport keys a DKMS emitted and dropped because the receiver's acknowledgement never came within 30 s: material lost, never corrupt."),
         ],
+        "sec_qkd": "The QKD link model: R₀, α and distance",
+        "qkd_cols": ["N", "edges", "distance min / median / max (km)", "link capacity min / median / max (keys/s)", "Σcap (keys/s)", "bottleneck link (keys/s)"],
+        "qkd_static_title": "Link capacity R₀·10^(−αd/10) for the campaign's R₀=2000 keys/s and α=0.2 dB/km",
+        "qkd_static_cols": ["distance (km)", "keys/s", "% of R₀", "who uses it"],
         "sec_topos": "The six topologies",
         "topos_reading": "Drawn at N=20. Every link is QKD: capacity R₀·10^(−αd/10) with R₀=2000 keys/s, α=0.2 dB/km and d=5 km (1588.7 keys/s) — except in the RGG, where each edge carries its own geometric distance (2–47 km → 233–1811 keys/s). Facts at N=100.",
         "sec_families": "Topology by topology",
@@ -89,7 +94,7 @@ T = {
         "title": "Seis topologías, diez tamaños, tres cargas",
         "kicker": "dkms-rust · CESGA FT3 · N=10–100 · 6 topologías × 3 cargas · quditto QKD por enlace · defaults de fábrica",
         "back": "← D-KMS — volver a la web",
-        "stand": "Cada celda es un despliegue completo en un nodo de 64 cores: SDN + N×(QKC, ORR, DKMS) + un enlace QKD simulado (quditto) por arista, levantado desde buffers vacíos y llevado por reposo, carga pautada y saturación en bucle cerrado. Los mismos defaults de fábrica y el mismo arnés en las 60 celdas; las tres afectadas por el hallazgo del replay se volvieron a medir con el binario corregido.",
+        "stand": "Cada celda es un despliegue completo en un nodo de 64 cores: SDN + N×(QKC, ORR, DKMS) + un enlace QKD simulado (quditto) por arista — diseñado con R₀=2000 claves/s, α=0,2 dB/km y 5 km de fibra, o la distancia geométrica real en la RGG — levantado desde buffers vacíos y llevado por reposo, carga pautada y saturación en bucle cerrado. Los mismos defaults de fábrica y el mismo arnés en las 60 celdas; las tres afectadas por el hallazgo del replay se volvieron a medir con el binario corregido.",
         "toc": "Índice",
         "sec_glossary": "Cómo leer este informe",
         "glossary_intro": "Cada número de esta página es una de las magnitudes de abajo, medida igual en las 60 celdas. Las fases son las tres cargas que pedía el encargo, más una ventana de recuperación.",
@@ -99,6 +104,7 @@ T = {
             ("L1 — carga pautada", "un flujo SAE por par ordenado, limitado para que la carga ofrecida agregada sea el 50 % del techo de fibra (como mucho 30 000 claves/s), durante 300 s."),
             ("L2 — saturación en bucle cerrado", "un flujo SAE por par ordenado que pide la siguiente clave en cuanto llega la anterior, con una pausa de 100 ms tras cada 429/503, durante 300 s."),
             ("REC — recuperación", "otra vez sin tráfico, hasta 180 s: cómo se rellenan los buffers tras la saturación."),
+            ("R₀, α, d — el modelo del enlace", "cada enlace QKD es un simulador quditto que acuña claves de 256 bits a R₀·10^(−αd/10): R₀ es la tasa a distancia cero (2 000 claves/s aquí), α la atenuación de la fibra (0,2 dB/km, fibra monomodo estándar a 1 550 nm) y d la longitud del enlace (5 km en cinco familias; la distancia geométrica de cada arista, 2–47 km, en la RGG). La SDN dimensiona cada arista con la misma fórmula y, desde que existe el estimador in situ, con la tasa medida cuando se aparta de ella."),
             ("Techo de fibra Σcap/ħ", "la tasa agregada que permite la fibra si cada par ordenado recibiera la misma parte y cada clave cruzara el número medio de saltos: la suma de las capacidades de los enlaces entre la longitud media de camino. La capacidad de un enlace es R₀·10^(−αd/10)."),
             ("Techo del enlace cuello", "la tasa agregada a la que el enlace más cargado (con demanda uniforme por camino más corto) saturaría primero."),
             ("Sostenido corregido por stock", "claves servidas en los últimos dos tercios de L2 menos el stock de claves drenado de los tres almacenes (buffers de los DKMS, anillos de los QKC, KME) en la misma ventana, entre la ventana: lo que la red produjo de verdad, no lo que sacó de sus reservas."),
@@ -111,6 +117,10 @@ T = {
             ("Ronda de integridad", "un intercambio ETSI-014 enc_keys/dec_keys con comparación de bytes para cada par ordenado entre 10 nodos, tras L1 y al final de la celda."),
             ("Claves expiradas", "claves de transporte que un DKMS emitió y descartó porque el acuse del receptor no llegó en 30 s: material perdido, nunca corrupto."),
         ],
+        "sec_qkd": "El modelo del enlace QKD: R₀, α y distancia",
+        "qkd_cols": ["N", "aristas", "distancia mín / mediana / máx (km)", "capacidad del enlace mín / mediana / máx (claves/s)", "Σcap (claves/s)", "enlace cuello (claves/s)"],
+        "qkd_static_title": "Capacidad del enlace R₀·10^(−αd/10) con los R₀=2000 claves/s y α=0,2 dB/km de la campaña",
+        "qkd_static_cols": ["distancia (km)", "claves/s", "% de R₀", "quién la usa"],
         "sec_topos": "Las seis topologías",
         "topos_reading": "Dibujadas a N=20. Todos los enlaces son QKD: capacidad R₀·10^(−αd/10) con R₀=2000 claves/s, α=0.2 dB/km y d=5 km (1588,7 claves/s) — salvo en la RGG, donde cada arista lleva su distancia geométrica (2–47 km → 233–1811 claves/s). Datos a N=100.",
         "sec_families": "Topología a topología",
@@ -450,6 +460,42 @@ def families_section(lang, cells, figs_dir, nar):
         html.escape(t["sec_families"]), html.escape(t["families_intro"]), "".join(blocks))
 
 
+QKD_R0, QKD_ALPHA = 2000.0, 0.2
+
+
+def qkd_section(lang, cells, figs_dir, nar):
+    t = T[lang]
+    # tabla estática: capacidad frente a distancia con los parámetros de diseño
+    who = {5: ("star, ring, bridge, mesh, random", "estrella, anillo, puente, malla, aleatoria"),
+           2: ("RGG, shortest edge", "RGG, arista más corta"), 22: ("RGG, median edge", "RGG, arista mediana"),
+           47: ("RGG, longest edge", "RGG, arista más larga")}
+    rows = []
+    for d in (0, 1, 2, 5, 10, 15, 20, 22, 25, 30, 40, 47, 50):
+        cap = QKD_R0 * 10 ** (-QKD_ALPHA * d / 10.0)
+        w = who.get(d, ("", ""))[0 if lang == "en" else 1]
+        rows.append("<tr><td class=\"mono\">%d</td><td class=\"mono\">%s</td><td class=\"mono\">%s %%</td><td>%s</td></tr>"
+                    % (d, fmt(cap, 1), fmt(100 * cap / QKD_R0, 1), html.escape(w)))
+    static = ("<div class=\"card\"><div class=\"reg-h\">%s</div><div class=\"twrap\"><table><tr>%s</tr>%s</table></div></div>"
+              % (html.escape(t["qkd_static_title"]), "".join("<th>%s</th>" % html.escape(c) for c in t["qkd_static_cols"]), "".join(rows)))
+    # tabla por N de la RGG: distancias y capacidades reales de sus aristas
+    by = {c["n"]: c for c in cells if c["family"] == "rgg"}
+    rrows = []
+    for n in NS:
+        c = by.get(n)
+        if not c or not c.get("dist_km"):
+            continue
+        d, k = c["dist_km"], c["link_cap"]
+        rrows.append("<tr>" + "".join("<td class=\"mono\">%s</td>" % html.escape(v) for v in [
+            str(n), fmt(c["edges"]),
+            "%s / %s / %s" % (fmt(d["min"], 1), fmt(d["median"], 1), fmt(d["max"], 1)),
+            "%s / %s / %s" % (fmt(k["min"]), fmt(k["median"]), fmt(k["max"])),
+            fmt(k["sum"]), fmt(c.get("techo_cuello"))]) + "</tr>")
+    rgg = ("<div class=\"card\"><div class=\"reg-h\">%s</div><div class=\"twrap\"><table><tr>%s</tr>%s</table></div></div>"
+           % (html.escape(LABEL[lang]["rgg"]), "".join("<th>%s</th>" % html.escape(c) for c in t["qkd_cols"]), "".join(rrows)))
+    return ("<section id=\"sec_qkd\"><h2>%s</h2><p class=\"reading\">%s</p>%s%s%s</section>"
+            % (html.escape(t["sec_qkd"]), nar.get("sec_qkd", t["pending"]), fig_cards(figs_dir, lang, ["qkd_model"]), static, rgg))
+
+
 def glossary_section(lang):
     t = T[lang]
     items = "".join("<div><b>%s</b><span>%s</span></div>" % (html.escape(k), html.escape(v)) for k, v in t["glossary"])
@@ -467,7 +513,7 @@ def data_section(lang):
 
 def toc(lang):
     t = T[lang]
-    order = ["sec_glossary", "sec_topos", "sec_families"] + [s for s, _, _ in FIG_SECTIONS] + ["sec_data", "sec_method"]
+    order = ["sec_glossary", "sec_topos", "sec_qkd", "sec_families"] + [s for s, _, _ in FIG_SECTIONS] + ["sec_data", "sec_method"]
     items = "".join("<li><a href=\"#%s\">%s</a></li>" % (s, html.escape(t[s])) for s in order)
     return "<nav class=\"toc\"><b>%s</b><ol>%s</ol></nav>" % (html.escape(t["toc"]), items)
 
@@ -487,6 +533,7 @@ def build(lang, cells, figs_dir, narrative, style, date):
     parts.append(glossary_section(lang))
     parts.append("<section id=\"sec_topos\"><h2>%s</h2><p class=\"reading\">%s</p>%s</section>"
                  % (html.escape(t["sec_topos"]), t["topos_reading"], topo_cards(lang, cells, figs_dir)))
+    parts.append(qkd_section(lang, cells, figs_dir, nar))
     parts.append(families_section(lang, cells, figs_dir, nar))
     for sec, figs, tables in FIG_SECTIONS:
         reading = nar.get(sec, t["pending"])

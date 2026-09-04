@@ -174,6 +174,10 @@ def keys_log_result(path):
 
 
 INCLUDE_PARTIAL = False
+# Modelo del enlace QKD de la campaña (mesh.sh: DKMS_MESH_R0 / _ALPHA / _DIST_KM)
+QKD_R0 = 2000.0
+QKD_ALPHA = 0.2
+QKD_DIST_KM = 5.0
 
 
 def analyze_cell(cdir):
@@ -212,6 +216,26 @@ def analyze_cell(cdir):
         except (OSError, EOFError):
             pass
     out["health"] = dict(out["health"] or {}, intake_dropped_frames_min=intake_min)
+    # Distancias de las aristas (edges.tsv: idx a b km) y su capacidad con el
+    # modelo de la campaña (R0=2000, α=0,2): uniforme en cinco familias,
+    # geométrica en la RGG. Es lo que fija todo techo de esta página.
+    ep = os.path.join(cdir, "edges.tsv")
+    if os.path.exists(ep):
+        dk = []
+        for line in open(ep):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    dk.append(float(parts[3]))
+                except ValueError:
+                    pass
+        if dk:
+            dk.sort()
+            caps = [QKD_R0 * 10 ** (-QKD_ALPHA * d / 10.0) for d in dk]
+            out["dist_km"] = {"min": dk[0], "median": dk[len(dk) // 2], "mean": sum(dk) / len(dk), "max": dk[-1]}
+            out["link_cap"] = {"min": min(caps), "median": sorted(caps)[len(caps) // 2], "mean": sum(caps) / len(caps), "max": max(caps),
+                               "sum": sum(caps)}
+            out["edge_km"] = [round(d, 2) for d in dk]
     # Una celda sin DONE (corriendo, o muerta a medias) aporta su teoría (la
     # topología existe desde el arranque) pero NO métricas medidas: a medias
     # serían un punto falso en las tablas y figuras.
@@ -759,6 +783,43 @@ def make_extra_plots(cells, outdir, lang="es", rerun=None):
         ax.grid(True, axis="y", alpha=0.6, linewidth=0.6)
         ax.legend()
         save(fig, "replay_fix")
+
+    # ── el modelo del enlace QKD: cap(d) con R0 y α de la campaña + aristas RGG ──
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    ds = [i / 2.0 for i in range(0, 121)]
+    ax.plot(ds, [QKD_R0 * 10 ** (-QKD_ALPHA * d / 10.0) for d in ds], color="#e6ebf4", linewidth=1.6,
+            label=("R₀·10^(−αd/10), R₀=%d claves/s, α=%.1f dB/km" if lang == "es" else "R₀·10^(−αd/10), R₀=%d keys/s, α=%.1f dB/km") % (QKD_R0, QKD_ALPHA))
+    rgg_d = []
+    for n in NS:
+        c = by["rgg"].get(n)
+        if c and c.get("edge_km"):
+            rgg_d += c["edge_km"]
+    if rgg_d:
+        ax2 = ax.twinx()
+        ax2.hist(rgg_d, bins=24, range=(0, 60), color="#9d7bfa", alpha=0.35,
+                 label=("aristas de la RGG, N=10…100 (%d)" if lang == "es" else "RGG edges, N=10…100 (%d)") % len(rgg_d))
+        ax2.set_ylabel("aristas" if lang == "es" else "edges")
+        ax2.tick_params(colors="#93a1bb")
+        h2, l2 = ax2.get_legend_handles_labels()
+    else:
+        h2, l2 = [], []
+    ax.axvline(QKD_DIST_KM, color="#38d3f0", linestyle="--", linewidth=1.0)
+    ax.annotate(("d=5 km: 1 588,7 claves/s\n(estrella, anillo, puente,\nmalla, aleatoria)" if lang == "es" else "d=5 km: 1 588.7 keys/s\n(star, ring, bridge,\nmesh, random)"),
+                xy=(QKD_DIST_KM, 1588.7), xytext=(9, 1750), fontsize=9, color="#38d3f0",
+                arrowprops={"arrowstyle": "-", "color": "#38d3f0", "linewidth": 0.8})
+    for d in (10, 20, 30, 47):
+        capd = QKD_R0 * 10 ** (-QKD_ALPHA * d / 10.0)
+        ax.plot([d], [capd], marker="o", color="#e6ebf4", markersize=4)
+        ax.annotate("%d km: %d" % (d, round(capd)), xy=(d, capd), xytext=(d + 1.2, capd + 90), fontsize=8.5, color="#93a1bb")
+    ax.set_xlim(0, 60)
+    ax.set_ylim(0, 2100)
+    ax.set_xlabel("distancia del enlace (km)" if lang == "es" else "link distance (km)")
+    ax.set_ylabel("claves/s por enlace" if lang == "es" else "keys/s per link")
+    ax.set_title("El modelo del enlace QKD de la campaña" if lang == "es" else "The campaign's QKD link model")
+    ax.grid(True, alpha=0.6, linewidth=0.6)
+    h1, l1 = ax.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9)
+    save(fig, "qkd_model")
 
     # ── el hub de la estrella ──
     fig, ax = plt.subplots(figsize=(8, 4.8))
