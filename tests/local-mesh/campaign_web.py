@@ -64,6 +64,7 @@ T = {
         "sec_qkd": "The QKD link model: R₀, α and distance",
         "qkd_cols": ["N", "edges", "distance min / median / max (km)", "link capacity min / median / max (keys/s)", "Σcap (keys/s)", "bottleneck link (keys/s)"],
         "qkd_static_title": "Link capacity R₀·10^(−αd/10) for the campaign's R₀=2000 keys/s and α=0.2 dB/km",
+        "qkd_rgg_title": "RGG edges as built, per N: real distances and the capacities they give (the other five families: every edge 5 km, 1 588.7 keys/s)",
         "qkd_static_cols": ["distance (km)", "keys/s", "% of R₀", "who uses it"],
         "sec_topos": "The six topologies",
         "topos_reading": "Drawn at N=20. Every link is QKD: capacity R₀·10^(−αd/10) with R₀=2000 keys/s, α=0.2 dB/km and d=5 km (1588.7 keys/s) — except in the RGG, where each edge carries its own geometric distance (2–47 km → 233–1811 keys/s). Facts at N=100.",
@@ -120,6 +121,7 @@ T = {
         "sec_qkd": "El modelo del enlace QKD: R₀, α y distancia",
         "qkd_cols": ["N", "aristas", "distancia mín / mediana / máx (km)", "capacidad del enlace mín / mediana / máx (claves/s)", "Σcap (claves/s)", "enlace cuello (claves/s)"],
         "qkd_static_title": "Capacidad del enlace R₀·10^(−αd/10) con los R₀=2000 claves/s y α=0,2 dB/km de la campaña",
+        "qkd_rgg_title": "Aristas de la RGG tal como se construyeron, por N: distancias reales y capacidades resultantes (las otras cinco familias: toda arista a 5 km, 1 588,7 claves/s)",
         "qkd_static_cols": ["distancia (km)", "claves/s", "% de R₀", "quién la usa"],
         "sec_topos": "Las seis topologías",
         "topos_reading": "Dibujadas a N=20. Todos los enlaces son QKD: capacidad R₀·10^(−αd/10) con R₀=2000 claves/s, α=0.2 dB/km y d=5 km (1588,7 claves/s) — salvo en la RGG, donde cada arista lleva su distancia geométrica (2–47 km → 233–1811 claves/s). Datos a N=100.",
@@ -491,7 +493,7 @@ def qkd_section(lang, cells, figs_dir, nar):
             "%s / %s / %s" % (fmt(k["min"]), fmt(k["median"]), fmt(k["max"])),
             fmt(k["sum"]), fmt(c.get("techo_cuello"))]) + "</tr>")
     rgg = ("<div class=\"card\"><div class=\"reg-h\">%s</div><div class=\"twrap\"><table><tr>%s</tr>%s</table></div></div>"
-           % (html.escape(LABEL[lang]["rgg"]), "".join("<th>%s</th>" % html.escape(c) for c in t["qkd_cols"]), "".join(rrows)))
+           % (html.escape(t["qkd_rgg_title"]), "".join("<th>%s</th>" % html.escape(c) for c in t["qkd_cols"]), "".join(rrows)))
     return ("<section id=\"sec_qkd\"><h2>%s</h2><p class=\"reading\">%s</p>%s%s%s</section>"
             % (html.escape(t["sec_qkd"]), nar.get("sec_qkd", t["pending"]), fig_cards(figs_dir, lang, ["qkd_model"]), static, rgg))
 
