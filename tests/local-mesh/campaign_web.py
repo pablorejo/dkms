@@ -332,14 +332,17 @@ def cell_value(c, key):
         return fmt(r / (sigma_cap / edges), 3) if (r and edges and sigma_cap) else "—"
     if key == "sdn_zero":
         return pct(c.get("l0_sdn_rate_zero_frac"))
+    # Con un solo registro del muestreador en L2 (malla N=100) la media de
+    # CPU/RSS no es una media: se deja en blanco.
+    thin = bool(L2) and (L2.get("n_samples") or 0) < 2
     if key == "cpu":
         cpu = L2.get("cpu_mean_pct") if L2 else None
-        return fmt(sum(v for k, v in cpu.items() if k != "sae_load")) if cpu else "—"
+        return fmt(sum(v for k, v in cpu.items() if k != "sae_load")) if (cpu and not thin) else "—"
     if key == "cpu_sae":
         cpu = L2.get("cpu_mean_pct") if L2 else None
-        return fmt(cpu.get("sae_load")) if cpu else "—"
+        return fmt(cpu.get("sae_load")) if (cpu and not thin) else "—"
     if key == "rss":
-        return fmt(L2.get("rss_total_peak_mb")) if L2 else "—"
+        return fmt(L2.get("rss_total_peak_mb")) if (L2 and not thin) else "—"
     if key == "bringup":
         return fmt(c.get("t_up_s"))
     return "—"
