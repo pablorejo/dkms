@@ -136,6 +136,22 @@ pub struct LinkConfig {
     #[serde(default)]
     pub quditto_url: Option<String>,
 
+    /// SAE con el que este QKC figura en el KME, es decir el identificador que
+    /// va en la ruta `/api/v1/keys/{sae_id}/…`.
+    ///
+    /// Es el **único** dato del KME que hay que declarar: el tamaño de clave y
+    /// el máximo de claves por petición se descubren del `/status`
+    /// ([`crate::kme::KmeClient::probe`]). Y no se puede descubrir porque el
+    /// equipo no responde a nada sin él —un KME de ID Quantique devuelve
+    /// `not managed SAE` incluso al `/status` si el id no es uno de los
+    /// aprovisionados—, ni existe endpoint de catálogo en ETSI-014.
+    ///
+    /// Sin declarar se usa el `qkc_id`, que es lo que espera quditto (ignora el
+    /// id y sirve del mismo pool). Contra hardware real hay que ponerlo: es el
+    /// SAE **destino** del par, el que el operador del KME aprovisionó.
+    #[serde(default)]
+    pub sae_id: Option<String>,
+
     // ---- identidad hacia el KME (solo enlaces QKD — A6, docs/SECURITY.md).
     //
     // Cada KME es PRIVADO y tiene su propia PKI (del fabricante o de la

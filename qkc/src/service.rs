@@ -325,9 +325,17 @@ impl QkcService {
                     // kme_ca — cada KME es una autoridad propia), y si no, la
                     // identidad de red del nodo, que es la simplificación de
                     // la prueba con quditto (acepta la net-ca).
+                    // El `sae_id` del enlace si se declara (hardware real: el
+                    // KME sólo atiende a los SAE que tiene aprovisionados), y
+                    // si no el `qkc_id`, que es lo que basta con quditto. El
+                    // resto de parámetros del KME —tamaño de clave, claves por
+                    // petición— NO se configuran: los descubre `probe()` del
+                    // `/status` en el primer relleno.
                     let c = Arc::new(KmeClient::new(
                         url,
-                        cfg.qkc_id.to_string(),
+                        link.sae_id
+                            .clone()
+                            .unwrap_or_else(|| cfg.qkc_id.to_string()),
                         link.key_size_bits,
                         link.kme_client_tls(cfg.tls.as_ref()),
                     )?);
@@ -687,6 +695,7 @@ mod tests {
             neighbor_peer_addr: format!("127.0.0.1:{}", 20000 + neighbor),
             link_type: LinkType::Pqc,
             quditto_url: None,
+            sae_id: None,
             kme_cert: None,
             kme_key: None,
             kme_ca: None,

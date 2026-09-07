@@ -249,6 +249,9 @@ impl SdnAnnouncer {
                 neighbor_peer_addr: String::new(),
                 link_type: LinkType::Pqc,
                 quditto_url: None,
+                // Los enlaces que crea la SDN son PQC: no hay KME al que
+                // presentarse, así que tampoco hay SAE que declarar.
+                sae_id: None,
                 kme_cert: None,
                 kme_key: None,
                 kme_ca: None,
