@@ -1,0 +1,10 @@
+qkc_id       = 2
+peer_listen  = "127.0.0.1:7002"
+local_listen = "127.0.0.1:7102"
+admin_http   = "127.0.0.1:7202"
+
+[[links]]
+neighbor_id        = 1
+neighbor_peer_addr = "127.0.0.1:7001"
+link_type          = "qkd"
+quditto_url        = "http://127.0.0.1:20010"

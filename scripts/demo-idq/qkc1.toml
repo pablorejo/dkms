@@ -1,0 +1,11 @@
+qkc_id       = 1
+peer_listen  = "127.0.0.1:7001"
+local_listen = "127.0.0.1:7101"
+admin_http   = "127.0.0.1:7201"
+
+# Enlace QKD 1<->2 respaldado por los KME reales del IDQ (via el shim :20010).
+[[links]]
+neighbor_id        = 2
+neighbor_peer_addr = "127.0.0.1:7002"
+link_type          = "qkd"
+quditto_url        = "http://127.0.0.1:20010"
