@@ -104,6 +104,13 @@ SDN_RO=19003
 TOPO="${DKMS_MESH_TOPO:-ring}"
 SEED="${DKMS_MESH_SEED:-42}"
 LINK_TYPE="${DKMS_MESH_LINK_TYPE:-pqc}"
+# DKMS_MESH_KME_URL apunta los enlaces qkd a un KME EXTERNO en vez de levantar
+# un quditto por arista: es lo que permite correr la malla contra hardware QKD
+# de verdad (ver scripts/demo-idq). Ojo, entonces TODAS las aristas comparten
+# ese KME, así que sólo tiene sentido con una arista —N=2— salvo que el equipo
+# sirva varios pares. r0/alpha/distance siguen yendo a la SDN como siempre:
+# son su modelo de capacidad, no algo que el QKC mida.
+KME_URL="${DKMS_MESH_KME_URL:-}"
 # DKMS_MESH_PQC_AUTH=sign firma con ML-DSA el handshake del QKC (enlaces PQC) y
 # el anuncio de pubkey del ORR. Con `off` (default) esos dos planos van sin
 # firmar, como han ido siempre. Las identidades las genera `pqc_keygen` en
@@ -330,8 +337,9 @@ write_qkc_yml() {   # write_qkc_yml <n> [vecinos...]
                     # SDN, que dimensiona la arista con r0·10^(-alpha·d/10).
                     printf '  - {neighbor_id: %s, neighbor_addr: "127.0.0.1:%s", type: qkd, ' \
                         "$nb" "$(peer_port "$nb")"
-                    printf 'kme_url: "http://127.0.0.1:%s", r0: %s, alpha: %s, distance_km: %s' \
-                        "$(qd_port "$(edge_idx "$n" "$nb")")" "$R0" "$ALPHA" "$(edge_dist "$n" "$nb")"
+                    printf 'kme_url: "%s", r0: %s, alpha: %s, distance_km: %s' \
+                        "${KME_URL:-http://127.0.0.1:$(qd_port "$(edge_idx "$n" "$nb")")}" \
+                        "$R0" "$ALPHA" "$(edge_dist "$n" "$nb")"
                     if [ "$FRAME_AUTH" != off ]; then
                         printf ', link_psk: "%s", frame_auth: %s' \
                             "$(link_psk "$n" "$nb")" "$FRAME_AUTH"
@@ -631,7 +639,7 @@ for r in orr dkms; do
 done
 wait
 EOF
-    if [ "$LINK_TYPE" = qkd ]; then
+    if [ "$LINK_TYPE" = qkd ] && [ -z "$KME_URL" ]; then
         python3 - "$DIR/boot.sh" "$DIR/edges.tsv" "$R0" "$ALPHA" "$DIST_KM" <<'PATCH_PY'
 import io, sys
 boot, edges, r0, alpha, dist = sys.argv[1:6]
