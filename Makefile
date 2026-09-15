@@ -2,8 +2,8 @@
 #
 # Targets:
 #   make help              show this list
-#   make check             fmt --check + clippy -D warnings + doc + test (the CI gate)
-#   make fmt / clippy / doc / test   the pieces of `check`, one at a time
+#   make check             fmt --check + clippy -D warnings + doc + linkcheck + test (the CI gate)
+#   make fmt / clippy / doc / linkcheck / test   the pieces of `check`, one at a time
 #   make doc-open          build the rustdoc and open it in the browser
 #   make images            build the 5 Rust images locally, no push.
 #   make push              push images already tagged with $(TAG).
@@ -29,7 +29,7 @@ IMMUTABLE_TAG   ?= $(TAG)-$(GIT_SHA)
 
 ALL_RUST        := dkms orr qkc sdn quditto
 
-.PHONY: help check fmt clippy doc doc-open test rendercheck deny images push
+.PHONY: help check fmt clippy doc doc-open linkcheck test rendercheck deny images push
 
 # ──────────────────────────────────────────────────────────────────────
 # help
@@ -82,8 +82,11 @@ deny: ## cargo audit + cargo deny (cadena de suministro; NECESITA RED, fuera de 
 rendercheck: ## tests of the node.yml -> TOML renderer (docker/render_config.py)
 	@python3 -m unittest discover -s docker -p "test_*.py"
 
+linkcheck: ## relative links and anchors of every tracked Markdown file resolve
+	@python3 scripts/check-md-links.py
+
 check: export DKMS_NO_TEST_SKIPS = 1
-check: fmt clippy doc rendercheck test ## fmt + clippy + doc + rendercheck + test (no skips)
+check: fmt clippy doc linkcheck rendercheck test ## fmt + clippy + doc + linkcheck + rendercheck + test (no skips)
 
 # ──────────────────────────────────────────────────────────────────────
 # Build (local, no push).
