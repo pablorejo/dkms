@@ -5,12 +5,13 @@ branch multi-host: qué hay que hacer, cómo, en qué orden y cómo verificarlo.
 Se implementa fase a fase; cada fase es mergeable y testeable por sí sola.
 Estado de cada fase se anota aquí mismo al completarla.
 
-Referencia y parcialmente sustituye a `audit_2026_05.md` (findings H-5, H-6,
-M-1) y `orr/TODO_SECURITY.md` (P2). Todo lo citado con `file:line` fue
+Referencia y parcialmente sustituye a las revisiones internas de seguridad
+(2026-05: H-5, H-6, M-1; backlog del ORR: P2), que no forman parte del
+repositorio público. Todo lo citado con `file:line` fue
 verificado el 2026-08-27.
 
-Estado global: **Fases 1, 2, 3, 5, 7, 8, 9 y 10 completas; 4 y 6 hechas en código; los flips de default (etsi020 / strict / control_tls) validados en el testbed Proxmox (2026-09-01) y APLICADOS al binario y al renderer el 2026-09-03** (`audit_2026_09c.md`, F1–F4 + E1: ACK por ETSI-020 con el socket apagado, `bootstrap_trust = strict`, `control_tls` por defecto, `#![forbid(unsafe_code)]`, `overflow-checks` en release)
-(actualizado 2026-09-03; ver `audit_2026_09b.md` y `audit_2026_09c.md`). Todas las fases recorridas. Quedan diferidos, con requisitos
+Estado global: **Fases 1, 2, 3, 5, 7, 8, 9 y 10 completas; 4 y 6 hechas en código; los flips de default (etsi020 / strict / control_tls) validados en el testbed Proxmox (2026-09-01) y APLICADOS al binario y al renderer el 2026-09-03** (F1–F4 + E1: ACK por ETSI-020 con el socket apagado, `bootstrap_trust = strict`, `control_tls` por defecto, `#![forbid(unsafe_code)]`, `overflow-checks` en release)
+(actualizado 2026-09-03; detalle en los informes internos de auditoría). Todas las fases recorridas. Quedan diferidos, con requisitos
 claros: en 4, eliminar el socket de ACK (necesita testbed); en 6, pinning
 estable (necesita persistir la identidad ORR — decisión del usuario) y auth
 del caller de EstablishSecret (necesita testbed + separar puertos gRPC). Todo
@@ -429,7 +430,7 @@ plano :8444, que ya tiene mTLS, compruebe de verdad con quién habla.
   borrar los buffers locales de un peer (`service.rs:886-888`). Validar que
   la incarnation solo se acepta de peers conocidos y tratar transiciones como
   monótonas por proceso (primera vista ≠ restart, como ya documenta
-  CLAUDE.md). La auth completa del salto ORR queda fuera de alcance (§1.2),
+  docs/engineering-notes.md). La auth completa del salto ORR queda fuera de alcance (§1.2),
   pero este trigger es accionable por el extremo remoto del camino → se
   valida.
 - Documentar en el doc del plano: el `key_digest` es SHA-256 **sin clave** —
@@ -568,7 +569,7 @@ el porqué frente a ML-DSA).
 - Mitigación barata incluso en `off`: un re-INIT del mismo epoch con pubkey
   distinta se ignora (log warn) salvo tag válido — el relink legítimo siempre
   negocia epochs **nuevos** por encima de ambas ventanas (invariante ya
-  documentado en CLAUDE.md), así que rechazar el replace del mismo epoch no
+  documentado en docs/engineering-notes.md), así que rechazar el replace del mismo epoch no
   rompe la recuperación.
 
 **Compat y rollout.** Los peers viejos **ignoran en silencio** los frame
@@ -585,7 +586,7 @@ o con tag inválido bajo `require` → epoch intacto.
 
 **Tamaño.** ~400–500 LOC.
 
-### Fase 6 — ORR↔ORR: bootstrap con pinning + challenge (ejecuta TODO_SECURITY P2)
+### Fase 6 — ORR↔ORR: bootstrap con pinning + challenge (ejecuta el P2 del backlog interno del ORR)
 
 **Estado: HECHA (2026-08-30), salvo el flip del default a `strict`.** Las dos
 piezas bloqueadas se resolvieron sin persistir nada en disco:
@@ -702,7 +703,7 @@ Notas de diseño originales:
   request ignorando el path, `common/src/metrics.rs:46-81`).
 - Bundles per-institution para `net-ca` (§2).
 - Checklist de operador §1.2 copiada a `docker/README.md`.
-- Cierre documental: notas H-5/H-6 en `audit_2026_05.md`; corregir
+- Cierre documental: notas H-5/H-6 en la revisión interna de 2026-05; corregir
   `dkms/README.md:5` (dice ":8080, mTLS optional" — ambos falsos) y
   `docs/ipc.md` (apunta a `common/src/ipc/binary_tcp.rs`, que no existe; el
   wire real es `wire/src/lib.rs`, MAGIC v3).
@@ -814,7 +815,7 @@ versión metía `nonce ‖ ct ‖ tag` dentro del payload de la cebolla y midió
 **−51 %**. El OTP del enlace trocea en bloques de `key_size_bits / 8` y gasta
 una clave QKD por bloque, así que 28 bytes de más convierten un mensaje de 32 B
 en dos bloques: el doble de material por salto. Es invisible en enlaces PQC.
-Ver la gotcha del troceado en CLAUDE.md.
+Ver la gotcha del troceado en docs/engineering-notes.md.
 
 **Lo que sigue sin cubrir.**
 

@@ -34,7 +34,7 @@ impl SdnControl for SdnGrpc {
         // entero: cada módulo se declara a sí mismo por el HTTP admin
         // (`POST /register/{qkc,orr,dkms}`) y el SDN la infiere. Un
         // `PutTopology` sería una segunda fuente de verdad que además
-        // no podría expirar nodos. Ver CLAUDE.md, "Topology is
+        // no podría expirar nodos. Ver docs/engineering-notes.md, "Topology is
         // inferred, never configured".
         Err(Status::unimplemented(
             "PutTopology is out of scope: the SDN infers its topology from the modules' \

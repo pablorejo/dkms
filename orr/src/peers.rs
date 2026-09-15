@@ -36,7 +36,7 @@
 //!      ningún `master_secret` pasado (esas esks ya no existen).
 //!
 //! El estado se mantiene en memoria. Todo material secreto va envuelto
-//! en `Zeroizing<...>` para borrarse al drop (regla CLAUDE.md: RAM-only
+//! en `Zeroizing<...>` para borrarse al drop (regla docs/engineering-notes.md: RAM-only
 //! + zeroize). Tras reinicio del proceso, se rehace el bootstrap inicial.
 
 use std::collections::{BTreeMap, HashMap};

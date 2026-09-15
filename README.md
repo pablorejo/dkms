@@ -1,86 +1,90 @@
 # dkms_rust
 
-Distributed Key Management System (DKMS) digital twin platform for QKD and PQC
-workflows — rewritten in Rust, modularized so each component is independently
-deployable.
+Distributed Key Management System (DKMS) for QKD and post-quantum (PQC)
+key distribution, written in Rust. Each institution runs one node made of
+independent modules; the network topology is discovered from what the nodes
+announce, not configured centrally. Every plane between modules is
+authenticated and, where it carries key material, sealed end to end.
 
-This is the Rust reimplementation of [pabloprejo/dkms](../dkms) (Python). The web
-frontend is reused unchanged.
+This is the Rust reimplementation of [pabloprejo/dkms](https://github.com/pabloprejo/dkms)
+(Python), reorganised so that every component is separately deployable.
 
 ## Modules
 
-Each module is its own binary crate. They communicate over **gRPC (tonic)** for
-the control plane, and over a **binary TCP protocol** for the QKC↔QKC hot path
-(per-link key transport). See [docs/ipc.md](docs/ipc.md) for the wire formats.
+Each runtime module is its own binary crate. The control plane speaks
+**gRPC (tonic)** under mutual TLS; the QKC↔QKC hot path uses a **binary TCP
+protocol** (see [docs/ipc.md](docs/ipc.md)).
 
-| Crate       | Role |
-|-------------|------|
-| [`qkc`](qkc/)         | Quantum Key Channel — encrypted per-link key transport, token bucket admission, retry windows |
-| [`orr`](orr/)         | Onion Routing Router — per-hop PQC handshakes and relay forwarding |
-| [`sdn`](sdn/)         | Software Defined Network — in-memory topology graph, route computation (MCF), link admission, metrics sync |
-| [`dkms`](dkms/)       | Distributed Key Management Service — ETSI 014/020 endpoints for SAEs, buffered delivery, per-SAE rate limiting, round-robin scheduling |
-| [`quditto`](quditto/) | Simulated QKD link endpoint (replaces `simple_quditto`) |
-| [`common`](common/)   | Shared library: protobuf-generated types, IPC helpers, config, logging, crypto, IDs |
-| [`proto/`](proto/)    | Protobuf service definitions (input to `tonic-build`) |
+| Crate | Role |
+|-------|------|
+| [`qkc`](qkc/) | Quantum Key Channel: per-link key transport (QKD via ETSI 014 KMEs, or PQC ML-KEM), per-frame authentication, multipath forwarding, in-situ QKD rate estimation |
+| [`orr`](orr/) | Onion Routing Router: relays key material between nodes, optional onion path privacy on top of the end-to-end seal |
+| [`sdn`](sdn/) | Network controller: topology inferred from module announcements, routing tables, rate allocation (proportional fairness by default) |
+| [`dkms`](dkms/) | Key Management Service facing the SAEs: ETSI GS QKD 014/020 endpoints, RAM-only key buffers, end-to-end sealing of transport material |
+| [`quditto`](quditto/) | Simulated QKD link (an ETSI 014 KME with a configurable rate model) for tests and demos |
+| [`etsi`](etsi/) | ETSI GS QKD 014/020 message types and validation |
+| [`wire`](wire/) | Binary TCP wire format shared by QKC and ORR |
+| [`common`](common/) | Shared library: protobuf-generated types, config loading, TLS (hybrid X25519+ML-KEM, ML-DSA certificates), crypto helpers, IDs, logging |
+| [`proto/`](proto/) | Protobuf service definitions (compiled by `common/build.rs`) |
+| [`tests/loadgen`](tests/loadgen/) | `sae_load`: an SAE load client over mTLS, used by the test harnesses |
 
-The runtime request path is unchanged from the Python version:
+Request path:
 
 ```
-SAE → DKMS → ORR → QKC → (peer node) → ORR → DKMS → SAE
+SAE → DKMS → ORR → QKC → (peer node) → QKC → ORR → DKMS → SAE
                 ↕
-              SDN (routing and link binding)
+              SDN (topology, routing, rates)
 ```
 
 ## Building
 
-```bash
-# Whole workspace
-cargo build --release
-
-# Just one module
-cargo build --release -p qkc
-cargo build --release -p sdn
-cargo build --release -p dkms
-cargo build --release -p orr
-cargo build --release -p quditto
-```
-
-Binaries land in `target/release/{qkc,orr,sdn,dkms,quditto}`.
-
-## Running locally
+Requires Rust 1.88 (pinned in `rust-toolchain.toml`), `protobuf-compiler`,
+`cmake` and `clang`/`libclang`.
 
 ```bash
-cp .env.example .env
-# edit .env if you need to override ports/paths
-
-# Run a single module
-./scripts/run-sdn.sh
-./scripts/run-qkc.sh
-./scripts/run-orr.sh
-./scripts/run-dkms.sh
-./scripts/run-quditto.sh
-
-# Or the full multi-host deployment (one image per module, node.yml per
-# institution): see docker/README.md and docker/compose/.
-make images
+cargo build --release              # whole workspace
+cargo build --release -p qkc       # one module
+make check                         # fmt + clippy -D warnings + renderer tests + tests (no skips)
+make deny                          # cargo-deny: advisories and licences
 ```
 
-## Layout
+Binaries land in `target/release/{qkc,orr,sdn,dkms,quditto,sae_load}`.
 
-```
-.
-├── Cargo.toml          # workspace
-├── proto/              # .proto schemas
-├── common/             # shared library crate
-├── qkc/                # binary crate
-├── orr/                # binary crate
-├── sdn/                # binary crate
-├── dkms/               # binary crate
-├── quditto/            # binary crate
-├── docker/             # deployable images + compose + node.yml renderer
-├── scripts/            # build/run helpers
-└── docs/               # architecture, IPC, deployment
-```
+## Running
+
+- **Single module, locally**: `scripts/run-<module>.sh` (config from
+  `<module>/config/default.toml`, overridable with `local.toml` and
+  `MODULE__section__key` environment variables).
+- **Local multi-node demos**: [`scripts/demo-3qkc/`](scripts/demo-3qkc/) and
+  `scripts/demo-star/` (several nodes on one machine), and
+  [`scripts/demo-idq/`](scripts/demo-idq/) (two QKCs over real ID Quantique KMEs).
+- **Deployment**: one container image per module, one `node.yml` per
+  institution, `docker compose up`. Start with
+  [docker/README.md](docker/README.md) and
+  [docker/examples/quick_start.md](docker/examples/quick_start.md).
+  `make images` builds the images.
+
+## Tests
+
+`cargo test --workspace` covers the unit and integration tests. Beyond that:
+
+- [`tests/local-mesh/`](tests/local-mesh/): an N-node mesh on one machine
+  (used for the scaling campaigns, up to N=100).
+- [`tests/testbed/`](tests/testbed/): the multi-host test plan (restarts,
+  hot add of a node, load, idle reconnects).
+
+Load and saturation tests should run inside a memory-bounded cgroup; see the
+notes below.
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md): modules and data flow.
+- [docs/ipc.md](docs/ipc.md): gRPC schemas and the binary wire format.
+- [docs/deployment.md](docs/deployment.md) and [docker/README.md](docker/README.md): running a node.
+- [docs/SECURITY.md](docs/SECURITY.md): trust model and the hardening phases.
+- [docs/engineering-notes.md](docs/engineering-notes.md): design invariants,
+  defaults and the gotchas measured along the way. Read it before touching
+  the topology, rate or key-material paths.
 
 ## License
 

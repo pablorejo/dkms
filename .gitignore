@@ -60,7 +60,6 @@ tests/plots/
 agent-orr-fs-rotation/
 agent-dkms-topo-cli/
 simulation-3.topology.json
-audit_2026_05.md
 
 # Results dir (raw logs + JSON + plots de cada corrida CLI)
 tests/results/
@@ -96,3 +95,10 @@ target-bookworm/
 
 # Estado de la campaña 2026-09 en el árbol de CESGA (GIT_SHA, celdas, slurm)
 /campaign-2026-09/
+
+# Only README.md lives at the repository root; every other root-level .md
+# (agent guidance, audits, scratch notes) stays local.
+/*.md
+!/README.md
+# Local-only documentation, never committed.
+docs/local/

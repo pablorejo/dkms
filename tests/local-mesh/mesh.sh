@@ -32,11 +32,11 @@
 #
 # Cada enlace lo declara UN solo extremo a propósito: es lo que comprueba que
 # la SDN se lo comunica al otro (ver "Peers ride back on the announcement" en
-# CLAUDE.md).
+# docs/engineering-notes.md).
 #
 # **Memoria**: todo va dentro de un scope de systemd con `MemoryMax`. Un
 # despliegue local se ha comido una sesión de escritorio antes; ver la sección
-# de saturación del CLAUDE.md. No lo quites.
+# de saturación del docs/engineering-notes.md. No lo quites.
 #
 # Para medir hace falta poder levantar los dos techos que, con los defaults,
 # son constantes nuestras y no límites del sistema:
@@ -72,7 +72,7 @@
 #
 # Se parchea el TOML renderizado y NO se usan variables de entorno del binario:
 # config-rs sustituye la sección entera al fijar un campo anidado por env (ver
-# CLAUDE.md), así que habría que repetir todos los campos de [generator].
+# docs/engineering-notes.md), así que habría que repetir todos los campos de [generator].
 set -uo pipefail
 
 REPO="${DKMS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -720,7 +720,7 @@ cmd_up() {
         if [ -n "${SLURM_JOB_ID:-}" ]; then
             echo "mesh: el tope lo pone SLURM (job $SLURM_JOB_ID, --mem=${SLURM_MEM_PER_NODE:-?} MB)" >&2
         else
-            echo "mesh: AVISO — sin límite de memoria; ver la sección de saturación de CLAUDE.md" >&2
+            echo "mesh: AVISO — sin límite de memoria; ver la sección de saturación de docs/engineering-notes.md" >&2
         fi
         "$DIR/boot.sh" >/dev/null 2>&1 &
     fi

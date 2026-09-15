@@ -169,7 +169,7 @@ import csv, glob, statistics, sys
 d, tag, sustain_from = sys.argv[1], sys.argv[2], float(sys.argv[3])
 # Dos pasadas en streaming, sin acumular las filas: a 16 hilos cada CSV trae
 # más de un millón de líneas y guardarlas como dicts se come varios GB — en un
-# portátil de 16 GB eso acaba en OOM, que es justo lo que CLAUDE.md avisa de no
+# portátil de 16 GB eso acaba en OOM, que es justo lo que docs/engineering-notes.md avisa de no
 # provocar. Solo se retienen las latencias de las respuestas OK, que son las
 # que hacen falta para los percentiles.
 files = glob.glob(f"{d}/*.{tag}.csv")

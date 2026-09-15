@@ -108,7 +108,7 @@ petgraph = "0.6"
 # demand scaling). Three backends behind SDN_SOLVER: highs (DEFAULT since
 # 2026-08-25 — C++ via highs-sys, needs cmake + clang/libclang at build,
 # already in the Dockerfiles and CI), microlp (pure Rust, exact simplex,
-# false phase-2 Infeasible under load — see CLAUDE.md) and clarabel (pure
+# false phase-2 Infeasible under load — see docs/engineering-notes.md) and clarabel (pure
 # Rust interior-point, no phase 2).
 good_lp = { version = "1", default-features = false, features = ["microlp", "clarabel", "highs"] }
 # Direct dep only for naming clarabel::solver::SolverStatus in the SDN's

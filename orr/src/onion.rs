@@ -158,7 +158,7 @@ impl InnerLayer {
 ///
 /// `master_secret` va en `Zeroizing<[u8; 32]>` para que se borre al
 /// drop del struct, aun cuando esta vida sea transitoria (sólo dura
-/// la llamada a `build_onion`). Política CLAUDE.md "RAM-only +
+/// la llamada a `build_onion`). Política docs/engineering-notes.md "RAM-only +
 /// zeroize" + audit H-3 criterio #5.
 #[derive(Clone)]
 pub struct PathHopSecret {

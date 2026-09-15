@@ -145,7 +145,7 @@ siga a 0). Eso disparó las dos cosas a la vez:
 - El ORR de c reapareció sin `master_secret`, y sus pares siguieron cifrando
   con el epoch viejo: `orr.incoming master_secret missing for epoch (drop)
   from=orr_1 epoch_id=0 latest=None`. Todo lo que a y b le mandaban se caía
-  ahí — es la carrera de bootstrap del ORR que CLAUDE.md ya documenta, con su
+  ahí — es la carrera de bootstrap del ORR que docs/engineering-notes.md ya documenta, con su
   workaround: reiniciar el despliegue entero.
 - El QKC de c se quedó sin claves ENC para sus dos vecinos durante una hora
   (`wait_enc_batch.timeout peer=1 missing=1 enc_len=0` ×241 612, más
@@ -272,7 +272,7 @@ El smoke de `docker/README.md` convertido en aserción. Para cada par ordenado
 de los 3 nodos (6 flujos): `sae_i` pide `enc_keys` a su DKMS local, `sae_j`
 recupera esa `key_ID` con `dec_keys` en el suyo, y se **comparan los bytes**.
 
-**Por qué importa más de lo que parece**: CLAUDE.md deja escrito que la clave
+**Por qué importa más de lo que parece**: docs/engineering-notes.md deja escrito que la clave
 de sesión del SAE **no lleva ninguna comprobación de integridad** —se envuelve
 por OTP con una clave de transporte y viaja por ETSI-020—, así que si una clave
 de transporte se desincronizara entre los dos extremos, los dos SAEs se
@@ -437,7 +437,7 @@ vecinos en el grafo. Y sobre todo: **en a/b/c no se edita ni un fichero**.
 
 ### T32 — Rearranque de un módulo suelto (manual, documentado)
 
-Reiniciar **solo el ORR** de node-b. CLAUDE.md documenta que esto deja a los
+Reiniciar **solo el ORR** de node-b. docs/engineering-notes.md documenta que esto deja a los
 ORR peers con `master_secret` viejos y el nuevo logueando «sin master_secret»
 para siempre, con workaround «reiniciar el despliegue entero».
 
@@ -708,7 +708,7 @@ cero panics y cero 500/502/504. Los 26 × 503 del punto de 4 hilos son el "no
 key available" de ETSI-014 al drenar más rápido que el refill.
 
 Para subir de ahí hay que tocar `max_tokens_per_peer_per_tick`, no la SDN:
-en un despliegue solo-PQC su rate no acota nada (ver la nota de λ en CLAUDE.md).
+en un despliegue solo-PQC su rate no acota nada (ver la nota de λ en docs/engineering-notes.md).
 
 ## Orden sugerido
 

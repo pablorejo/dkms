@@ -83,7 +83,7 @@ sae_port() { echo $(( 20005 + ($1 - 1) * 100 )); }
 # La diferencia importante con t20_load.sh: aquí se recoge también la rate que
 # la SDN asigna a cada DKMS. Sin ella los 429 son inatribuibles — el bucket por
 # SAE se dimensiona con `link_capacity / N_SAEs`, y en un despliegue PQC-only
-# esa señal no significa nada y puede caer a 0. Ver CLAUDE.md.
+# esa señal no significa nada y puede caer a 0. Ver docs/engineering-notes.md.
 sampler() {
     local tag=$1
     : > "$OUT/$tag.samples.txt"

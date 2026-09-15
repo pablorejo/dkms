@@ -356,7 +356,7 @@ pub struct EdgeMeta {
 /// 20.0, que servía porque el renderer del `topology.yml` siempre escribía un
 /// valor explícito; ahora que la topología solo llega por anuncios, ese default
 /// es el único que queda, y 20 claves/s estrangulaban el enlace sin avisar.
-/// 2000 es el valor de referencia del repo (`docker/README.md`, `CLAUDE.md`).
+/// 2000 es el valor de referencia del repo (`docker/README.md`, `docs/engineering-notes.md`).
 fn default_r0() -> f64 {
     2000.0
 }

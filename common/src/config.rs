@@ -147,7 +147,7 @@ mod tests {
 
     /// Lo que hace config-rs 0.14 de verdad, fijado: una variable de
     /// entorno que pone UN campo de una sección anidada se MEZCLA con la
-    /// sección del fichero — el otro campo sobrevive. (CLAUDE.md decía lo
+    /// sección del fichero — el otro campo sobrevive. (docs/engineering-notes.md decía lo
     /// contrario durante meses: «sustituye la sección entera». Medido aquí
     /// el 2026-08-30 y corregido allí.) Si config-rs cambiara de criterio,
     /// este test lo dice antes que un despliegue.

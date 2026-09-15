@@ -45,7 +45,7 @@ partida no mide lo que se quiere medir, mide otra cosa.
 
 En las tres, cada arista la declara **un solo extremo** a propósito: es lo que
 comprueba que la SDN se lo comunica al otro (ver "Peers ride back on the
-announcement" en `CLAUDE.md`).
+announcement" en `docs/engineering-notes.md`).
 
 Medido en local con N=10, los 90 pares ordenados dan bytes idénticos en las
 tres, y la malla queda operativa —todos los buffers llenos— en unos 75 s.
@@ -252,7 +252,7 @@ avisa: ahí el tope es el `--mem` del trabajo, que es un cgroup igual de real.
 Fuera de SLURM y sin scope no hay tope ninguno, y el script lo dice.
 
 El tope importa: un despliegue local se ha comido una sesión de escritorio
-antes — ver la sección de saturación del `CLAUDE.md`. Con N=10 el pico medido
+antes — ver la sección de saturación del `docs/engineering-notes.md`. Con N=10 el pico medido
 son 0,46 GB, así que los 8 GB son margen, no restricción.
 
 ## Dónde deja las cosas
