@@ -6,8 +6,8 @@ independent modules; the network topology is discovered from what the nodes
 announce, not configured centrally. Every plane between modules is
 authenticated and, where it carries key material, sealed end to end.
 
-This is the Rust reimplementation of [pabloprejo/dkms](https://github.com/pabloprejo/dkms)
-(Python), reorganised so that every component is separately deployable.
+It is the Rust reimplementation of an earlier Python prototype, reorganised so
+that every component is separately deployable.
 
 ## Modules
 
