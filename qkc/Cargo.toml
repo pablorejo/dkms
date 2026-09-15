@@ -3,7 +3,7 @@ name        = "qkc"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "Quantum Key Channel — encrypted hop-to-hop relay with shared-quditto OTP"
+description = "Quantum Key Channel — hop-by-hop OTP relay over QKD (ETSI 014 KME) or PQC (ML-KEM) links, per-frame link MAC, WCMP multipath, in-situ rate estimation"
 default-run = "qkc"
 
 [[bin]]

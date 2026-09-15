@@ -1,9 +1,11 @@
-//! Circuit table + onion peeling.
+//! Circuit table — scaffolding for the `OpenCircuit` / `Relay` family of
+//! RPCs, which still answer `UNIMPLEMENTED` (see [`crate::grpc_server`]).
 //!
-//! A `Circuit` is a sequence of NodeIds and a per-hop session key. When a
-//! frame arrives, the next hop is looked up here, the outermost onion
-//! layer is decrypted with this node's session key for that circuit, and
-//! the resulting payload is forwarded to the next hop's ORR.
+//! Nothing on the data path reads this table. Onion layers are built and
+//! peeled per message in [`crate::onion`] from the per-pair `master_secret`,
+//! without a circuit; [`crate::service`] holds an empty [`CircuitTable`]
+//! only so the gRPC surface has something to answer `GetCircuit` /
+//! `ListCircuits` against.
 
 use std::sync::Arc;
 

@@ -1,3 +1,7 @@
+//! ORR error type. The gRPC server maps variants to `tonic::Status`
+//! (`Unsupported` → `UNIMPLEMENTED`); `main.rs` is the only place it
+//! becomes `anyhow::Error`.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

@@ -3,7 +3,7 @@ name        = "orr"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "Onion Routing Router — relays DKMS payloads through the QKC substrate"
+description = "Onion Routing Router — relays DKMS payloads through the QKC substrate, optional onion path privacy on top"
 
 [[bin]]
 name = "orr"

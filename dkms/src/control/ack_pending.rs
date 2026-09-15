@@ -176,7 +176,7 @@ pub enum TakeOutcome {
     UnknownKey,
 }
 
-/// Arc<AckPendingStore> es el tipo que comparten Generator + ack socket.
+/// `Arc<AckPendingStore>` es el tipo que comparten Generator + ack socket.
 pub type SharedAckPending = Arc<AckPendingStore>;
 
 #[cfg(test)]

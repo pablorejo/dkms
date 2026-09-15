@@ -95,7 +95,8 @@ pub struct ListenCfg {
     pub sae_addr: SocketAddr,
     /// ETSI 020 (DKMS↔DKMS) HTTP bind.
     pub peer_addr: SocketAddr,
-    /// gRPC `DkmsControl` (orquestador) bind.
+    /// gRPC `DkmsControl` bind (gestión: SAEs, drain, health). Sin
+    /// autenticación: el renderer de `node.yml` lo deja siempre en loopback.
     pub grpc_addr: SocketAddr,
     /// Prometheus `/metrics` bind.
     pub metrics_addr: SocketAddr,

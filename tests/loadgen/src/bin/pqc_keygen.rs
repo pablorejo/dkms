@@ -8,9 +8,13 @@
 //!
 //!     pqc_keygen --out DIR --nodes 30
 //!
-//! Deja, por cada nodo n:
+//! Deja, por cada nodo `n`:
+//!
+//! ```text
 //!     DIR/qkc-<n>.seed   DIR/qkc-<n>.vk      (semilla y clave de verificación)
 //!     DIR/orr_<n>.seed   DIR/orr_<n>.vk
+//! ```
+//!
 //! todo en base64, que es como lo consumen los `node.yml`.
 //!
 //! Las semillas son material secreto: quedan en el directorio de la malla, que

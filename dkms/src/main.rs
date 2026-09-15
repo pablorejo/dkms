@@ -1,12 +1,16 @@
 //! Binario DKMS.
 //!
-//! Cuatro tareas concurrentes:
+//! Cablea la config con los clientes y arranca, como tareas concurrentes:
 //!
-//! * Plano norte (ETSI 014, SAE-facing, mTLS).
-//! * Plano este/oeste (ETSI 020, DKMS↔DKMS, mTLS).
-//! * Plano de gestión gRPC (`DkmsControl`).
+//! * Plano norte (ETSI 014, SAE-facing, mTLS) y plano este/oeste (ETSI 020,
+//!   DKMS↔DKMS, mTLS) — `etsi_http::serve`.
+//! * Plano de gestión gRPC (`DkmsControl`, loopback).
+//! * Anuncio a la SDN en bucle y suscripción a sus cambios de topología
+//!   (invalida la caché de SAE bindings).
+//! * Generator + ACKs: rellena los buffers de transporte vía ORR al ritmo
+//!   de la SDN; sólo si hay ORR conectado y `generator.enabled`.
+//! * Tareas de fondo del servicio (sweeper de pending, reporte de demanda).
 //! * Endpoint Prometheus (`/metrics`).
-//! * Tareas de fondo (sweeper de pending, refill de buffers — TODO QKC).
 
 #![forbid(unsafe_code)]
 use std::{path::PathBuf, sync::Arc};

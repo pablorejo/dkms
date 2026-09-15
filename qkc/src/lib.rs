@@ -1,30 +1,45 @@
 //! QKC — Quantum Key Channel.
 //!
-//! Hace de **enrutador hop-by-hop** entre nodos QKC. Cifra el payload
-//! con claves OTP de 256 bits obtenidas del **quditto compartido** de
-//! cada enlace (un quditto distinto por enlace QKC↔QKC) y deja la
-//! cabecera en claro.
+//! Enrutador **salto a salto** entre nodos: cada enlace QKC↔QKC cifra el
+//! payload con OTP (una clave de `key_size_bits` por bloque, [`crypto`]) y
+//! deja las cabeceras en claro. El material de cada enlace sale de una de
+//! dos fuentes, elegida por `link_type` en la config ([`config`]):
 //!
-//! Tres listeners:
+//! * **`qkd`** — un KME ETSI GS QKD 014 ([`kme`]): el simulador `quditto`
+//!   en pruebas o el hardware real en producción (`quditto_url` en el TOML,
+//!   `kme_url` en el `node.yml` que lo genera). Los dos
+//!   extremos hablan con el mismo KME; el emisor pide `enc_keys` y avisa
+//!   de los `key_ID` con `FRAME_KEY_IDS_NOTIFY`, el receptor los recupera
+//!   con `dec_keys` ([`keystore`]). La tasa real del enlace se mide in situ
+//!   ([`rate_estimator`]) y se anuncia a la SDN.
+//! * **`pqc`** — sin hardware: un secreto ML-KEM por época negociado sobre
+//!   el propio canal TCP ([`pqc_handshake`]), del que se deriva el material
+//!   OTP de forma determinista en los dos extremos ([`pqc_source`]).
 //!
-//! * **TCP peer** — frames `FRAME_RECV` / `FRAME_RELAY` desde / hacia
-//!   otros QKCs. Es el hot path.
-//! * **TCP local** — frames `FRAME_LOCAL_SEND` / `FRAME_LOCAL_DELIVER`
-//!   entre este QKC y el ORR co-localizado. Mismo wire binario, sin
-//!   cifrado (el plaintext se entrega al ORR tal cual y el ORR le da
-//!   los plaintext al QKC para que él los cifre).
-//! * **HTTP admin** — `POST /forwarding-table` (SDN o pruebas) y
-//!   `GET /healthz`.
+//! Sobre cualquiera de las dos, cada frame de datos lleva un MAC de enlace
+//! con ventana anti-replay ([`frame_auth`]), verificado en el lector de la
+//! conexión y en orden de llegada.
 //!
-//! Diferencias con el QKC Python (todas en favor de velocidad):
+//! Listeners ([`transport`]):
 //!
-//! * Sin GIL: cifrado XOR puro inline, sin process pool ni bridge
-//!   sync/async.
-//! * Forwarding table en `ArcSwap` — lecturas lock-free.
-//! * `dec_keys` siempre en **batch** (un POST por mensaje, no uno por
-//!   chunk).
-//! * Cliente HTTP a quditto con keep-alive y `reqwest::Client` único.
-//! * Cola de envío por peer con `crossbeam::ArrayQueue` lock-free.
+//! * **TCP peer** (`peer_listen`, 20000) — frames `FRAME_RECV` /
+//!   `FRAME_RELAY` de otros QKCs, más handshake PQC y NOTIFY. El hot path.
+//! * **TCP local** (`local_listen`, 20001) — `FRAME_LOCAL_SEND` /
+//!   `FRAME_LOCAL_DELIVER` con el ORR co-localizado: mismo wire, en claro,
+//!   el QKC cifra lo que sale y descifra lo que entra.
+//! * **HTTP admin** (`admin_http`, 20002; mTLS cuando hay `[tls]`,
+//!   [`mtls_admin`]) — `POST /forwarding-table`, que sólo acepta a la SDN,
+//!   y `GET /healthz` / `/stats` ([`http_admin`]).
+//!
+//! No hay topología configurada: el QKC se **anuncia** a la SDN en bucle
+//! ([`sdn_client`]) con sus enlaces y su tasa medida, y la respuesta trae
+//! el conjunto de vecinos, que puede añadir o retirar enlaces PQC en
+//! caliente. El reenvío es multipath WCMP sobre la tabla que la SDN empuja
+//! ([`routing`], [`relay`]).
+//!
+//! El hot path no hace red ni HTTP: forwarding table en `ArcSwap`, buffers
+//! de claves en memoria rellenados por workers de fondo, una cola lock-free
+//! por peer con su writer.
 
 #![forbid(unsafe_code)]
 pub mod config;

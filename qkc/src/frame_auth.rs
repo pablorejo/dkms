@@ -142,7 +142,7 @@ impl LinkFrameAuth {
     }
 
     /// Como [`new`](Self::new) pero derivando la raíz del **secreto del enlace
-    /// PQC** (ver [`RootSource::PerEpoch`]): no necesita `link_psk`, la
+    /// PQC** (ver `RootSource::PerEpoch`): no necesita `link_psk`, la
     /// autenticación la hereda del handshake firmado con el cert. El sello se
     /// activa en cuanto el handshake establece la primera época.
     pub fn per_epoch(mode: FrameAuth, peer_id: u32, store: Arc<SecretStore>) -> Self {

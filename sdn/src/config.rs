@@ -1,3 +1,10 @@
+//! SDN configuration.
+//!
+//! Loaded with `common::config::load_config("sdn")`: `config/default.toml`
+//! ← `config/local.toml` ← `SDN__*` environment variables (`__` nests). In a
+//! container deployment the TOML is rendered from `node.yml` by
+//! `docker/render_config.py`.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7,7 +14,8 @@ pub struct SdnConfig {
     /// gRPC control-plane bind.
     pub grpc_addr: String,
 
-    /// HTTP admin API bind (web UI / orchestrator).
+    /// HTTP admin API bind: registrations, `/rate`, `/demand` and the
+    /// read-only views (see `http_api`).
     pub http_addr: String,
 
     #[serde(default = "default_metrics")]
@@ -69,11 +77,11 @@ pub struct SdnConfig {
     /// para local-mesh/testbed). Si está, `http_addr` pasa a mTLS con las
     /// rutas mutantes (registro, rebind de SAE) exigiendo cert de la CA de
     /// red, y las rutas read-only se sirven además en claro en `http_ro_addr`
-    /// para el web frontend.
+    /// para inspección (curl, paneles).
     #[serde(default)]
     pub tls: Option<SdnTlsCfg>,
 
-    /// Bind read-only en claro para el web UI cuando `tls` está activo.
+    /// Bind read-only en claro (inspección) cuando `tls` está activo.
     /// Si `tls` es `None` se ignora (todo va por `http_addr` en claro).
     #[serde(default)]
     pub http_ro_addr: Option<String>,

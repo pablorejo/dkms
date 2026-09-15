@@ -3,7 +3,7 @@ name        = "loadgen"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "Cliente SAE de carga (equivalente Rust de tests/testbed/sae_load.py, con soporte de certs ML-DSA)"
+description = "sae_load: SAE load client over mTLS with ML-DSA certificates, plus pqc_keygen"
 
 [[bin]]
 name = "sae_load"

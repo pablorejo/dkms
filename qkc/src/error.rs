@@ -1,3 +1,7 @@
+//! QKC error type. Everything the relay, the key sources and the transport
+//! can fail with; crosses the crate boundary only as `anyhow::Error` in
+//! `main.rs`.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

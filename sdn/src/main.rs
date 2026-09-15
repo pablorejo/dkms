@@ -1,9 +1,11 @@
 //! SDN binary entry point.
 //!
 //! Spawns three tasks:
-//!   1. gRPC server — control plane towards DKMS/QKC/ORR.
-//!   2. HTTP server — admin API (mostly read-only) consumed by the web UI.
-//!   3. Background — periodic MCF recompute + debounced topology pushes.
+//!   1. gRPC server — `SdnControl` (SAE binding, ORR paths, topology stream).
+//!   2. HTTP server — the admin API the modules register against and poll
+//!      (`/register/*`, `/rate`, `/demand`), plus the read-only views.
+//!   3. Background — presence sweeper, periodic rate recompute, forwarding
+//!      table push to the QKCs on topology/snapshot change.
 
 #![forbid(unsafe_code)]
 use anyhow::Result;

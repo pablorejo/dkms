@@ -3,7 +3,13 @@
 //! Módulos:
 //!   * [`otp`]  — One-time-pad sobre material QKD (XOR salto-a-salto).
 //!   * [`pqc`]  — ML-KEM (FIPS 203) para acuerdos de clave PQC.
-//!   * [`aead`] — AES-256-GCM como DEM en el patrón KEM-DEM.
+//!   * [`pqc_sign`] — ML-DSA-65 (FIPS 204): firma del handshake y de los
+//!     anuncios.
+//!   * [`aead`] — AES-256-GCM, en modo *detached* donde el tag no puede ir
+//!     en el payload (cebolla del ORR, sello e2e del DKMS).
+//!   * [`frame_mac`] — MAC por frame del enlace QKC↔QKC con sesión,
+//!     contador y ventana anti-replay.
+//!   * [`link_mac`] — HMAC del handshake ML-KEM (raíz PSK, legado).
 //!
 //! Módulo local de cada crate (p.ej. el KME del QKC, el wrap ETSI del
 //! DKMS) vive en su propio sitio; aquí está sólo lo común.

@@ -1,6 +1,6 @@
 //! Post-quantum KEM (ML-KEM, FIPS 203).
 //!
-//! Backend pure-Rust vía la crate [`ml-kem`] (RustCrypto). No depende de
+//! Backend pure-Rust vía la crate `ml-kem` (RustCrypto). No depende de
 //! `liboqs`. Soporta los tres parameter sets estándar:
 //!
 //!   * ML-KEM-512   (security cat 1, equivalente a AES-128)

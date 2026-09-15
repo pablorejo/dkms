@@ -50,7 +50,7 @@
 //! (o [`WINDOW_MAX_SECS`], lo primero).
 //!
 //! La estimación es la **media ponderada por tiempo** (`Σclaves/Σsegundos`)
-//! de las ventanas de un horizonte de [`HORIZON_SECS`]: inmune por
+//! de las ventanas de un horizonte de `HORIZON_SECS`: inmune por
 //! construcción al aliasing bloque↔sondeo. Ojo con "mejorarla": la primera
 //! versión metía las tasas por-ventana en una mediana, y con bloques de
 //! 1,28 s sondeados a 1 Hz las ventanas salen bimodales (256/s ó 128/s) —
@@ -58,11 +58,11 @@
 //! (2026-09-01). La media temporal da 0,2 % en el mismo escenario.
 //!
 //! Un cambio de nivel real no debe esperar a que el horizonte se diluya:
-//! si la media corta (≥ [`SHORT_MIN_SECS`] s) se desvía > [`SNAP_DEVIATION`]
+//! si la media corta (≥ `SHORT_MIN_SECS` s) se desvía > `SNAP_DEVIATION`
 //! de la larga durante varias ventanas seguidas, el horizonte se trunca al
-//! tramo corto. Asimetría donde importa: a la baja bastan [`RUN_DOWN`]
+//! tramo corto. Asimetría donde importa: a la baja bastan `RUN_DOWN`
 //! ventanas (sobreestimar es el error caro — la SDN repartiría caudal que
-//! la fibra no sostiene), al alza se piden [`RUN_UP`].
+//! la fibra no sostiene), al alza se piden `RUN_UP`.
 
 use std::{
     collections::VecDeque,

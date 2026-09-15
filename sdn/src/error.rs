@@ -1,3 +1,6 @@
+//! SDN error type. Crosses the crate boundary only as `anyhow::Error` in
+//! `main.rs`; the HTTP and gRPC layers map variants to status codes.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

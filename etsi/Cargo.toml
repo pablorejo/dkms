@@ -3,7 +3,7 @@ name        = "etsi"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "ETSI GS QKD 014 + ETSI GS QKD 020 message models — direct port of the Python ETSIQKD package"
+description = "ETSI GS QKD 014 + ETSI GS QKD 020 message models and validation (no transport)"
 
 [lib]
 path = "src/lib.rs"

@@ -66,7 +66,7 @@ impl SealedMessage {
         out
     }
 
-    /// Inversa de [`to_bytes`]. Requiere al menos `NONCE_LEN + TAG_LEN`
+    /// Inversa de [`Self::to_bytes`]. Requiere al menos `NONCE_LEN + TAG_LEN`
     /// bytes (nonce + tag mínimo, payload puede ser vacío).
     pub fn from_bytes(buf: &[u8]) -> Result<Self, AeadError> {
         if buf.len() < NONCE_LEN + TAG_LEN {

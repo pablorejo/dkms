@@ -28,7 +28,7 @@
 //! ```text
 //! Prefijo fijo (10 B):
 //!   MAGIC      4 B  = b"\x51\x4B\x43\x03"   ('Q','K','C', v3)
-//!   FRAME_TYPE 1 B  = 0x01..0x22
+//!   FRAME_TYPE 1 B  = 0x01..0x2A  (ver las constantes `FRAME_*`)
 //!   RESERVED   1 B  = 0x00
 //!   TOTAL_LEN  4 B  u32 LE — bytes restantes (no incluye prefijo)
 //!
@@ -107,8 +107,8 @@ pub const FRAME_LOCAL_SEND: u8 = 0x10;
 /// `header_orr_mp`, `header_dkms_mp` y el payload.
 pub const FRAME_LOCAL_DELIVER: u8 = 0x11;
 
-/// QKC_A → QKC_B (mismo enlace): notificación de que A acaba de pedir
-/// estos `key_ID`s al quditto compartido. B debe llamar a `dec_keys`
+/// QKC_A → QKC_B (mismo enlace): notificación de que A acaba de sacar
+/// estos `key_ID`s de la fuente del enlace. B debe llamar a `dec_keys`
 /// con esos IDs para llenar su buffer DEC.
 ///
 /// Wire del payload:

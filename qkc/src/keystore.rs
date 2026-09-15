@@ -2,11 +2,12 @@
 //!
 //! Cada enlace QKC↔QKC tiene un `KeyStore` con:
 //!
-//! * **Buffer ENC** — claves recién pedidas vía `enc_keys` al quditto
-//!   compartido. Listo para cifrar mensajes salientes. Cola lock-free.
+//! * **Buffer ENC** — claves recién pedidas vía `enc_keys` a la fuente del
+//!   enlace (el KME, o la derivación PQC). Listo para cifrar mensajes
+//!   salientes. Cola lock-free.
 //! * **Buffer DEC** — claves esperadas que el peer va a usar para
 //!   mandarnos cosas. El peer nos avisó con `FRAME_KEY_IDS_NOTIFY` y
-//!   nosotros las pedimos al quditto vía `dec_keys`. Map `id → material`.
+//!   nosotros las pedimos a la fuente vía `dec_keys`. Map `id → material`.
 //! * **Worker ENC** — background task que rellena el ENC cuando baja
 //!   de `REFILL_THRESHOLD`. Tras meter las claves en el buffer manda
 //!   un `FRAME_KEY_IDS_NOTIFY` al peer.
@@ -256,7 +257,7 @@ impl KeyStore {
     }
 
     /// Saca N claves del buffer ENC. Si no hay suficientes, devuelve
-    /// las que pueda (el caller llama después a [`wait_enc_batch`] para
+    /// las que pueda (el caller llama después a [`Self::wait_enc_batch`] para
     /// esperar al worker).
     pub fn take_enc_batch(&self, n: usize) -> Vec<OtpKey> {
         let mut out = Vec::with_capacity(n);
@@ -367,7 +368,7 @@ impl KeyStore {
     }
 
     /// Busca y CONSUME la clave por `key_id` en el buffer DEC.
-    /// `None` si no la tiene → caller llama a [`wait_dec`] para esperar
+    /// `None` si no la tiene → caller llama a [`Self::wait_dec`] para esperar
     /// al worker. Consumir = mover fuera del mapa (un pad no se usa dos
     /// veces); si el caller luego falla el batch, la clave está quemada —
     /// ver la nota en `relay::lookup_or_fetch_dec`.

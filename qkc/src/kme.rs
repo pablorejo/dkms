@@ -1,15 +1,22 @@
-//! Cliente HTTP contra el **quditto compartido** de un enlace.
+//! Cliente ETSI GS QKD 014 contra el **KME** de un enlace `qkd`: el
+//! simulador `quditto` en pruebas, el KME del hardware QKD en producción.
+//! Define también [`KeySource`], la abstracción que el `KeyStore` consume,
+//! de la que la fuente PQC (`pqc_source`) es la otra implementación.
 //!
 //! Cada `KmeClient` representa la vista local de un enlace concreto.
-//! Como los dos QKCs del enlace apuntan al mismo proceso quditto:
+//! Los dos QKCs del enlace hablan con el mismo par de KMEs (un KME por
+//! extremo en hardware real, un solo proceso en quditto):
 //!
 //! * `enc_keys` saca N claves frescas (con sus `key_ID`s).
 //! * `dec_keys` (POST con batch de `key_ID`s) recupera las claves que
 //!   ya entregó el otro lado.
+//! * `status` (vía [`KeySource::stock`]) da el nivel del almacén, que
+//!   alimenta al estimador de tasa.
 //!
-//! Negocia wire **binario** (`Accept: application/octet-stream`) por
-//! defecto — ahorra base64+JSON, compatible con clientes ETSI 014
-//! ortodoxos en el quditto (que cae a JSON si no ven Accept binario).
+//! Negocia wire **binario** (`Accept: application/octet-stream`) con
+//! quditto — ahorra base64+JSON — y cae al JSON del estándar con cualquier
+//! KME ortodoxo. Con `[tls]` o una credencial por KME (`kme_cert/key/ca`)
+//! el canal va en mTLS contra la PKI del KME.
 //!
 //! Este módulo ya NO hace coalescing. El coalescing antiguo era un
 //! parche para ocultar la latencia HTTP en el hot path. Con el

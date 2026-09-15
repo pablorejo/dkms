@@ -1,6 +1,8 @@
 //! QKC binary entry point.
 //!
-//! Tres listeners + el `PeerOut` (pool de envío TCP).
+//! Tres listeners (peer TCP, local TCP hacia el ORR, HTTP admin) + el
+//! `PeerOut` (pool de envío TCP) + el bucle de anuncio a la SDN si hay
+//! `sdn_url`. Toda la config viene del TOML de `--config`.
 //!
 //! ```bash
 //!   qkc --config qkc.toml

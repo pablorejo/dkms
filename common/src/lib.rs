@@ -1,8 +1,30 @@
 //! Shared library for every dkms_rust module.
 //!
-//! Anything that crosses crate boundaries (IDs, config loading, logging,
-//! gRPC clients/servers, TLS) lives here. Each module's own business logic
-//! does NOT belong here.
+//! Anything that crosses crate boundaries lives here; each module's own
+//! business logic does not. The boundary *between* modules is the protobuf
+//! schema in `/proto/`, compiled into [`proto`] — internal types are never
+//! re-exported across crates.
+//!
+//! What is in here, by concern:
+//!
+//! * **Plumbing** — [`config`] (`default.toml` ← `local.toml` ← env, with
+//!   `SecretString` for anything that must not reach a log), [`logging`],
+//!   [`metrics`], [`ids`] (validated newtypes for node/SAE/key ids),
+//!   [`error`], [`log_throttle`], [`net`].
+//! * **Transport** — [`ipc`] (the gRPC dial defaults; the binary TCP wire
+//!   is the `wire` crate) and [`http`] (the mTLS-aware client the announce
+//!   loops share).
+//! * **Identity and channels** — [`tls`] and [`tls_pqc`] (rustls with
+//!   ML-DSA-65 certificates and hybrid X25519+ML-KEM key exchange only,
+//!   self-checked at boot), [`cert_identity`] (who a node is, from the SAN
+//!   of its certificate).
+//! * **Primitives** — [`crypto`]: ML-KEM ([`crypto::pqc`]), ML-DSA
+//!   ([`crypto::pqc_sign`]), AES-256-GCM ([`crypto::aead`]), the per-frame
+//!   link MAC with its anti-replay window ([`crypto::frame_mac`]), the
+//!   handshake HMAC ([`crypto::link_mac`]) and OTP ([`crypto::otp`]).
+//! * **Policy** — [`security`] (key grades and the security level a SAE
+//!   may request), [`hardening`] (keys out of swap and core dumps).
+//! * [`test_support`] — helpers for the crates' tests only.
 
 // `unsafe` solo en hardening.rs (mlockall / RLIMIT_CORE), con allow local.
 #![deny(unsafe_code)]

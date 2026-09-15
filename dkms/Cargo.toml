@@ -3,7 +3,7 @@ name        = "dkms"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "DKMS — ETSI 014/020 key delivery, multicast distribution to peer DKMSs over HTTP/2 mTLS, secure in-memory key buffers"
+description = "DKMS — ETSI 014 to SAEs and ETSI 020 between nodes over mTLS, RAM-only key buffers, end-to-end sealed transport material"
 
 [[bin]]
 name = "dkms"

@@ -1,8 +1,12 @@
-//! Plano de gestión del DKMS — gRPC `DkmsControl` para el orquestador.
+//! Plano de gestión del DKMS — gRPC `DkmsControl`, para el operador y las
+//! herramientas de prueba.
 //!
 //! La capa SAE (ETSI 014) y la capa DKMS↔DKMS (ETSI 020) viven en
-//! [`crate::etsi_http`]. Esto es **solo** la superficie de mgmt:
-//! registro de SAEs, drenaje, health, snapshots de buffer.
+//! [`crate::etsi_http`]. Esto es **solo** la superficie de gestión:
+//! registro de SAEs, drenaje, health, snapshots de buffer. No lleva
+//! autenticación y `Drain` vacía todos los buffers, así que escucha en
+//! loopback (`listen.grpc_addr`; el renderer de `node.yml` lo fuerza a
+//! `127.0.0.1`).
 
 use common::proto::{
     common::v1::Status as ProtoStatus,

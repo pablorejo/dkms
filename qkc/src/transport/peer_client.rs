@@ -83,7 +83,7 @@ impl PeerOut {
 
     /// Encola un frame para `peer_id`. `false` si la cola está llena
     /// (drop count incrementa). Emite WARN throttled cada
-    /// [`DROP_WARN_THROTTLE`] para no spammear bajo congestión.
+    /// `DROP_WARN_THROTTLE` para no spammear bajo congestión.
     pub fn send(&self, peer_id: u32, peer_addr: &str, frame: Frame) -> bool {
         let slot = self.get_or_create(peer_id, peer_addr);
         match slot.queue.push(frame) {

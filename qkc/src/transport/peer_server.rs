@@ -275,9 +275,9 @@ async fn handle_conn(
     }
 }
 
-/// `FRAME_KEY_IDS_NOTIFY`: el peer (sender_id) acaba de pedir N claves
-/// con estos UUIDs al quditto compartido del enlace; nosotros debemos
-/// pedirlos a nuestro `dec_keys` para llenar nuestro buffer DEC.
+/// `FRAME_KEY_IDS_NOTIFY`: el peer (sender_id) acaba de sacar N claves
+/// con estos UUIDs de la fuente del enlace; nosotros debemos pedirlos a
+/// nuestro `dec_keys` para llenar nuestro buffer DEC.
 fn handle_notify(svc: QkcService, mut frame: wire::Frame) {
     let sender = frame.sender_id;
     let Some(link) = svc.link_to(sender) else {

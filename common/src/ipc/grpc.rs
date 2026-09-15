@@ -1,8 +1,13 @@
 //! Helpers around tonic.
 //!
+//! - [`DialOpts`] is the baseline every gRPC client in the workspace shares
+//!   (connect/request timeouts, HTTP/2 keepalive, `TCP_NODELAY`, optional
+//!   TLS).
 //! - [`connect`] builds a `tonic::transport::Channel` against another module
-//!   with sane defaults (HTTP/2 keepalive, connect timeout, optional TLS).
-//! - [`serve`] is a small wrapper for graceful shutdown of a tonic server.
+//!   from those options.
+//!
+//! Servers are built where they live (`grpc_server.rs` in each module) with
+//! `tonic::transport::Server` directly; there is no shared wrapper.
 
 use std::time::Duration;
 

@@ -1,3 +1,13 @@
+//! gRPC `SdnControl` server.
+//!
+//! The part of the control plane that is not the HTTP admin: `GetSaeBinding`
+//! (which DKMS serves a SAE), `GetOrrPath` (ORR-level path for the onion
+//! modes), `ComputePath`, and the `StreamTopology` event stream the DKMS
+//! uses to invalidate its SAE-binding cache. `PutTopology` / `UpdateLink`
+//! answer `UNIMPLEMENTED` on purpose: the topology is mutated by
+//! registration, never by pushing a whole graph. Runs under mTLS when the
+//! SDN has `[tls]`.
+
 use common::proto::{
     common::v1::{NodeId, Status as ProtoStatus},
     sdn::v1::{

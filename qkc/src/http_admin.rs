@@ -37,7 +37,7 @@ const FORWARDING_PUSHER: &str = "sdn";
 /// dónde viaja cada frame OTP de este nodo, así que con mTLS no basta
 /// «cualquier cert de la net-ca» — un QKC/ORR/DKMS comprometido no debe poder
 /// redirigir el tráfico ajeno. Sin extensión (listener en claro, el opt-out
-/// [tls]-less de red interna) se mantiene el comportamiento histórico; con
+/// `[tls]`-less de red interna) se mantiene el comportamiento histórico; con
 /// mTLS, sólo la SDN. Los GET (tabla, stats) se quedan en el listón mTLS: son
 /// diagnóstico, no mutan.
 fn sdn_may_push(identity: Option<&PeerCertIdentity>) -> Result<(), String> {

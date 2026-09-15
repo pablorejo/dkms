@@ -1,4 +1,5 @@
-//! HTTP admin API consumed by the web UI and the orchestrator.
+//! HTTP admin API: where the modules register, report and poll, and where
+//! an operator (or a test script with `curl`) inspects the SDN.
 //!
 //! Read-only:
 //!   GET    /healthz
@@ -7,7 +8,7 @@
 //!   GET    /sae/{sae_id}/binding
 //!   GET    /sae-bindings/{dkms_id}
 //!
-//! Mutations (mirror Python SDN semantics):
+//! Mutations:
 //!   POST   /register/qkc              a QKC announces itself + its links
 //!   POST   /register/orr              an ORR announces itself (anchored to a QKC)
 //!   POST   /register/dkms             a DKMS announces itself (anchored to an ORR)
@@ -23,7 +24,7 @@
 //! `[tls]` está configurado, `http_addr` es mTLS y las rutas mutantes exigen
 //! un cert de la CA de red cuyo SAN case con el id anunciado (un módulo solo
 //! se anuncia a sí mismo / rebindea sus SAEs). Sin `[tls]` el SDN sirve todo
-//! en claro (comportamiento histórico; el web frontend gatea a su capa).
+//! en claro (comportamiento histórico, para local-mesh y demos).
 
 use axum::{
     extract::{Extension, Path as AxumPath, State},
@@ -533,10 +534,10 @@ async fn register_sae(
     }
 }
 
-/// Body item accepted by `POST /sae-bulk`. The orchestator emits a flat
-/// `{id, dkms_id}` shape (see `_sdn_http_json` callers in
-/// `orchestrator/api_orchestator.py`), so we deserialize that and translate
-/// to the canonical `SaeBulkItem`.
+/// Body item accepted by `POST /sae-bulk`: a flat `{id, dkms_id}` (with
+/// `sae_id` accepted as an alias), translated to the canonical
+/// `SaeBulkItem`. Kept for tooling that seeds many SAEs at once; a DKMS
+/// registers its own SAEs through its announcement.
 #[derive(Deserialize)]
 struct SaeBulkPayloadItem {
     #[serde(alias = "sae_id")]
@@ -938,7 +939,7 @@ fn mutating_routes() -> Router<SdnService> {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
 }
 
-/// Rutas de solo lectura (web UI / inspección). También servidas en claro
+/// Rutas de solo lectura (inspección). También servidas en claro
 /// en `http_ro_addr` cuando el mTLS está activo.
 fn readonly_routes() -> Router<SdnService> {
     Router::new()

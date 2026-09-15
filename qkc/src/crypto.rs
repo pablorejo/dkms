@@ -1,13 +1,15 @@
 //! Cifrado OTP multi-chunk.
 //!
 //! Cada chunk del plaintext usa una clave OTP distinta de
-//! `key_size_bits` bits. La clave se obtiene del quditto compartido del
-//! enlace; el caller pasa las claves (en orden) — esta función solo
-//! hace el XOR puro, sin tocar la red.
+//! `key_size_bits` bits. Las claves las saca el caller del `KeyStore` del
+//! enlace (del KME en un enlace `qkd`, derivadas del secreto ML-KEM en uno
+//! `pqc`) y las pasa en orden — aquí sólo se hace el XOR, sin tocar la red.
 //!
 //! Para 256 bits eso son 32 bytes por chunk. El plaintext se trocea en
 //! chunks de 32 B; el último chunk puede ser parcial y solo consume
-//! los bytes que necesita de la última clave.
+//! los bytes que necesita de la última clave. **Cada chunk gasta una clave
+//! entera**: 33 bytes de payload cuestan dos claves, así que todo lo que
+//! no sea secreto va en las cabeceras, no en el payload.
 
 use uuid::Uuid;
 

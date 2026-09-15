@@ -1,15 +1,13 @@
 //! Identidad PQC del ORR.
 //!
-//! Cada ORR genera al arrancar un par de claves ML-KEM (suite del
-//! `OrrConfig::default_pqc_suite`, ML-KEM-768 por defecto). La clave
-//! pública se publica vía `OrrControl::GetPublicKey` (cuando se cablee)
-//! o se sirve a peers a través de la SDN; la privada se queda en
-//! memoria.
-//!
-//! Análogo del Python: `PQCServer` cuyo `__init__` hace
-//! `kyber.generate_keypair()` y guarda `(public_key, private_key)`. Lo
-//! que en el Python era `Kyber("Kyber1024")` aquí es
-//! `pqc::kem_for("ml-kem-1024")`. Tira de las primitivas de
+//! Cada ORR genera al arrancar un par de claves ML-KEM (suite de
+//! `OrrConfig::default_pqc_suite`, ML-KEM-768 por defecto). La pública se
+//! sirve a los pares por `OrrControl::GetPublicKey`, firmada con la clave
+//! ML-DSA-65 del certificado de nodo ([`AnnouncementSigner`]) para que el que
+//! la recibe pueda encadenar hasta la CA de red en vez de confiar al primer
+//! uso; la privada se queda en memoria y se zeroiza al soltar la identidad.
+//! Es efímera por proceso: un reinicio produce otra, y por eso el ancla de
+//! confianza es el certificado y no la clave ML-KEM. Primitivas en
 //! `common::crypto::pqc`.
 
 use common::crypto::{

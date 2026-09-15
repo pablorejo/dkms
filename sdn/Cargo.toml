@@ -3,7 +3,7 @@ name        = "sdn"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "SDN — topology graph, route computation, link admission control"
+description = "SDN — network controller: topology inferred from module announcements, WCMP routing tables, per-pair rate allocation"
 
 [[bin]]
 name = "sdn"

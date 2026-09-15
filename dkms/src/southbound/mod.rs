@@ -1,11 +1,15 @@
-//! Clientes gRPC del DKMS hacia el plano de control / transporte.
+//! Clientes del DKMS hacia el plano de control y el transporte.
 //!
-//! * [`sdn`] — `SdnControl` (rutas, admisión, SAE binding, métricas).
-//! * [`orr`] — `OrrControl` (transporte de mensajes vía ORR↔QKC).
-//!   Opcional: presente solo si `southbound.orr_endpoint` está
-//!   configurado. Hoy NO se enchufa en el flujo principal; sirve para
-//!   que un futuro cambio en `peer_client.rs` lo use como transporte
-//!   alternativo a HTTP/2 ETSI 020.
+//! * [`sdn`] — `SdnControl` por gRPC (SAE binding, topología en stream).
+//! * [`sdn_http`] — el admin HTTP de la SDN: `GET /rate/{dkms_id}` (las
+//!   tasas por peer que alimentan el generator) y `POST /demand`.
+//! * [`sdn_announce`] — el bucle `POST /register/dkms`, que es también el
+//!   heartbeat y trae de vuelta el conjunto de pares.
+//! * [`orr`] — `OrrControl` por gRPC (mTLS por defecto): el transporte de
+//!   las claves de transporte hacia los buffers de los peers. Opcional
+//!   (`southbound.orr_endpoint`); sin él el generator no arranca y las
+//!   claves de sesión siguen saliendo por ETSI 020, pero sin material que
+//!   las envuelva.
 
 pub mod orr;
 pub mod sdn;

@@ -21,7 +21,7 @@ pub struct Etsi014KeyRequest {
 
     /// Lista de SAEs adicionales (legacy ETSI 014).
     /// Acepta string CSV/JSON, lista, dict, o ya normalizada via
-    /// [`deserialize_sae_list`].
+    /// `deserialize_sae_list`.
     #[serde(
         default,
         rename = "additional_slave_SAE_IDs",

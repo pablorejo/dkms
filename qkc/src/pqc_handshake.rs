@@ -608,7 +608,7 @@ impl PqcHandshake {
     /// Arranca la tarea de rotación/pre-carga. No-op en el respondedor (que es
     /// reactivo: encapsula al recibir cada INIT). El iniciador establece las
     /// épocas `0..=lookahead` y luego añade una por cada disparo de rotación
-    /// **o** cuando el peer se reconecta (ver [`Self::relink`]).
+    /// **o** cuando el peer se reconecta (ver `relink`).
     pub fn spawn_rotation(self: &Arc<Self>) {
         if !self.is_initiator() {
             // El respondedor no puede renegociar —solo el lex-menor manda
@@ -1059,7 +1059,7 @@ impl PqcHandshake {
     }
 
     /// Iniciador: el respondedor pide renegociar por encima de `peer_epoch`
-    /// (su ventana). Pasa por [`Self::accept`] como cualquier otro mensaje de
+    /// (su ventana). Pasa por `accept` como cualquier otro mensaje de
     /// handshake —bajo `require`/`sign` una petición sin autenticar se
     /// descarta— y desemboca en el brazo de resync del bucle de rotación,
     /// que es el único dueño de `establish`. En el respondedor no hace nada:

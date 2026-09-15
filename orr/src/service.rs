@@ -12,7 +12,7 @@
 //!     `DeliveredMessage` que se entregan localmente.
 //!
 //! El pump de entrada (frames `FRAME_LOCAL_DELIVER` del QKC) llama a
-//! [`OrrService::handle_incoming`], que:
+//! `OrrService::handle_incoming`, que:
 //!   * Si la cabecera no es de tipo `ORR`, descarta.
 //!   * Si `pqc_layer == true`, pela una capa onion con la sk local y
 //!     o reenvía (`InnerLayer::Forward`) o entrega

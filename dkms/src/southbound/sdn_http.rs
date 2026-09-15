@@ -1,10 +1,11 @@
-//! Cliente HTTP del DKMS hacia el SDN para endpoints que no están en
-//! gRPC (de momento solo `GET /rate/{dkms_id}`).
+//! Cliente HTTP del DKMS hacia el admin de la SDN, para lo que no va por
+//! gRPC: `GET /rate/{dkms_id}` y `POST /demand`.
 //!
-//! El SDN expone un endpoint REST con las rates per-peer y per-role
-//! computadas por el solver MCF. El DKMS hace polling cada N segundos y
-//! cachea las rates en su `Generator` para alimentar los token buckets
-//! per-peer.
+//! La SDN publica por REST las tasas por peer y por rol que calcula el
+//! asignador de rates; el DKMS las sondea cada N segundos y las cachea en
+//! su `Generator` para alimentar los token buckets por peer. En sentido
+//! contrario reporta, por lote, la demanda medida de cada par
+//! (`demand_tracker`), que es la entrada del asignador.
 
 use std::collections::HashMap;
 use std::time::Duration;

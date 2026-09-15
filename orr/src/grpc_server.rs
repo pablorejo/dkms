@@ -7,13 +7,15 @@
 //!     `StreamDeliveries` — el DKMS se suscribe y recibe lo que el
 //!     QKC local entrega para este nodo.
 //!
-//!   * **Onion-circuit** (`OpenCircuit` / `Relay` / …): stubs. La
-//!     cebolla PQC capa-a-capa todavía no está cableada — devuelven
-//!     `UNIMPLEMENTED` para que el caller falle limpio en lugar de
-//!     pensar que funcionó.
+//!   * **Bootstrap y rotación** (`GetPublicKey`, `EstablishSecret`,
+//!     `RequestEphemeralKey`, `EstablishEphemeralSecret`): lo que los ORR
+//!     se dicen entre sí para acordar y rotar el `master_secret` por par.
+//!     El `from` del cuerpo debe coincidir con la identidad del cert mTLS.
 //!
-//! Con `max_hops = 0` (passthrough) toda la superficie superior es
-//! suficiente y no hace falta tocar nada del bloque onion.
+//!   * **Onion-circuit** (`OpenCircuit` / `Relay` / …): stubs que
+//!     devuelven `UNIMPLEMENTED`. Las capas se construyen por mensaje
+//!     ([`crate::onion`]), sin circuitos; el modelo de circuito nunca se
+//!     cableó y se mantiene sólo para que la superficie gRPC falle limpio.
 
 use common::proto::common::v1::{NodeId, Status as ProtoStatus};
 use common::proto::orr::v1::{

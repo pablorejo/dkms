@@ -359,8 +359,8 @@ fn select_identity(
 /// Convierte un SAN URI a `SaeId` normalizado.
 ///
 /// Acepta los prefijos típicos:
-/// * `sae://organisation/sae-x` (legacy Python original)
-/// * `urn:dkms:sae:sae-x` (el que emite `orchestrator/sae_certificates.py`)
+/// * `urn:dkms:sae:sae-x` (el que emite `docker/gen-certs.sh`)
+/// * `sae://organisation/sae-x` (forma heredada, se sigue aceptando)
 ///
 /// Si el SAN no parece URI, se devuelve tal cual: muchos despliegues usan
 /// directamente el SAE id como CN o DNS.

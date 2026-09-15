@@ -3,7 +3,7 @@ name        = "common"
 version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
-description = "Shared types, IPC helpers, config, logging, and protobuf-generated code for dkms_rust"
+description = "Shared library: config, logging, ids, TLS (ML-DSA certificates, hybrid X25519+ML-KEM), crypto primitives and protobuf-generated code"
 
 [lib]
 path = "src/lib.rs"
