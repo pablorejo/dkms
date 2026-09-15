@@ -385,7 +385,7 @@ links:
   - neighbor_id: 2
     neighbor_addr: "10.0.0.12"
     type: pqc
-    link_psk: "aJUINhXK1WJhWEoelgeo9ZrtCNQv8xQGLPJdMhNWV6g="   # la MISMA en el vecino
+    link_psk: "<openssl rand -base64 32>"   # la MISMA en el vecino; nunca la del ejemplo
     frame_auth: require
 ```
 
