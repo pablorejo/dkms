@@ -44,8 +44,9 @@ Requires Rust 1.88 (pinned in `rust-toolchain.toml`), `protobuf-compiler`,
 ```bash
 cargo build --release              # whole workspace
 cargo build --release -p qkc       # one module
-make check                         # fmt + clippy -D warnings + renderer tests + tests (no skips)
+make check                         # fmt + clippy -D warnings + rustdoc + renderer tests + tests (no skips)
 make deny                          # cargo-deny: advisories and licences
+make doc-open                      # API reference (rustdoc, private items included) in the browser
 ```
 
 Binaries land in `target/release/{qkc,orr,sdn,dkms,quditto,sae_load}`.
@@ -78,6 +79,10 @@ notes below.
 
 ## Documentation
 
+- API reference: `make doc-open` builds the workspace rustdoc with a landing
+  page; the `docs` workflow publishes the same tree to GitHub Pages on every
+  push to `main`. Each crate root (`<crate>/src/lib.rs`) opens with what the
+  module is and how it talks to the others.
 - [docs/architecture.md](docs/architecture.md): modules and data flow.
 - [docs/ipc.md](docs/ipc.md): gRPC schemas and the binary wire format.
 - [docs/deployment.md](docs/deployment.md) and [docker/README.md](docker/README.md): running a node.

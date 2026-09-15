@@ -1,0 +1,64 @@
+# Rustdoc publicado en GitHub Pages.
+#
+# `build` corre en cada push a main y en cada PR: es `make doc` (rustdoc con
+# avisos como errores, items privados incluidos, más la portada) y sube el
+# árbol como artefacto. `deploy` lo publica sólo desde main y sólo en un
+# repositorio público — en uno privado Pages no está disponible en el plan
+# gratuito y el job fallaría en rojo sin decir nada útil.
+#
+# Una sola vez, en el repositorio: Settings → Pages → Source: "GitHub
+# Actions". Sin eso `deploy-pages` falla con "Get Pages site failed".
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: rust:1.88-trixie
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc para common/build.rs; cmake + clang/libclang porque `cargo doc`
+      # también ejecuta los build scripts (highs-sys compila HiGHS); python3
+      # para la portada (scripts/rustdoc-index.py).
+      - name: system deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            protobuf-compiler cmake clang libclang-dev make python3
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: make doc
+        run: make doc
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

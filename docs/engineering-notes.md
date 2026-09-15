@@ -53,7 +53,17 @@ cargo build --release [-p <crate>]
 cargo test  --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt   --all
+make doc          # rustdoc, warnings are errors, private items included; make doc-open to read it
 ```
+
+**rustdoc is part of `make check`** (since 2026-09-15): a broken intra-doc
+link, a `<T>` outside backticks or a link from public docs to a private item
+fails the gate. Private items are documented on purpose — four of the five
+crates are binaries, so their public API is not the interesting part. The
+`docs` workflow publishes the same tree to GitHub Pages from `main` (public
+repo only; Pages must be enabled once with Source = "GitHub Actions");
+`scripts/rustdoc-index.py` writes the landing page from `cargo metadata`, so
+the crate descriptions in each `Cargo.toml` are what a reader sees first.
 
 **`make check` en local NO es el de CI si no tienes rustup.** El
 `rust-toolchain.toml` pina **1.88** (lo mismo que carga CESGA con

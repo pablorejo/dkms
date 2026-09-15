@@ -2,8 +2,9 @@
 #
 # Targets:
 #   make help              show this list
-#   make check             fmt --check + clippy -D warnings + test (the CI gate)
-#   make fmt / clippy / test   the three pieces of `check`, one at a time
+#   make check             fmt --check + clippy -D warnings + doc + test (the CI gate)
+#   make fmt / clippy / doc / test   the pieces of `check`, one at a time
+#   make doc-open          build the rustdoc and open it in the browser
 #   make images            build the 5 Rust images locally, no push.
 #   make push              push images already tagged with $(TAG).
 #
@@ -28,7 +29,7 @@ IMMUTABLE_TAG   ?= $(TAG)-$(GIT_SHA)
 
 ALL_RUST        := dkms orr qkc sdn quditto
 
-.PHONY: help check fmt clippy test rendercheck deny images push
+.PHONY: help check fmt clippy doc doc-open test rendercheck deny images push
 
 # ──────────────────────────────────────────────────────────────────────
 # help
@@ -57,6 +58,20 @@ fmt: ## cargo fmt --all -- --check
 clippy: ## cargo clippy --workspace --all-targets -- -D warnings
 	@cargo clippy --workspace --all-targets -- -D warnings
 
+# rustdoc is part of the gate: a broken intra-doc link or a `<T>` read as
+# HTML is a warning here and a dead link in the published docs. Private
+# items are documented on purpose — four of the five crates are binaries,
+# so their "public API" is not the interesting part.
+DOC_FLAGS := --workspace --no-deps --document-private-items
+
+doc: ## cargo doc (warnings are errors) + landing page at <target>/doc/index.html
+	@RUSTDOCFLAGS="-D warnings" cargo doc $(DOC_FLAGS)
+	@python3 scripts/rustdoc-index.py
+
+doc-open: doc ## make doc + open it in the browser
+	@d="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/doc/index.html"; \
+	  xdg-open "$$d" 2>/dev/null || open "$$d"
+
 test: ## cargo test --workspace
 	@cargo test --workspace
 
@@ -68,7 +83,7 @@ rendercheck: ## tests of the node.yml -> TOML renderer (docker/render_config.py)
 	@python3 -m unittest discover -s docker -p "test_*.py"
 
 check: export DKMS_NO_TEST_SKIPS = 1
-check: fmt clippy rendercheck test ## fmt + clippy + rendercheck + test (no skips)
+check: fmt clippy doc rendercheck test ## fmt + clippy + doc + rendercheck + test (no skips)
 
 # ──────────────────────────────────────────────────────────────────────
 # Build (local, no push).
