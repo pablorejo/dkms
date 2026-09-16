@@ -8,6 +8,12 @@ QKC it is indistinguishable from a real KME: a `type: qkd` link points its
 `kme_url` here and nothing else changes. One binary, configured by CLI flags
 with `QUDITTO_*` environment fallbacks; there is no config file.
 
+The name and the idea come from [Quditto](https://github.com/Networks-it-uc3m/Quditto),
+the QKD-network digital-twin platform of the Universidad Carlos III de
+Madrid; the quditto work in this project was led by Pedro Otero García.
+This crate was written from scratch and shares no code with the UC3M
+platform — see [NOTICE](../NOTICE).
+
 ## What it is for, and what it is not
 
 It exists so that `qkd` links can be exercised without hardware: tests, the

@@ -104,3 +104,6 @@ The map is [docs/README.md](docs/README.md). The short version:
 ## License
 
 Apache-2.0. Copyright 2026 Pablo Pío Rejo Iglesias. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Developed at atlanTTic (Universidade de Vigo) within the RETECH programme;
+authors, supervisors and prior work are credited in [NOTICE](NOTICE).

@@ -3,8 +3,36 @@ Copyright 2026 Pablo Pío Rejo Iglesias
 
 This product includes software developed by Pablo Pío Rejo Iglesias.
 
-Originally based on the Python prototype `dkms`
-(https://github.com/pabloprejo/dkms), rewritten in Rust.
+Authors
+-------
+
+Pablo Pío Rejo Iglesias — principal author: design and implementation of
+the system and of this Rust codebase.
+
+Pedro Otero García — principal author of quditto, the simulated QKD link
+(an ETSI GS QKD 014 key server without quantum hardware) that the
+`quditto` crate in this repository implements.
+
+Institution, supervision and funding
+------------------------------------
+
+Developed at atlanTTic, Universidade de Vigo, under the supervision of
+Ana Fernández Vilas and Manuel Fernández Veiga. This work was funded by
+the RETECH programme (Redes Territoriales de Especialización Tecnológica).
+
+Prior work
+----------
+
+The `quditto` module takes its name and its inspiration from Quditto
+(https://github.com/Networks-it-uc3m/Quditto), the platform for deploying
+digital twins of QKD networks over classical infrastructure developed at
+the Universidad Carlos III de Madrid (Networks-it-uc3m), licensed under the
+Apache License 2.0. The module here was written from scratch and shares no
+code with that project; what it owes to it is the idea of a QKD node with
+no quantum hardware behind a standard ETSI 014 API, and the name.
+
+License
+-------
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this work except in compliance with the License.
