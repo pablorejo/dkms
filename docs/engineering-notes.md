@@ -32,7 +32,7 @@ too; they were removed on 2026-07-30 and now live on the `tests_aws` branch
 
 - **Logging**: `tracing` macros + `common::logging::init()` (driven by `RUST_LOG`).
 - **Config**: per-crate `Config` in `src/config.rs`. Load via
-  `common::config::load::<C>("MODULE")`: `config/default.toml` ← `local.toml` ←
+  `common::config::load_config::<C>("MODULE")`: `config/default.toml` ← `local.toml` ←
   env (prefix `MODULE__`, nested with `__`, e.g.
   `DKMS__buffer__capacity_per_peer`). An env override of ONE nested field
   **merges** into the file's section (the other fields survive) — pinned by
@@ -42,7 +42,10 @@ too; they were removed on 2026-07-30 and now live on the `tests_aws` branch
 - **Errors**: per-crate `Error` enum with `thiserror`. Cross crate boundary as
   `anyhow::Error` only in `main.rs`.
 - **IDs**: use `common::ids::{NodeId, SaeId, KeyId}` newtypes, not bare `String`.
-- **Metrics**: Prometheus via `common::metrics`. Default `:9100`. (Rust DKMS
+- **Metrics**: Prometheus via `common::metrics`. Rendered ports: ORR 20004,
+  DKMS 20008, SDN 19010 (`docker/render_config.py`); the binary fallbacks
+  when the TOML omits `metrics_addr` are 9101 (ORR) and 9102 (SDN). The QKC
+  has no metrics port. (Rust DKMS
   `/metrics` is empty — gauges/counters never registered; read DKMS state from
   the `generator.state` log line emitted every 5 s.)
 
@@ -163,7 +166,10 @@ usually stays dormant in sims; on real hardware it is the whole point.
 - No business logic in `main.rs` — keep it in `service.rs`.
 - No `pub use` re-exports of internal types across crate boundaries. The
   boundary between modules is the protobuf schema.
-- No HTTP endpoints on QKC/ORR/quditto — only DKMS and SDN expose HTTP.
+- No new HTTP surfaces on QKC/ORR/quditto. What exists is deliberate and
+  closed: the QKC admin (`POST /forwarding-table` from the SDN identity,
+  `/healthz`, `/stats`) and quditto's ETSI-014 server; the ORR has none.
+  DKMS and SDN are the HTTP-facing modules.
 
 ## Topology is inferred, never configured
 
@@ -180,7 +186,8 @@ Four properties hold the design together; break any of them and it thrashes:
 
 1. **Announcements are idempotent.** The announce loop doubles as a heartbeat,
    so an unchanged announcement must not bump `topology.version` — every bump
-   re-pushes forwarding tables and re-runs the LP.
+   re-pushes the forwarding tables and broadcasts a `TopologyEvent` (rates
+   follow at the next `mcf_period_ms` recompute; a bump does not trigger one).
 2. **A missing anchor is "not yet", not an error.** An edge needs both QKCs
    registered, `upsert_orr` needs its QKC, `upsert_dkms` needs its ORR. The
    announcers retry with backoff, so any boot order converges.
@@ -356,14 +363,14 @@ ORR-level path from.
   SDN at the phase-1 rate `λ·R_k` and multiplies saturation time by ~10×
   (verified 2026-05-24: with the flag, 246/361 saturated in 600 s; without it,
   379/380). The microlp phase-2 bug is already handled by the η=0 fallback.
-- **ORR bootstrap race on individual pod restart** — closed 2026-08-30. The
+- **ORR bootstrap race on a single-ORR restart** — closed 2026-08-30. The
   passive re-bootstrap (`trigger_passive_rebootstrap`) has existed for a
   while but is only reachable from the onion data path, i.e. never with the
   default `max_hops = 0`. Now the rotation loop itself re-bootstraps a peer
   that answers «no bootstrap_secret» (`bootstrap::rebootstrap`, under the
   same in-flight guard), so a restarted ORR converges at the next rotation
   attempt (backoff ≤ 30 s), traffic or not.
-- **A restarted QKC restarts its epoch counter at 1**, so the two ends of a
+- **A restarted QKC restarts its epoch numbering from scratch**, so the two ends of a
   link can end up with disjoint epoch windows, each encrypting with numbers the
   other never had. Every frame that arrives is then dropped undecrypted: the
   peer's DKMS shows `recv=0` and the sender's `expired` climbs forever, while
@@ -438,7 +445,8 @@ ORR-level path from.
 - **PQC link recovery after a single-end restart is reconnect-driven** (fixed
   2026-07-31, both directions — don't re-derive it, and don't break the
   invariants below).
-  Only the lex-smaller QKC — the initiator — may send INIT. A restarted
+  Only the QKC with the numerically lower `qkc_id` — the initiator — may
+  send INIT. A restarted
   responder cannot ask for a fresh epoch by sending one itself: the initiator
   would keep its old secret while the responder adopted the new one, and the
   link OTP has no MAC to catch the divergence. So the trigger is local. A TCP
@@ -552,8 +560,8 @@ ORR-level path from.
   `tls.key_path` and ships the chain (`signing_certs`); the peer verifies the
   chain against `control_plane_ca` and the SAN `dkms://<orr_id>`
   (`common::cert_identity`). `bootstrap_trust = strict` therefore needs no
-  per-peer config and survives restarts (default still `tofu` until the
-  testbed t30 passes). And `EstablishSecret` / the two rotation RPCs require
+  per-peer config and survives restarts (default `strict` since 2026-09-03,
+  validated on the testbed t30). And `EstablishSecret` / the two rotation RPCs require
   the body's `from` to equal the mTLS client cert identity
   (`PERMISSION_DENIED` otherwise) — before, any net-CA cert holder could
   overwrite another ORR's `bootstrap_secret`. `sign_secret_seed` /
@@ -676,11 +684,12 @@ y publicado en la web (`web_dkms`, `public/results/campaign-2026-09.html` y
 - **El sello por frame rechazaba frames legítimos** en los enlaces más
   cargados (hasta 542 598 con `bad_mac = 0`) porque MAC + ventana anti-replay
   se comprobaban en las tareas concurrentes del dispatcher. Arreglado en
-  `67ffcc5` (verificación en el lector, en orden de llegada) y remedido a 0.
+  `9232efd` (verificación en el lector, en orden de llegada) y remedido a 0.
   Ver el gotcha correspondiente arriba.
 - **La estrella está limitada por su hub desde N≈40**: la cola de entrada del
-  QKC (8192) desborda bajo saturación y los emisores expiran las claves sin
-  ACK (21,7 M a N=100). Es estructural: un solo QKC en el camino de todos los
+  QKC (8192) desborda bajo saturación (primeros descartes a N=30) y los
+  emisores expiran las claves sin ACK (desde N=40; 21,3 M a N=100); el
+  sostenido cae por debajo del techo desde N=70 y se desploma a N=80–90. Es estructural: un solo QKC en el camino de todos los
   pares. Candidatos: contrapresión adaptativa generador→ORR y cola por peer.
 - **Equidad**: el peor par recibe el 1 % de un reparto uniforme en la RGG
   desde N=30 (Jain 0,07). Sin inanición, pero es el hueco que la ponderación
@@ -708,8 +717,10 @@ What remains, in the order worth attacking it:
    claves ML-DSA — el cliente SAE corre en el portátil (`SAE_CLIENT=local`
    en lib.sh) o vía `sae_load` (rustls); y el ORR necesita `./certs`
    montado en su contenedor (site.yml viejo no lo tenía). **Los flips
-   quedan VALIDADOS en multi-host real: el cambio de defaults en el binario
-   ya solo espera la decisión.** Falta el soak ≥ 24 h allí.
+   quedan VALIDADOS en multi-host real y APLICADOS como default del binario
+   y del renderer el 2026-09-03** (`dkms/src/config.rs`, `orr/src/config.rs`,
+   `docker/render_config.py`; ver la 5ª tanda arriba). Falta el soak ≥ 24 h
+   allí.
 2. **Long soak** — nothing deliberate has run longer than ~50 min. An
    accidental 15 h idle soak (3-node PQC ring, 2026-08-24 night) already
    caught the time-based rekey misbehaving: `pqc_rekey_secs = 3600` produced
@@ -807,8 +818,10 @@ What remains, in the order worth attacking it:
    ORR re-bootstrap on single restart (rotation-driven); two ORRs/DKMSs on
    one QKC (the second is rejected, `Upsert::Rejected`). What remains: the
    SAE session key has no check the SAE itself can make (it trusts its KME;
-   `session_key_digest` covers the DKMS↔DKMS leg), and the plain ACK socket
-   is still the default transport until the testbed validates `etsi020`.
+   `session_key_digest` covers the DKMS↔DKMS leg). ACKs go over ETSI-020 by
+   default since 2026-09-03; the plain ACK socket is the opt-in legacy
+   transport (`ack_transport = socket` + `ack_socket_listen = true`, both
+   ends).
 7. **Scale beyond ~20 nodes** — needs the split already prepared by the
    routing/rates decoupling: hierarchical areas for routing, distributed dual
    decomposition (NUM/price-based) for rates, BGP-style inter-domain for a
