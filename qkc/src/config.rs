@@ -5,9 +5,9 @@
 //!
 //! ```toml
 //! qkc_id       = 1
-//! peer_listen  = "0.0.0.0:7001"
-//! local_listen = "0.0.0.0:7100"
-//! admin_http   = "0.0.0.0:7200"
+//! peer_listen  = "0.0.0.0:20000"
+//! local_listen = "127.0.0.1:20001"
+//! admin_http   = "0.0.0.0:20002"
 //!
 //! # Una entrada por enlace (vecino directo).
 //! #
@@ -20,14 +20,14 @@
 //!
 //! [[links]]
 //! neighbor_id        = 2
-//! neighbor_peer_addr = "127.0.0.1:7002"
+//! neighbor_peer_addr = "10.0.0.12:20000"
 //! link_type          = "qkd"                     # default si se omite
-//! quditto_url        = "http://127.0.0.1:8081"   # el quditto compartido del enlace 1↔2
+//! quditto_url        = "https://10.0.0.50:20010" # el KME (quditto) compartido del enlace 1↔2
 //! key_size_bits      = 256
 //!
 //! [[links]]
 //! neighbor_id        = 3
-//! neighbor_peer_addr = "127.0.0.1:7003"
+//! neighbor_peer_addr = "10.0.0.13:20000"
 //! link_type          = "pqc"                     # enlace PQC: sin quditto
 //! pqc_suite          = "ml-kem-768"              # opcional
 //! key_size_bits      = 256
@@ -73,8 +73,9 @@ pub struct QkcConfig {
     pub sdn_url: Option<String>,
 
     /// IP con la que me anuncio a la SDN. Necesaria porque `admin_http` suele
-    /// ser `0.0.0.0:*`, que no le sirve a la SDN para alcanzarme. Si se omite,
-    /// se usa la IP de origen que la SDN ve en la conexión.
+    /// ser `0.0.0.0:*`, que no le sirve a la SDN para alcanzarme. Si se omite
+    /// y `admin_http` bindea a una IP concreta, se anuncia esa; si bindea a
+    /// todas las interfaces, el QKC lo dice en un `error!` y no se anuncia.
     #[serde(default)]
     pub advertise_ip: Option<String>,
 

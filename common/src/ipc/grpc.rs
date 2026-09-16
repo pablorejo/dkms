@@ -1,10 +1,10 @@
 //! Helpers around tonic.
 //!
-//! - [`DialOpts`] is the baseline every gRPC client in the workspace shares
-//!   (connect/request timeouts, HTTP/2 keepalive, `TCP_NODELAY`, optional
-//!   TLS).
-//! - [`connect`] builds a `tonic::transport::Channel` against another module
-//!   from those options.
+//! - [`DialOpts`] is a gRPC dial baseline (connect/request timeouts, HTTP/2
+//!   keepalive, `TCP_NODELAY`, optional TLS) and [`connect`] builds a
+//!   `tonic::transport::Channel` from it. No module uses them yet: the DKMS
+//!   and the ORR build their tonic `Endpoint`s directly with their own
+//!   timeouts and connect eagerly at boot.
 //!
 //! Servers are built where they live (`grpc_server.rs` in each module) with
 //! `tonic::transport::Server` directly; there is no shared wrapper.

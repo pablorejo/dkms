@@ -339,9 +339,9 @@ async fn main() -> Result<()> {
     }
     // ORR es opcional por config: si `southbound.orr_endpoint` está
     // vacío/ausente, `connect_opt` devuelve `Ok(None)` sin loguear.
-    // En despliegues K8s con sidecars ORR/QKC en el mismo Pod, los
-    // 3 containers arrancan en paralelo y el DKMS puede llegar a
-    // `connect_opt` antes de que el ORR haya bindado :50052. Hacemos
+    // En un despliegue en el que los contenedores del nodo arrancan en
+    // paralelo, el DKMS puede llegar a `connect_opt` antes de que el ORR
+    // haya bindado :20003. Hacemos
     // hasta 20 retries × 1s para absorber la race; si pasada esta
     // ventana sigue down, lo damos por permanentemente caído.
     let orr = {

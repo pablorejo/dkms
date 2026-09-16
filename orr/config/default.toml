@@ -3,8 +3,9 @@
 # Overrides en orden:
 #   1. config/default.toml  (este fichero)
 #   2. config/local.toml    (gitignored, dev only)
-#   3. variables de entorno con prefijo `ORR_`, separador `__`
-#      (ej. `ORR_QKC_LOCAL_ADDR=127.0.0.1:20001`).
+#   3. variables de entorno con prefijo `ORR__`, separador `__`
+#      (ej. `ORR__QKC_LOCAL_ADDR=127.0.0.1:20001`; un campo anidado es
+#      `ORR__SECCION__CAMPO`).
 
 orr_id          = "orr_1"
 qkc_id          = 1

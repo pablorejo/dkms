@@ -107,8 +107,8 @@ fn default_debounce() -> u64 {
     100
 }
 
-/// 3× el `sdn_announce_secs` por defecto de los módulos (30 s): se toleran dos
-/// anuncios perdidos antes de dar a un nodo por muerto.
+/// 3× el `sdn_announce_secs` por defecto de los módulos (30 s): se toleran
+/// hasta tres anuncios perdidos antes de dar a un nodo por muerto.
 fn default_presence_ttl() -> u64 {
     90
 }

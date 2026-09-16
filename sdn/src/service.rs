@@ -319,10 +319,11 @@ impl SdnService {
                     saes = t.saes.len(),
                     edges = t.edges.len(),
                     declared,
-                    // Módulos con anuncio vivo. Menos que la suma de los de
-                    // arriba significa que hay entidades dadas de alta a mano,
-                    // que no caducan nunca; más, que algo se anunció y no entró
-                    // (le falta su ancla).
+                    // Módulos con anuncio vivo. La presencia sólo se toca
+                    // cuando el anuncio se ACEPTA (http_api.rs), así que un
+                    // módulo rechazado o a la espera de su ancla no cuenta;
+                    // menos que la suma de los de arriba significa entidades
+                    // dadas de alta a mano, que no caducan nunca.
                     announced = presence.len(),
                     "topology.state",
                 );

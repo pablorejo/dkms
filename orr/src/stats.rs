@@ -14,10 +14,11 @@
 //!   reinició y regeneró su identidad mientras nosotros conservábamos la
 //!   vieja. Dispara el re-handshake pasivo, así que un pico que se estabiliza
 //!   es recuperación; uno que no para es el fallo.
-//! * `peel_failed` subiendo ⇒ el secreto existe pero no descifra, o el frame
-//!   viene mal formado. La capa onion no lleva MAC, así que esto sólo caza lo
-//!   estructural: un secreto divergente entrega basura sin error, y quien lo
-//!   detecta es el `key_digest` del DKMS.
+//! * `peel_failed` subiendo ⇒ el tag AEAD de la capa no verifica (secreto
+//!   divergente entre los dos ORR, frame manipulado o mal formado). Desde la
+//!   capa AES-256-GCM (2026-08-28) un `master_secret` distinto en cada extremo
+//!   es un error aquí, no basura entregada al DKMS: si sube de forma sostenida
+//!   en un par, los dos extremos no comparten época.
 //! * un peer con `master=no` de forma persistente ⇒ el bootstrap no ha
 //!   convergido con él, y todo lo que se le mande será indescifrable.
 

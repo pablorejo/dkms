@@ -44,8 +44,6 @@
 //!   N_KEY_IDS     1 B  u8       (0 cuando el frame no lleva keys)
 //!   KEY_ID_LEN    1 B  u8       (longitud uniforme por key_id)
 //!   KEY_IDS       N_KEY_IDS * KEY_ID_LEN
-//!   HDR_QKC_LEN   2 B  u16 LE
-//!   HDR_QKC       HDR_QKC_LEN B   (msgpack — QKC-level metadata)
 //!   HDR_ORR_LEN   2 B  u16 LE
 //!   HDR_ORR       HDR_ORR_LEN B   (msgpack — ORR-level metadata)
 //!   HDR_DKMS_LEN  2 B  u16 LE
@@ -136,10 +134,16 @@ pub const FRAME_PQC_KEM_RESP: u8 = 0x22;
 /// que el rollout es por el flag `pqc_auth = off|prefer|require`.
 pub const FRAME_PQC_KEM_INIT_AUTH: u8 = 0x23;
 pub const FRAME_PQC_KEM_RESP_AUTH: u8 = 0x24;
-/// `FRAME_KEY_IDS_NOTIFY` autenticado (mismo payload ‖ tag de 32 B).
+/// `FRAME_KEY_IDS_NOTIFY` autenticado: mismo payload ‖ el trailer de
+/// [`AUTH_TRAILER_LEN`] bytes de los frames de datos (`session ‖ counter ‖
+/// tag`), así que comparte contador y ventana anti-replay con ellos.
 pub const FRAME_KEY_IDS_NOTIFY_AUTH: u8 = 0x25;
-/// Handshake **firmado** (ML-DSA, `pqc_auth = sign`): mismo payload que
-/// 0x21/0x22 con la firma anexada en vez del tag HMAC.
+/// Handshake **firmado** (ML-DSA-65, `pqc_auth = sign`): el payload es
+/// `epoch_be(4) ‖ cadena de certificados ‖ blob ‖ firma`, donde el blob es la
+/// clave pública ML-KEM (INIT) o el ciphertext (RESP) y la cadena
+/// (`u16 count ‖ (u32 len ‖ DER)*`) es el cert de nodo del emisor, que el
+/// receptor encadena hasta la CA de red; con el `sign_secret_seed` heredado
+/// la cadena va vacía. Ver `qkc::pqc_handshake`.
 pub const FRAME_PQC_KEM_INIT_SIGNED: u8 = 0x26;
 pub const FRAME_PQC_KEM_RESP_SIGNED: u8 = 0x27;
 /// QKC_B → QKC_A (enlace **PQC**): el RESPONDEDOR pide resincronizar. Su lado

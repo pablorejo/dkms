@@ -13,10 +13,11 @@
 //! * `status` (vía [`KeySource::stock`]) da el nivel del almacén, que
 //!   alimenta al estimador de tasa.
 //!
-//! Negocia wire **binario** (`Accept: application/octet-stream`) con
-//! quditto — ahorra base64+JSON — y cae al JSON del estándar con cualquier
-//! KME ortodoxo. Con `[tls]` o una credencial por KME (`kme_cert/key/ca`)
-//! el canal va en mTLS contra la PKI del KME.
+//! Habla el JSON del estándar (`Accept: application/json`), que es lo que
+//! cualquier KME entiende; el wire binario que quditto ofrece con
+//! `Accept: application/octet-stream` no se usa desde aquí. Con `[tls]` o una
+//! credencial por KME (`kme_cert/key/ca`) el canal va en mTLS contra la PKI
+//! del KME.
 //!
 //! Este módulo ya NO hace coalescing. El coalescing antiguo era un
 //! parche para ocultar la latencia HTTP en el hot path. Con el

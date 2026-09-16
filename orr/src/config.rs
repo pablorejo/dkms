@@ -15,11 +15,11 @@
 //! ```toml
 //! orr_id          = "orr_1"
 //! qkc_id          = 1
-//! qkc_local_addr  = "127.0.0.1:7100"   # local_listen del QKC co-localizado
-//! grpc_addr       = "0.0.0.0:50052"    # API hacia el DKMS / clientes
-//! sdn_url         = "http://127.0.0.1:50053"
-//! metrics_addr    = "0.0.0.0:9101"
-//! default_max_hops = 0                 # 0 = passthrough, 1 = PQC E2E, -1 = onion
+//! qkc_local_addr  = "127.0.0.1:20001"  # local_listen del QKC co-localizado
+//! grpc_addr       = "0.0.0.0:20003"    # API hacia el DKMS / ORRs peer
+//! sdn_url         = "https://10.0.0.100:19000"
+//! metrics_addr    = "0.0.0.0:20004"
+//! default_max_hops = 0                 # 0 = relay (sin capa ORR), 1 = una capa cebolla, -1 = cebolla por salto
 //! default_pqc_suite = "ml-kem-768"     # ml-kem-512 / 768 / 1024
 //!
 //! [peers]                              # orr_id -> qkc_id del peer
