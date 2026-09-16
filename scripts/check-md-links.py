@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the relative links of the repository's Markdown files.
 
-For every `*.md` tracked by git (plus any paths given on the command line),
+For every `*.md` git tracks or would add (plus any paths given on the command line),
 every `[text](target)` and `<target>` link that is not an absolute URL must
 resolve: the target file or directory exists relative to the file, and a
 `#fragment` names a heading of the target (GitHub's anchor rules: lower
@@ -9,7 +9,7 @@ case, spaces to hyphens, punctuation dropped, `-N` suffix on duplicates).
 Links inside fenced code blocks are ignored. Exit status is the number of
 broken links, capped at 1, so `make linkcheck` fails on the first one.
 
-    scripts/check-md-links.py            # every tracked .md
+    scripts/check-md-links.py            # every tracked or untracked-unignored .md
     scripts/check-md-links.py docs/*.md  # just these
 """
 
@@ -116,8 +116,13 @@ def main(argv):
     if argv:
         files = [Path(a).resolve() for a in argv]
     else:
-        out = subprocess.check_output(["git", "ls-files", "*.md", "**/*.md"], text=True, cwd=ROOT)
-        files = sorted({(ROOT / p).resolve() for p in out.split()})
+        # Tracked files plus untracked-but-not-ignored ones, so a document
+        # written and not yet added is checked before it is committed.
+        tracked = subprocess.check_output(["git", "ls-files", "*.md", "**/*.md"], text=True, cwd=ROOT)
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "*.md", "**/*.md"], text=True, cwd=ROOT
+        )
+        files = sorted({(ROOT / p).resolve() for p in (tracked + untracked).split()})
     total = 0
     for md in files:
         for lineno, raw, why in check_file(md):
