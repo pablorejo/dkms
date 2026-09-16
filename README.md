@@ -11,16 +11,17 @@ that every component is separately deployable.
 
 ## Modules
 
-Each runtime module is its own binary crate. The control plane speaks
-**gRPC (tonic)** under mutual TLS; the QKC↔QKC hot path uses a **binary TCP
-protocol** (see [docs/ipc.md](docs/ipc.md)).
+Each runtime module is its own binary crate. Modules talk over three
+planes: **gRPC (tonic)** control under mutual TLS, **HTTP** (announcements,
+admin, ETSI GS QKD 014/020) and the **binary TCP wire** of the QKC↔QKC hot
+path (see [docs/ipc.md](docs/ipc.md)).
 
 | Crate | Role |
 |-------|------|
 | [`qkc`](qkc/) | Quantum Key Channel: per-link key transport (QKD via ETSI 014 KMEs, or PQC ML-KEM), per-frame authentication, multipath forwarding, in-situ QKD rate estimation |
 | [`orr`](orr/) | Onion Routing Router: relays key material between nodes, optional onion path privacy on top of the end-to-end seal |
-| [`sdn`](sdn/) | Network controller: topology inferred from module announcements, routing tables, rate allocation (proportional fairness by default) |
-| [`dkms`](dkms/) | Key Management Service facing the SAEs: ETSI GS QKD 014/020 endpoints, RAM-only key buffers, end-to-end sealing of transport material |
+| [`sdn`](sdn/) | Network controller: topology inferred from module announcements, forwarding tables (WCMP), rate allocation (proportional fairness by default) |
+| [`dkms`](dkms/) | Key Management Service facing the SAEs: ETSI GS QKD 014/020 endpoints, RAM-only key buffers, end-to-end seal on every transport key |
 | [`quditto`](quditto/) | Simulated QKD link (an ETSI 014 KME with a configurable rate model) for tests and demos |
 | [`etsi`](etsi/) | ETSI GS QKD 014/020 message types and validation |
 | [`wire`](wire/) | Binary TCP wire format shared by QKC and ORR |
@@ -28,13 +29,16 @@ protocol** (see [docs/ipc.md](docs/ipc.md)).
 | [`proto/`](proto/) | Protobuf service definitions (compiled by `common/build.rs`) |
 | [`tests/loadgen`](tests/loadgen/) | `sae_load`: an SAE load client over mTLS, used by the test harnesses |
 
-Request path:
+Transport-key path (the buffers that fill in the background):
 
 ```
-SAE → DKMS → ORR → QKC → (peer node) → QKC → ORR → DKMS → SAE
+DKMS → ORR → QKC → (peer node) → QKC → ORR → DKMS
                 ↕
               SDN (topology, routing, rates)
 ```
+
+A SAE request is served DKMS → DKMS directly over ETSI-020, wrapped with
+one of those transport keys; it never crosses the ORR or the QKCs.
 
 ## Building
 
@@ -44,7 +48,7 @@ Requires Rust 1.88 (pinned in `rust-toolchain.toml`), `protobuf-compiler`,
 ```bash
 cargo build --release              # whole workspace
 cargo build --release -p qkc       # one module
-make check                         # fmt + clippy -D warnings + rustdoc + renderer tests + tests (no skips)
+make check                         # fmt + clippy -D warnings + rustdoc + Markdown links + renderer tests + tests (no skips)
 make deny                          # cargo-deny: advisories and licences
 make doc-open                      # API reference (rustdoc, private items included) in the browser
 ```
@@ -79,17 +83,23 @@ notes below.
 
 ## Documentation
 
-- API reference: `make doc-open` builds the workspace rustdoc with a landing
-  page; the `docs` workflow publishes the same tree to GitHub Pages on every
-  push to `main`. Each crate root (`<crate>/src/lib.rs`) opens with what the
-  module is and how it talks to the others.
-- [docs/architecture.md](docs/architecture.md): modules and data flow.
-- [docs/ipc.md](docs/ipc.md): gRPC schemas and the binary wire format.
-- [docs/deployment.md](docs/deployment.md) and [docker/README.md](docker/README.md): running a node.
-- [docs/SECURITY.md](docs/SECURITY.md): trust model and the hardening phases.
-- [docs/engineering-notes.md](docs/engineering-notes.md): design invariants,
-  defaults and the gotchas measured along the way. Read it before touching
-  the topology, rate or key-material paths.
+The map is [docs/README.md](docs/README.md). The short version:
+
+- **Run a node**: [docs/deployment.md](docs/deployment.md), then
+  [docker/examples/quick_start.md](docker/examples/quick_start.md) for the
+  commands and [docker/README.md](docker/README.md) for the full procedure.
+- **Understand the design**: [docs/architecture.md](docs/architecture.md)
+  (what a node is and how a key travels end to end),
+  [docs/auto-configuration.md](docs/auto-configuration.md) (how the topology
+  builds itself), [docs/ipc.md](docs/ipc.md) (every RPC, route and frame),
+  one README per module (`qkc/`, `orr/`, `dkms/`, `sdn/`, `quditto/`),
+  [docs/SECURITY.md](docs/SECURITY.md) (trust model, Spanish) and
+  [docs/engineering-notes.md](docs/engineering-notes.md) (invariants, defaults
+  and the gotchas measured along the way).
+- **See it measured**: [docs/results/campaign-2026-09.md](docs/results/campaign-2026-09.md),
+  the CESGA campaign at N = 10 to 100 with every security default on.
+- **Change the code**: `make doc-open` for the rustdoc (private items
+  included), `make check` for the gate CI runs.
 
 ## License
 
