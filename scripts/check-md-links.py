@@ -19,7 +19,10 @@ import sys
 import unicodedata
 from pathlib import Path
 
-ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+# `safe.directory=*`: the CI gate runs inside a container as root over a
+# checkout owned by another uid, which git otherwise refuses as "dubious".
+GIT = ["git", "-c", "safe.directory=*"]
+ROOT = Path(subprocess.check_output(GIT + ["rev-parse", "--show-toplevel"], text=True).strip())
 
 LINK_RE = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 AUTOLINK_RE = re.compile(r"<((?:\./|\.\./|/)[^>\s]+)>")
@@ -118,9 +121,9 @@ def main(argv):
     else:
         # Tracked files plus untracked-but-not-ignored ones, so a document
         # written and not yet added is checked before it is committed.
-        tracked = subprocess.check_output(["git", "ls-files", "*.md", "**/*.md"], text=True, cwd=ROOT)
+        tracked = subprocess.check_output(GIT + ["ls-files", "*.md", "**/*.md"], text=True, cwd=ROOT)
         untracked = subprocess.check_output(
-            ["git", "ls-files", "--others", "--exclude-standard", "*.md", "**/*.md"], text=True, cwd=ROOT
+            GIT + ["ls-files", "--others", "--exclude-standard", "*.md", "**/*.md"], text=True, cwd=ROOT
         )
         files = sorted({(ROOT / p).resolve() for p in (tracked + untracked).split()})
     total = 0
