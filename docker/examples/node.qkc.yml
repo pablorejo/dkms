@@ -1,46 +1,46 @@
-# node.yml para un QKC — lo único que edita la institución.
-# Sin QKD real: usa enlaces "pqc" (los dos QKC derivan las claves con ML-KEM).
+# node.yml for a QKC — the only thing the institution edits.
+# Without real QKD: use "pqc" links (the two QKCs derive the keys with ML-KEM).
 qkc_id: 1
 
-# La SDN se entera sola de este nodo y de sus enlaces: no hay que darlo de alta
-# en ningún sitio. Omite sdn_url solo si prefieres gestionar la topología a mano.
-sdn_url: "10.0.0.100"          # HTTP admin de la SDN; puerto por defecto 19002.
-                               # Sin esquema sale https:// (control_tls, default
-                               # on): necesita qkc-<id>.crt/.key + net-ca.crt en
-                               # certs_dir. `control_tls: false` = en claro.
-advertise_ip: "10.0.0.11"      # IP por la que la SDN puede alcanzar a ESTE QKC
-# sdn_announce_secs: 30        # cada cuánto reanuncio (es también el heartbeat)
+# The SDN learns about this node and its links on its own: there is nowhere to
+# register it. Omit sdn_url only if you prefer to manage the topology by hand.
+sdn_url: "10.0.0.100"          # HTTP admin of the SDN; default port 19002.
+                               # Without a scheme it comes out https:// (control_tls,
+                               # default on): needs qkc-<id>.crt/.key + net-ca.crt in
+                               # certs_dir. `control_tls: false` = in the clear.
+advertise_ip: "10.0.0.11"      # IP through which the SDN can reach THIS QKC
+# sdn_announce_secs: 30        # how often I re-announce (it is also the heartbeat)
 
-# key_size_bits: 256          # bits de clave OTP; DEBE coincidir en ambos extremos
+# key_size_bits: 256          # OTP key bits; MUST match at both ends
 
-# Con quién tienes fibra. Es lo único de topología que declara un QKC: el
-# resto (dónde está cada uno, qué ORR cuelga de quién) lo monta la SDN.
+# Who you have fibre with. It is the only topology a QKC declares: the rest
+# (where everyone is, which ORR hangs off whom) is assembled by the SDN.
 links:
   - neighbor_id: 2
-    # OPCIONAL en un enlace pqc si hay sdn_url: la dirección no viaja en el
-    # anuncio —la SDN ya la sabe, cada QKC anuncia la suya— y vuelve en la
-    # lista de peers. Déjala fuera y el enlace se monta cuando la SDN conteste;
-    # ponla y se monta en el arranque, sin depender de ella. Un enlace qkd la
-    # exige: la SDN no crea enlaces qkd.
-    # neighbor_addr: "10.0.0.12"   # IP (o IP:puerto); puerto peer por defecto 20000
-    type: pqc                    # pqc = ML-KEM entre vecinos | qkd = KME por ETSI-014
-    # --- si type: qkd (KME: hardware real, o un quditto si no lo tienes) ---
-    # kme_url: "https://mi-nodo-qkd:443"   # o "http://10.0.0.50:20010" para un quditto
-    # Modelo físico del enlace. El QKC no lo usa: se lo comunica a la SDN, que
-    # dimensiona la arista con r0·10^(−alpha·d/10). Con hardware son los datos
-    # de tu fibra; con un quditto, los mismos que le configuraste a él.
-    # Los enlaces pqc no llevan capacidad, así que aquí sobran.
+    # OPTIONAL on a pqc link if there is an sdn_url: the address does not travel
+    # in the announcement —the SDN already knows it, every QKC announces its
+    # own— and comes back in the peer list. Leave it out and the link is built
+    # when the SDN answers; set it and it is built at boot, without depending
+    # on the SDN. A qkd link requires it: the SDN does not create qkd links.
+    # neighbor_addr: "10.0.0.12"   # IP (or IP:port); default peer port 20000
+    type: pqc                    # pqc = ML-KEM between neighbours | qkd = KME over ETSI-014
+    # --- if type: qkd (KME: real hardware, or a quditto if you have none) ---
+    # kme_url: "https://mi-nodo-qkd:443"   # or "http://10.0.0.50:20010" for a quditto
+    # Physical model of the link. The QKC does not use it: it passes it to the
+    # SDN, which sizes the edge with r0·10^(−alpha·d/10). With hardware these
+    # are your fibre's figures; with a quditto, the same ones you configured on it.
+    # pqc links carry no capacity, so here they are superfluous.
     # r0: 2000
     # alpha: 0.2
     # distance_km: 5
-    # --- ajustes PQC opcionales (defaults sensatos) ---
+    # --- optional PQC settings (sensible defaults) ---
     # pqc_suite: ml-kem-768
-    # pqc_rekey_keys: 1000       # rota el secreto cada N claves
-    # pqc_rekey_secs: 3600       # ...o cada T segundos (lo que llegue primero)
+    # pqc_rekey_keys: 1000       # rotates the secret every N keys
+    # pqc_rekey_secs: 3600       # ...or every T seconds (whichever comes first)
     # pqc_rekey_lookahead: 2
 
-# La SDN le empuja la tabla de forwarding automáticamente; no se configura aquí.
-# ports:                        # override solo si varios QKC comparten host
+# The SDN pushes the forwarding table to it automatically; it is not configured here.
+# ports:                        # override only if several QKCs share a host
 #   peer: 20000
 #   local: 20001
 #   admin: 20002

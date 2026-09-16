@@ -1,23 +1,23 @@
-# node.yml para la SDN central — lo mantiene el operador.
+# node.yml for the central SDN — maintained by the operator.
 #
-# **No lleva topología.** La SDN arranca con el grafo vacío y lo construye con
-# lo que cada módulo le cuenta al registrarse: el QKC dice quién es y con qué
-# vecinos tiene enlace, el ORR de qué QKC cuelga, el DKMS de qué ORR y qué SAE
-# atiende. Dar de alta una institución no exige tocar nada aquí ni reiniciar.
+# **It carries no topology.** The SDN boots with an empty graph and builds it
+# from what each module tells it when it registers: the QKC says who it is and
+# who its neighbours are, the ORR which QKC it hangs off, the DKMS which ORR
+# and which SAEs it serves. Adding an institution: no change here, no restart.
 #
-# Para que eso ocurra, cada módulo necesita su `sdn_url`/`sdn_endpoint` y su
-# `advertise_ip` — ver los node.yml de ejemplo de cada rol.
+# For that to happen, each module needs its `sdn_url`/`sdn_endpoint` and its
+# `advertise_ip` — see the example node.yml of each role.
 
 # listen_ip: "0.0.0.0"
 # ports:
-#   grpc: 19000          # ORR y DKMS
-#   http: 19002          # registro de módulos + admin
+#   grpc: 19000          # ORR and DKMS
+#   http: 19002          # module registration + admin
 #   metrics: 19010
 
-# mcf_period_ms: 5000    # cada cuánto se recalcula el LP como latido; los
-#                        # cambios de topología lo disparan igualmente
+# mcf_period_ms: 5000    # how often the rates are recomputed; a topology
+#                        # change is picked up by the next tick
 
-# presence_ttl_secs: 90  # un módulo que deja de anunciarse más de este tiempo
-#                        # sale de la topología, y sus enlaces con él. Debe
-#                        # superar el sdn_announce_secs de los módulos (30 por
-#                        # defecto): son 3 anuncios perdidos. 0 lo desactiva.
+# presence_ttl_secs: 90  # a module that stops announcing itself for longer than
+#                        # this leaves the topology, and its links with it. It
+#                        # must exceed the modules' sdn_announce_secs (30 by
+#                        # default): that is 3 lost announcements. 0 disables it.

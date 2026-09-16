@@ -1,5 +1,5 @@
-# Despliegue de un DKMS. Copia tu node.yml + la carpeta certs/ (ver gen-certs.sh)
-# junto a este fichero.
+# Deployment of a DKMS. Copy your node.yml + the certs/ folder (see gen-certs.sh)
+# next to this file.
 services:
   dkms:
     image: ${IMAGE_PREFIX:-ORG}/dkms:${TAG:-latest}

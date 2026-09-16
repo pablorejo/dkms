@@ -1,6 +1,6 @@
-# Despliegue de la SDN central. La SDN NO lleva topología: la infiere de los
-# anuncios de los módulos (POST /register/{qkc,orr,dkms}); su node.yml son solo
-# sus direcciones de escucha y timers (ver examples/node.sdn.yml).
+# Deployment of the central SDN. The SDN carries NO topology: it infers it from
+# the modules' announcements (POST /register/{qkc,orr,dkms}); its node.yml is only
+# its listen addresses and timers (see examples/node.sdn.yml).
 services:
   sdn:
     image: ${IMAGE_PREFIX:-ORG}/sdn:${TAG:-latest}
@@ -8,6 +8,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
-      # certs: necesarios con control_tls (default ON) en su node.yml (mTLS en el
-      # admin HTTP/gRPC — recomendado en multi-host): sdn.crt/.key + net-ca.crt.
+      # certs: needed with control_tls (default ON) in its node.yml (mTLS on the
+      # admin HTTP/gRPC — recommended on multi-host): sdn.crt/.key + net-ca.crt.
       - ./certs:/config/certs:ro

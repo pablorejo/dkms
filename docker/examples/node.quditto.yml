@@ -1,28 +1,28 @@
-# node.yml para un quditto — simulador de enlace QKD.
+# node.yml for a quditto — QKD link simulator.
 #
-# Sirve ETSI-014 a los QKC de UN enlace, generando claves aleatorias a
+# It serves ETSI-014 to the QKCs of ONE link, generating random keys at
 #
-#     R(d) = r0 · 10^(−alpha·d/10)   claves/s
+#     R(d) = r0 · 10^(−alpha·d/10)   keys/s
 #
-# Solo lo necesitas si no tienes hardware QKD. Los QKC de los dos extremos
-# apuntan a este mismo `kme_url`, y de ahí que ambos obtengan el mismo material.
-# Los mismos r0/alpha/distance_km van declarados en el `node.yml` de esos dos
-# QKC, que son quienes se los comunican a la SDN para su modelo de capacidad:
-# si no coinciden, la SDN reparte caudal sobre una capacidad que el enlace no da.
+# You only need it if you have no QKD hardware. The QKCs at both ends point at
+# this same `kme_url`, which is why both obtain the same material.
+# The same r0/alpha/distance_km are declared in the `node.yml` of those two
+# QKCs, which are the ones that pass them to the SDN for its capacity model:
+# if they do not match, the SDN allocates flow over a capacity the link does not deliver.
 
-r0: 2000                   # tasa base en claves/s a distancia 0
-alpha: 0.2                 # atenuación de la fibra en dB/km
-distance_km: 5             # longitud del enlace simulado
+r0: 2000                   # base rate in keys/s at distance 0
+alpha: 0.2                 # fibre attenuation in dB/km
+distance_km: 5             # length of the simulated link
 
-# max_buffer: 8192         # claves en el buffer; lleno, descarta los ticks nuevos
-# key_size_bits: 256       # DEBE coincidir con el key_size_bits de los QKC
+# max_buffer: 8192         # keys in the buffer; when full, new ticks are discarded
+# key_size_bits: 256       # MUST match the key_size_bits of the QKCs
 # listen_ip: "0.0.0.0"
 # ports:
 #   http: 20010
 
-# El ETSI-014 sirve mTLS POR DEFECTO (por él viajan los pads OTP): certs de
-# gen-certs.sh en ./certs (quditto.crt/.key + net-ca.crt; `cert_name` para otro
-# nombre) y los QKC dialan https con su cert de nodo. `tls: false` lo deja en
-# claro — SOLO si el QKC consumidor corre en esta misma máquina.
+# The ETSI-014 serves mTLS BY DEFAULT (the OTP pads travel over it): certs from
+# gen-certs.sh in ./certs (quditto.crt/.key + net-ca.crt; `cert_name` for another
+# name) and the QKCs dial https with their node cert. `tls: false` leaves it in
+# the clear — ONLY if the consuming QKC runs on this same machine.
 # tls: true
 # cert_name: quditto

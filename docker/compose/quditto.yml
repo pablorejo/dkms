@@ -1,24 +1,24 @@
-# Despliegue de un quditto — simulador de enlace QKD.
+# Deployment of a quditto — QKD link simulator.
 #
-# Solo hace falta si NO tienes hardware QKD y quieres enlaces `type: qkd` de
-# todas formas. Un quditto sirve a UN enlace: los QKC de sus dos extremos
-# apuntan al mismo `kme_url`, y así ambos obtienen el mismo material.
+# Only needed if you have NO QKD hardware and want `type: qkd` links anyway.
+# A quditto serves ONE link: the QKCs at its two ends point at the same
+# `kme_url`, and that is how both obtain the same material.
 #
 #   docker compose -f quditto.yml pull && docker compose -f quditto.yml up -d
 #   docker compose -f quditto.yml logs -f
 #
-# Comprobación rápida (puerto por defecto 20010; mTLS por defecto, así que
-# hace falta el cert de cliente — con `tls: false` en node.yml vale http):
+# Quick check (default port 20010; mTLS by default, so the client cert is
+# needed — with `tls: false` in node.yml plain http will do):
 #   curl -s --cert certs/qkc-1.crt --key certs/qkc-1.key --cacert certs/net-ca.crt \
 #        https://localhost:20010/api/v1/keys/1/status
 services:
   quditto:
     image: ${IMAGE_PREFIX:-ORG}/quditto:${TAG:-latest}
-    network_mode: host                 # usa la red de la máquina (sin mapear puertos)
+    network_mode: host                 # uses the machine's network (no port mapping)
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
-      # certs: el ETSI-014 sirve mTLS POR DEFECTO (por él viajan los pads
-      # OTP): quditto.crt/.key + net-ca.crt de gen-certs.sh. Solo sobra con
-      # `tls: false` en node.yml (QKC co-localizado).
+      # certs: the ETSI-014 serves mTLS BY DEFAULT (the OTP pads travel over
+      # it): quditto.crt/.key + net-ca.crt from gen-certs.sh. Only superfluous
+      # with `tls: false` in node.yml (co-located QKC).
       - ./certs:/config/certs:ro

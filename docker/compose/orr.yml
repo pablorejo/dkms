@@ -1,4 +1,4 @@
-# Despliegue de un ORR. Copia tu node.yml junto a este fichero.
+# Deployment of an ORR. Copy your node.yml next to this file.
 services:
   orr:
     image: ${IMAGE_PREFIX:-ORG}/orr:${TAG:-latest}
@@ -6,6 +6,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./node.yml:/config/node.yml:ro
-      # Certificado de nodo del ORR + net-ca.crt: su gRPC va con mTLS por
-      # defecto (gen-certs.sh <orr_id> <ip> ./certs).
+      # Node certificate of the ORR + net-ca.crt: its gRPC runs with mTLS by
+      # default (gen-certs.sh <orr_id> <ip> ./certs).
       - ./certs:/config/certs:ro

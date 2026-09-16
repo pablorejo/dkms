@@ -1,32 +1,32 @@
-# node.yml para un ORR.
+# node.yml for an ORR.
 orr_id: "orr_1"
 qkc_id: 1
-# El DKMS al que sirve (identidad del SAN de su cert): es la reja de
-# `SendMessage`/`StreamDeliveries`. Sin esto el renderer avisa y el ORR
-# acepta cualquier cert de la net-ca en su plano de aplicación.
+# The DKMS it serves (identity from the SAN of its cert): it is the gate of
+# `SendMessage`/`StreamDeliveries`. Without this the renderer warns and the ORR
+# accepts any net-ca cert on its application plane.
 served_dkms: ["dkms-1"]
 
-# Dónde está SU QKC. Si el ORR y el QKC están en la MISMA máquina, deja
-# localhost; si están en máquinas distintas, pon la IP del QKC.
-qkc_addr: "127.0.0.1:20001"        # local_listen del QKC (puerto 20001)
+# Where ITS QKC is. If the ORR and the QKC are on the SAME machine, leave
+# localhost; if they are on different machines, put the QKC's IP.
+qkc_addr: "127.0.0.1:20001"        # local_listen of the QKC (port 20001)
 
-sdn_url: "https://10.0.0.100:19000" # gRPC de la SDN central (mTLS por defecto;
-                                    # http:// solo con control_tls: false en todos)
-advertise_ip: "10.0.0.11"          # IP por la que la SDN alcanza a ESTE ORR;
-                                   # con ella el ORR se da de alta solo
-# sdn_announce_secs: 30            # cada cuánto reanuncia (es su heartbeat)
+sdn_url: "https://10.0.0.100:19000" # gRPC of the central SDN (mTLS by default;
+                                    # http:// only with control_tls: false everywhere)
+advertise_ip: "10.0.0.11"          # IP through which the SDN reaches THIS ORR;
+                                   # with it the ORR registers itself
+# sdn_announce_secs: 30            # how often it re-announces (it is its heartbeat)
 
-# Peers ORR (una entrada por cada otro ORR de la red).
+# ORR peers (one entry per every other ORR of the network).
 peers:                             # orr_id -> qkc_id
   orr_2: 2
-peer_grpc_addrs:                   # orr_id -> URL gRPC del ORR peer (puerto 20003)
+peer_grpc_addrs:                   # orr_id -> gRPC URL of the peer ORR (port 20003)
   orr_2: "http://10.0.0.12:20003"
 
-# default_max_hops: 0              # 0 = relay (default): el DKMS ya sella e2e.
-                                   # 1 / >=2 / -1 añaden cebolla ORR<->ORR encima.
+# default_max_hops: 0              # 0 = relay (default): the DKMS already seals e2e.
+                                   # 1 / >=2 / -1 add ORR<->ORR onion on top.
 
-# El gRPC de este ORR (su DKMS y los ORR de fuera) va con mTLS POR DEFECTO:
-# necesita certs/<orr_id>.crt/.key + net-ca.crt (gen-certs.sh orr_1 <ip>
-# ./certs, ML-DSA-65) en certs_dir. Sin ellos no arranca, y lo dice.
+# This ORR's gRPC (its DKMS and the outside ORRs) runs with mTLS BY DEFAULT:
+# it needs certs/<orr_id>.crt/.key + net-ca.crt (gen-certs.sh orr_1 <ip>
+# ./certs, ML-DSA-65) in certs_dir. Without them it does not start, and says so.
 # grpc_tls: true
-# certs_dir: "/config/certs"       # donde el compose monta ./certs
+# certs_dir: "/config/certs"       # where the compose mounts ./certs

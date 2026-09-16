@@ -1,38 +1,38 @@
-# node.yml para un DKMS.
+# node.yml for a DKMS.
 node_id: "dkms-1"
 
-# IP de ESTA máquina, alcanzable por los otros DKMS (para el mTLS ETSI-020 y
-# el socket de ACK). Debe coincidir con el SAN del certificado (ver gen-certs.sh).
-advertise_ip: "10.0.0.11"
+# IP of THIS machine, reachable by the other DKMSs: the SDN hands it out as my
+# ETSI-020 endpoint (20006), over which their ACKs come back (20009 = legacy, off).
+advertise_ip: "10.0.0.11"      # must match the certificate's SAN (see gen-certs.sh)
 
-# Dónde está SU ORR (localhost si co-locado; IP si en otra máquina).
+# Where ITS ORR is (localhost if co-located; IP if on another machine).
 orr_addr: "127.0.0.1:20003"
-# orr_tls: true                # habla https:// al ORR con el cert de nodo (default);
-                               # false SÓLO con grpc_tls: false en el ORR
+# orr_tls: true                # talks https:// to the ORR with the node cert (default);
+                               # false ONLY with grpc_tls: false in the ORR
 
-sdn_endpoint: "https://10.0.0.100:19000"   # SDN con mTLS por defecto (control_tls)
-orr_id: "orr_1"                # id del ORR del que cuelgo. La SDN me coloca
-                               # en el grafo por él; su dirección no vale de id.
-# sdn_announce_secs: 30        # cada cuánto reanuncio (es mi heartbeat)
+sdn_endpoint: "https://10.0.0.100:19000"   # SDN with mTLS by default (control_tls)
+orr_id: "orr_1"                # id of the ORR I hang off. The SDN places me in
+                               # the graph by it; its address is no use as an id.
+# sdn_announce_secs: 30        # how often I re-announce (it is my heartbeat)
 
-# Peers DKMS (una entrada por cada otro DKMS con el que intercambia claves).
+# DKMS peers (one entry per every other DKMS it exchanges keys with).
 peers:
   dkms-2:
-    endpoint: "10.0.0.12"    # IP (o IP:puerto) del DKMS peer; puerto peer por defecto 20006
-    orr_id: "orr_2"          # id del ORR de ese peer (transporte por ORR)
+    endpoint: "10.0.0.12"    # IP (or IP:port) of the peer DKMS; default peer port 20006
+    orr_id: "orr_2"          # id of that peer's ORR (transport over ORR)
 
 # security_level: qkd_prefer   # strict_qkd | qkd_prefer | no_worry
-# fill_rate: 0                 # floor de llenado keys/s (0 = solo lo que asigne la SDN)
+# fill_rate: 0                 # fill floor in keys/s (0 = only what the SDN allocates)
 
-# Certificados: monta net-ca.crt + sae-ca.crt + <node_id>.crt + <node_id>.key en
-# /config/certs (ver docker/gen-certs.sh y docs/SECURITY.md §2: net-ca firma
-# nodos, sae-ca firma SAEs). Ruta configurable con certs_dir.
+# Certificates: mount net-ca.crt + sae-ca.crt + <node_id>.crt + <node_id>.key in
+# /config/certs (see docker/gen-certs.sh and docs/SECURITY.md §2: net-ca signs
+# nodes, sae-ca signs SAEs). Path configurable with certs_dir.
 # certs_dir: /config/certs
 
-# SAEs que ESTE nodo sirve. No es opcional: el DKMS autoriza cada petición
-# ETSI-014 contra esta lista (fail-closed) y la anuncia a la SDN. Sin ella,
-# toda petición SAE recibe 404 UnknownSae.
+# SAEs that THIS node serves. Not optional: the DKMS authorises every ETSI-014
+# request against this list (fail-closed) and announces it to the SDN. Without
+# it, every SAE request gets 404 UnknownSae.
 sae_bindings:
   sae_1: dkms-1
-# sae_authorization: true      # false SOLO si la pertenencia SAE->DKMS es
-                               # puramente dinámica vía SDN (no recomendado)
+# sae_authorization: true      # false ONLY if the SAE->DKMS membership is
+                               # purely dynamic via the SDN (not recommended)
