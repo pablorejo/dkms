@@ -10,7 +10,7 @@ with `QUDITTO_*` environment fallbacks; there is no config file.
 
 The name and the idea come from [Quditto](https://github.com/Networks-it-uc3m/Quditto),
 the QKD-network digital-twin platform of the Universidad Carlos III de
-Madrid; the quditto work in this project was led by Pedro Otero García.
+Madrid; the quditto work in this project was led by Pedro Blanco Casal.
 This crate was written from scratch and shares no code with the UC3M
 platform — see [NOTICE](../NOTICE).
 

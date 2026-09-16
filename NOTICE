@@ -9,7 +9,7 @@ Authors
 Pablo Pío Rejo Iglesias — principal author: design and implementation of
 the system and of this Rust codebase.
 
-Pedro Otero García — principal author of quditto, the simulated QKD link
+Pedro Blanco Casal — principal author of quditto, the simulated QKD link
 (an ETSI GS QKD 014 key server without quantum hardware) that the
 `quditto` crate in this repository implements.
 
